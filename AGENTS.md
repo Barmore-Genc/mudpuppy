@@ -38,17 +38,22 @@ These mirror the product's hard requirements and apply to the code itself:
 
 ## Repository layout
 
-Still being established. Expected shape for a Rust CLI + TUI (see PLAN.md for
-detail):
+Bootstrapped (see PLAN.md for detail). The crate is split into a library (the
+testable core) and a thin binary:
 
-- `src/` — application code (not written yet). Planned modules: `domain` (schema
-  types), `source` (local-`git` / PR-`gh` diff providers), `diff` (hand-rolled
-  unified-diff parser + anchoring), `store` (load/merge/save, locking, the turn
-  protocol), `session` (repo/target resolution + resume), `tui` (ratatui app),
-  `agent` + `cli` (clap command surface).
-- `Cargo.toml` — manifest (not added yet; no source means nothing to build so
-  far). When source lands, CI will build and test it.
-- `.github/workflows/` — CI: formatting, lints, and tests.
+- `src/lib.rs` + `src/main.rs` — library root and the thin binary that parses
+  the command tree and dispatches into it.
+- `src/` modules: `domain` (schema types — implemented and tested), `cli` (clap
+  command surface — implemented), and skeletons for `source` (local-`git` /
+  PR-`gh` diff providers), `diff` (hand-rolled unified-diff parser + anchoring),
+  `store` (load/merge/save, locking, the turn protocol), `session` (repo/target
+  resolution + resume), `tui` (ratatui app), and `agent` (the `agent`
+  subcommands). Skeleton modules carry doc comments describing their job and
+  fill in as their milestone (PLAN.md §10) lands.
+- `Cargo.toml` — manifest. Dependencies are added per-milestone as they're first
+  used, not all up front; see the note there and PLAN.md §2.
+- `.github/workflows/` — CI: formatting, lints, tests, docs, and a security
+  audit. The cargo jobs activate automatically now that `Cargo.toml` exists.
 
 When you add source, keep modules focused. Update this file, the README, and
 PLAN.md if you make a structural decision worth knowing.
