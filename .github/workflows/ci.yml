@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Until a Cargo project exists, the cargo-based jobs below have nothing to do.
+  # This gate lets them no-op cleanly during bootstrap and switch on automatically
+  # once Cargo.toml lands, so the workflow stays green either way.
+  detect:
+    name: Detect Cargo project
+    runs-on: ubuntu-latest
+    outputs:
+      has_cargo: ${{ steps.check.outputs.has_cargo }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f Cargo.toml ]; then
+            echo "has_cargo=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cargo=false" >> "$GITHUB_OUTPUT"
+            echo "No Cargo.toml yet — skipping cargo jobs."
+          fi
+
+  fmt:
+    name: rustfmt
+    needs: detect
+    if: needs.detect.outputs.has_cargo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    needs: detect
+    if: needs.detect.outputs.has_cargo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    needs: detect
+    if: needs.detect.outputs.has_cargo == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-targets --all-features --verbose
+      - run: cargo test --all-features --verbose
+
+  docs:
+    name: doc
+    needs: detect
+    if: needs.detect.outputs.has_cargo == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --no-deps --all-features
+
+  # A single required check that's easy to mark as required in branch protection:
+  # it passes when every dependent job either succeeded or was correctly skipped.
+  ci-ok:
+    name: CI passed
+    needs: [fmt, clippy, test, docs]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify no job failed
+        run: |
+          results='${{ needs.fmt.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.docs.result }}'
+          echo "Job results: $results"
+          for r in $results; do
+            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+              echo "A required job did not pass."
+              exit 1
+            fi
+          done
+          echo "All required jobs passed or were skipped."

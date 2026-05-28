@@ -1,0 +1,35 @@
+name: Security audit
+
+on:
+  push:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f Cargo.lock ] || [ -f Cargo.toml ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "No Cargo manifest yet — skipping audit."
+          fi
+      - if: steps.check.outputs.run == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - if: steps.check.outputs.run == 'true'
+        run: cargo install cargo-audit --locked
+      - if: steps.check.outputs.run == 'true'
+        run: cargo audit
