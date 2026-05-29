@@ -12,6 +12,10 @@ on:
 
 permissions:
   contents: read
+  # audit-check posts check annotations on PRs and opens issues for
+  # advisories on push.
+  checks: write
+  issues: write
 
 jobs:
   audit:
@@ -28,8 +32,6 @@ jobs:
             echo "No Cargo manifest yet — skipping audit."
           fi
       - if: steps.check.outputs.run == 'true'
-        uses: dtolnay/rust-toolchain@stable
-      - if: steps.check.outputs.run == 'true'
-        run: cargo install cargo-audit --locked
-      - if: steps.check.outputs.run == 'true'
-        run: cargo audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
