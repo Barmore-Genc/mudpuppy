@@ -257,7 +257,7 @@ The workflow — modeled on willet-cloud's screenshot/approval loop — is:
 On a PR, the `snapshots` CI job runs the check; on any pixel change it publishes
 a review bundle (expected | actual | diff `index.html`) to S3 under an
 unguessable capability path and comments the link. A maintainer reviews it and
-comments `approve baseline`, which copies the **exact reviewed bytes** back from
+comments `approve snapshots`, which copies the **exact reviewed bytes** back from
 the bundle and commits them (no re-render, SHA-pinned). This reuses willet-cloud's
 architecture and the same org secrets/vars (`CI_S3_*`, `CI_APPROVE_TOKEN`) — see
 `e2e/README.md`. It satisfies the workflow rule: baselines are only ever

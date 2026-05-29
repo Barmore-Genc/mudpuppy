@@ -1,4 +1,4 @@
-# Comment `approve baseline` on a PR to accept the reviewed snapshot changes.
+# Comment `approve snapshots` on a PR to accept the reviewed snapshot changes.
 #
 # This file is read from the DEFAULT branch (issue_comment always is), so a PR
 # author cannot alter the approval logic by editing it on their branch.
@@ -11,7 +11,7 @@
 #
 # Requires (org-level): secrets CI_APPROVE_TOKEN, CI_S3_KEY_ID, CI_S3_APP_KEY;
 # vars CI_S3_ENDPOINT, CI_S3_REGION, CI_S3_BUCKET. Same-repo PRs only.
-name: Approve snapshot baseline
+name: Approve snapshots
 
 on:
   issue_comment:
@@ -25,7 +25,7 @@ jobs:
       github.event.issue.pull_request &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
       github.event.comment.user.type != 'Bot' &&
-      startsWith(github.event.comment.body, 'approve baseline')
+      startsWith(github.event.comment.body, 'approve snapshots')
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -36,11 +36,11 @@ jobs:
           BODY: ${{ github.event.comment.body }}
         run: |
           set -euo pipefail
-          # Must equal the command exactly, so "approve baseline please ..."
+          # Must equal the command exactly, so "approve snapshots please ..."
           # does not trigger an approval.
           trimmed="$(printf '%s' "$BODY" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-          if [[ "$trimmed" != "approve baseline" ]]; then
-            echo "Comment is not exactly 'approve baseline' — ignoring." >&2
+          if [[ "$trimmed" != "approve snapshots" ]]; then
+            echo "Comment is not exactly 'approve snapshots' — ignoring." >&2
             exit 1
           fi
 
