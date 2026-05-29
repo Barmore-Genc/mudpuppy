@@ -1,7 +1,7 @@
 //! Shared Layer-2 e2e harness: drive the real binary through a PTY against a
 //! throwaway fixture git repo. Used by both `e2e.rs` (the coarse PTY smoke
-//! suite) and `image_diff.rs` (the cast emitter feeding the pinned-container
-//! pixel oracle). See `../../TESTING.md` and `../../e2e/README.md`.
+//! suite) and `image_diff.rs` (the SVG emitter feeding the `resvg` pixel
+//! oracle). See `../../TESTING.md` and `../../e2e/README.md`.
 
 // Each integration-test binary `mod common;`-includes this file and uses a
 // different subset, so some items look unused per-crate.

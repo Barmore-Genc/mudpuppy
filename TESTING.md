@@ -19,7 +19,7 @@ We use two layers, with deliberately different jobs:
 | Layer | Tool | Job | Speed | Runs in CI |
 | --- | --- | --- | --- | --- |
 | **Unit / integration** | `ratatui` `TestBackend` + `insta` | Correctness of views and key→state→render, in-memory | Fast, deterministic | Every push |
-| **End-to-end** | Real binary in a **pinned Docker container** → image-diff snapshots | Prove the shipped artifact actually works | Slow, few scenarios | Every push (Tier 1–2) |
+| **End-to-end** | Real binary → `resvg` image-diff snapshots (pinned font + renderer) | Prove the shipped artifact actually works | Slow, few scenarios | Every push (Tier 1–2) |
 
 The rule that keeps this sane: **the e2e layer only tests the seams the unit
 layer mocks away.** It does not re-test behavior. Edge cases live in layer 1.
@@ -66,7 +66,7 @@ navigation and per-widget layout/content/style.
 
 ---
 
-## Layer 2 — end-to-end (real binary, image-diff in a pinned container)
+## Layer 2 — end-to-end (real binary, image-diff with a pinned renderer)
 
 Drive the **real compiled binary** in a headless terminal against a **real
 fixture git repo**, capture the rendered screen as an image, and diff it against
@@ -74,30 +74,32 @@ a committed baseline. No assumptions, no mocks — confirm that once shipped, th
 end-user executable works. This is **high-level smoke testing only**; assume all
 layer-1 tests pass.
 
-### Image diffing is exact-match, made viable by a pinned container
+### Image diffing is exact-match, made viable by pinning the renderer + font
 
-We run capture inside a Docker container with everything pinned (OS, libc,
-fontconfig/freetype, font files, theme, terminal/renderer version). Inside that
-box we aim for **exact match (zero tolerance)** — a failure is then unambiguous,
-with no threshold tuning.
+We rasterize the captured screen with a **pinned renderer (`resvg`) and a
+vendored font file**, then aim for **exact match (zero tolerance)** — a failure
+is then unambiguous, with no threshold tuning.
 
-The container removes *environmental* drift. It does **not** remove three other
-sources of nondeterminism, which we handle explicitly:
+Originally this ran inside a pinned `linux/amd64` Docker container to freeze the
+whole environment (OS, libc, fontconfig/freetype, font files, toolchain). We then
+measured whether the container was actually load-bearing for the pixels: render
+natively on macOS/arm64 and diff against the amd64 baselines. Result — **AE=0 on
+every scenario.** `resvg` is a pure IEEE-float rasterizer, so with the font file
+and resvg version held constant, arch and OS don't move a pixel. The container was
+dropped; what's left in the determinism contract is exactly two inputs: the
+**vendored font** (`e2e/fonts/`) and the **resvg version**.
 
-1. **CPU architecture.** Dev is Apple Silicon (arm64); CI may be amd64. Font
-   rasterization does float math that rounds differently across arches, so "same
-   image, different arch" can differ by pixels. **Decision: baselines are
-   canonical on one arch only** (CI's). Pin `--platform`; if dev and CI arch
-   differ, dev regenerates under the canonical arch (qemu) or simply doesn't
-   commit host-generated baselines. See the workflow rule below.
-2. **App-level nondeterminism — the container pins none of this.** Must be
+That contract does **not** cover two other sources of nondeterminism, which we
+handle explicitly:
+
+1. **App-level nondeterminism — the renderer pins none of this.** Must be
    controlled by us:
    - `jiff` timestamps (`created_at` / `updated_at`) — inject a **fixed clock**.
    - `nanoid` IDs — **seed or redact**.
    - cursor blink / mid-redraw frames — capture at a **settled point** (explicit
      wait in the capture script; cursor hidden or parked).
    - async event ordering.
-3. **The capture renderer.** Choice of tool affects this (below).
+2. **The capture renderer.** Choice of tool affects this (below).
 
 ### Capture tool
 
@@ -106,7 +108,7 @@ Goal is *exact, deterministic, reviewable* output. Preference order:
 - **SVG capture** (e.g. the `term-transcript` Rust crate, or `termsvg`) —
   **preferred.** Captures the styled screen as vector SVG: no rasterization step
   to be nondeterministic, text-diffable in git, resolution-independent, still
-  human-viewable. Sidesteps the arch (#1) and renderer (#3) holes entirely.
+  human-viewable. Sidesteps the renderer hole (#2) entirely.
   Tradeoff: snapshots *emulated* output, so it won't catch a true GPU
   font-rendering bug — acceptable for "did the screen come out right."
 - **`agg`** (asciinema's renderer) — pure Rust rasterizer, no browser in the
@@ -117,10 +119,11 @@ Goal is *exact, deterministic, reviewable* output. Preference order:
 
 ### Workflow rule (non-negotiable)
 
-**Baselines are regenerated only inside the pinned container, on the canonical
-arch.** Never capture on the host Mac and commit that — it will differ from CI
-and thrash. "Regen baselines" must be a single containerized command so there is
-no other path.
+**Baselines are regenerated only via `./scripts/test-snapshots.sh --update`** —
+the single entry point, which pins the renderer + vendored font. Don't hand-render
+and commit; route every (re)bless through that script so a stray render can't
+drift in. (Arch/OS don't matter — see above — but the resvg version and font
+file do, and the script is what fixes them.)
 
 ### The e2e smoke suite
 
@@ -189,11 +192,12 @@ These make *both* layers stable; lock them in while the `tui` module is young:
   driven via a decoupled `update(state, event)`. Fast, deterministic, all edge
   cases.
 - **Layer 2** is a thin smoke layer over the real artifact: exact-match
-  image/SVG snapshots in a pinned container, ~4–7 scenarios, proving *launch →
-  render real diff → real keys → write file → exit without wrecking the
-  terminal.*
-- The container makes image diffing viable; we still own **arch**, **app-level
-  nondeterminism**, and **baseline regen discipline**.
+  image/SVG snapshots with a pinned renderer + vendored font, ~4–7 scenarios,
+  proving *launch → render real diff → real keys → write file → exit without
+  wrecking the terminal.*
+- Pinning the renderer + font makes image diffing viable (arch/OS proved
+  irrelevant); we still own **app-level nondeterminism** and **baseline regen
+  discipline**.
 
 ---
 
@@ -243,11 +247,12 @@ store milestone; Tier 3 #8 (the `gh` PR path) stays gated.
 
 **(b) Exact-match pixel oracle ([`e2e/`](./e2e/), the gold layer).** The real
 binary rendered to **actual pixels** — the settled screen emitted as a truecolor
-SVG and rasterized losslessly with `resvg` — inside a pinned `linux/amd64`
-container and pixel-diffed (`compare -metric AE`, **zero tolerance**) against
-committed baselines (`e2e/baselines/*.png`). Capture (deterministic Rust,
-`tests/image_diff.rs`) is split from rasterization+diff (`e2e/scripts/run.sh`).
-The workflow — modeled on willet-cloud's screenshot/approval loop — is:
+SVG and rasterized losslessly with `resvg` (pinned version + vendored font) —
+pixel-diffed (`compare -metric AE`, **zero tolerance**) against committed
+baselines (`e2e/baselines/*.png`). Runs natively (no container). Capture
+(deterministic Rust, `tests/image_diff.rs`) is split from rasterization+diff
+(`e2e/scripts/run.sh`). The workflow — modeled on willet-cloud's
+screenshot/approval loop — is:
 
 ```sh
 ./scripts/test-snapshots.sh            # the CI gate: render + pixel-diff
@@ -261,4 +266,4 @@ comments `approve snapshots`, which copies the **exact reviewed bytes** back fro
 the bundle and commits them (no re-render, SHA-pinned). This reuses willet-cloud's
 architecture and the same org secrets/vars (`CI_S3_*`, `CI_APPROVE_TOKEN`) — see
 `e2e/README.md`. It satisfies the workflow rule: baselines are only ever
-generated inside the pinned container on the canonical arch.
+generated through `./scripts/test-snapshots.sh --update`.

@@ -4,9 +4,9 @@
 # line) for the caller to post as a PR comment. Adapted from willet-cloud's
 # scripts/snapshot-bundle.sh — same env contract and the same org secrets/vars.
 #
-# Run AFTER ./scripts/test-snapshots.sh has failed: the container leaves the
-# review dir (expected | actual | diff + index.html + status.tsv) on the host
-# via the bind-mount. The bytes published under baseline/ are the exact `actual`
+# Run AFTER ./scripts/test-snapshots.sh has failed: the oracle leaves the review
+# dir (expected | actual | diff + index.html + status.tsv) at e2e/review/. The
+# bytes published under baseline/ are the exact `actual`
 # renders the reviewer looks at, mirrored at their repo path — the approve flow
 # copies them straight back and commits, so the committed pixels are precisely
 # the reviewed pixels (no second-render drift).
@@ -54,9 +54,8 @@ fi
 # e2e/baselines/<name>.png. Unchanged scenarios are skipped (committing identical
 # bytes would be a no-op).
 #
-# The mirror goes in a temp dir, NOT under $REVIEW: the pixel oracle runs in a
-# container as root and creates $REVIEW (root-owned), so the host runner can read
-# those files but cannot write into the directory. We upload the mirror to
+# The mirror goes in a temp dir, NOT under $REVIEW, so it's never swept into the
+# expected|actual|diff bundle we upload from $REVIEW. We upload the mirror to
 # <prefix>/baseline/ separately below.
 MIRROR="$(mktemp -d)"
 trap 'rm -rf "$MIRROR"' EXIT

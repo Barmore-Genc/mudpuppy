@@ -89,10 +89,11 @@ jobs:
       - run: cargo doc --no-deps --all-features
 
   # Exact-match pixel oracle (TESTING.md Layer 2 / e2e/README.md): render the
-  # real binary inside the pinned amd64 container and pixel-diff against the
-  # committed baselines. PRs only — the review bundle + comment need PR context,
-  # and this is the slow (containerized) layer. The ubuntu runner *is* native
-  # amd64, so no emulation here; baselines are canonical on this arch.
+  # real binary and pixel-diff against the committed baselines. PRs only — the
+  # review bundle + comment need PR context. Runs natively (no container): the
+  # renders are byte-identical once the vendored font + resvg version are pinned
+  # (verified macOS/arm64 == linux/amd64), so the heavy compile is cacheable via
+  # rust-cache instead of being trapped in a container's volumes.
   snapshots:
     name: snapshots (pixel oracle)
     needs: detect
@@ -103,9 +104,20 @@ jobs:
       pull-requests: write
     steps:
       - uses: actions/checkout@v4
-      # Renders the real binary in the pinned amd64 container, pixel-diffs vs
-      # e2e/baselines, and on mismatch publishes the review bundle to S3 +
-      # comments the capability URL (reuses the org CI_S3_* / CI_APPROVE_TOKEN).
+      - uses: dtolnay/rust-toolchain@stable
+      # Caches the cargo registry, target dir, AND ~/.cargo/bin (cache-bin,
+      # default on) — so both the mudpuppy build and the resvg install below are
+      # restored on later runs. This is the speedup the container couldn't give us.
+      - uses: Swatinem/rust-cache@v2
+      - name: Install renderer + image tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends imagemagick
+          # Pinned rasterizer. No-op (and fast) once restored from rust-cache.
+          cargo install resvg --version 0.47.0 --locked
+      # Renders the real binary, pixel-diffs vs e2e/baselines, and on mismatch
+      # publishes the review bundle to S3 + comments the capability URL (reuses
+      # the org CI_S3_* / CI_APPROVE_TOKEN).
       - uses: ./.github/actions/snapshot-review
         with:
           s3-endpoint: ${{ vars.CI_S3_ENDPOINT }}

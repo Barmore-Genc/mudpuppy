@@ -1,15 +1,15 @@
 //! Capture half of Layer 2's **exact-match pixel oracle** (TESTING.md). This
 //! test drives the real binary to a settled screen for each scenario and writes
-//! a **truecolor SVG** of it (built from the vt100 grid); the pinned amd64
-//! container then rasterizes those SVGs with `resvg` to lossless PNGs and
-//! pixel-diffs them against committed baselines (zero tolerance). See
-//! `e2e/README.md` for the full loop and the willet-cloud design it mirrors.
+//! a **truecolor SVG** of it (built from the vt100 grid); `e2e/scripts/run.sh`
+//! then rasterizes those SVGs with `resvg` to lossless PNGs and pixel-diffs them
+//! against committed baselines (zero tolerance). See `e2e/README.md` for the
+//! full loop and the willet-cloud design it mirrors.
 //!
 //! The split is deliberate: capture (deterministic Rust) lives here;
-//! rasterization + comparison (host-sensitive, needs `resvg`/ImageMagick) lives
-//! in the container scripts. So this test only runs when asked to emit SVGs —
-//! gated on `MUDPUPPY_SVG_DIR`. Normal `cargo test` skips it, and it never
-//! shells out to a renderer that isn't there.
+//! rasterization + comparison (needs `resvg`/ImageMagick) lives in the e2e
+//! scripts. So this test only runs when asked to emit SVGs — gated on
+//! `MUDPUPPY_SVG_DIR`. Normal `cargo test` skips it, and it never shells out to
+//! a renderer that isn't there.
 
 mod common;
 
@@ -52,7 +52,7 @@ const SCENARIOS: &[Scenario] = &[
 fn emit_scenario_svgs() {
     let Some(dir) = std::env::var_os("MUDPUPPY_SVG_DIR") else {
         eprintln!(
-            "MUDPUPPY_SVG_DIR unset — skipping SVG emission (pixel oracle runs in the container)"
+            "MUDPUPPY_SVG_DIR unset — skipping SVG emission (run via ./scripts/test-snapshots.sh)"
         );
         return;
     };

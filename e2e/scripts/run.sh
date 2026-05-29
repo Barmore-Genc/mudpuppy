@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
-# In-container half of the exact-match pixel oracle (../README.md). Runs inside
-# the pinned amd64 image built from ../Dockerfile, where `resvg` + ImageMagick +
-# the pinned font live. Driven by ../../scripts/test-snapshots.sh.
+# The exact-match pixel oracle (../README.md). Emits a truecolor SVG of the real
+# binary's settled screen for each scenario (deterministic Rust, driven via a
+# PTY), rasterizes each with `resvg` to a lossless PNG, and pixel-diffs against
+# the committed baselines at zero tolerance.
+#
+# Runs NATIVELY — no container. `resvg` is a pure IEEE-float rasterizer, so with
+# the font file and the resvg version held constant the renders are byte-identical
+# across arch/OS: verified macOS/arm64 == linux/amd64, AE=0 on every scenario.
+# The only two knobs that move a pixel are pinned right here: the vendored font
+# file (e2e/fonts/) and the resvg version. The container the old flow used bought
+# nothing but build time we couldn't cache.
 #
 #   run.sh            compare renders against committed baselines (the CI gate)
 #   run.sh --update   re-bless: overwrite baselines with this run's renders
@@ -14,18 +22,38 @@ set -euo pipefail
 UPDATE=0
 [[ "${1:-}" == "--update" ]] && UPDATE=1
 
-REPO=/work
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$REPO"
+
 BASELINES="$REPO/e2e/baselines"
 REVIEW="$REPO/e2e/review"
-SVGS=/tmp/svgs
+SVGS="$(mktemp -d)"
+trap 'rm -rf "$SVGS"' EXIT
 
-# Render knobs — part of the pinned contract. Geometry lives in the SVG itself
-# (tests/common); here we only pin the rasterizer + the exact font file. The
-# font is pinned so resvg can't fall back to a different face.
-FONT_FILE="${MUDPUPPY_FONT_FILE:-/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf}"
+# Pinned rasterization knobs — the whole determinism contract. The font is the
+# exact file vendored in the repo (not a system package) so glyph outlines can't
+# drift with the distro; resvg is pinned by version (checked below). Everything
+# else (arch, OS, toolchain) is empirically a non-factor for these pixels.
+RESVG_VERSION=0.47.0
+FONT_FILE="${MUDPUPPY_FONT_FILE:-$REPO/e2e/fonts/DejaVuSansMono.ttf}"
+
+# Fail fast with an actionable message if a tool is missing, rather than a
+# cryptic error mid-run. On macOS: `brew install resvg imagemagick`.
+need() { command -v "$1" >/dev/null 2>&1 || { echo "missing required tool: $1 ($2)" >&2; exit 127; }; }
+need resvg "the SVG->PNG rasterizer — cargo install resvg --version $RESVG_VERSION --locked, or brew install resvg"
+need compare "ImageMagick (pixel diff) — apt-get install imagemagick / brew install imagemagick"
+need identify "ImageMagick (image dims) — apt-get install imagemagick / brew install imagemagick"
+[[ -f "$FONT_FILE" ]] || { echo "missing font file: $FONT_FILE" >&2; exit 1; }
+
+# resvg version is part of the pinned contract — a different version re-rasterizes
+# and the diff explodes. Warn loudly (the AE diff is still authoritative) so a
+# mismatch is diagnosed as "wrong resvg" instead of "real regression".
+have_resvg="$(resvg --version 2>/dev/null | awk '{print $NF}')"
+if [[ "$have_resvg" != "$RESVG_VERSION" ]]; then
+  echo "WARNING: resvg $have_resvg != pinned $RESVG_VERSION — renders may differ from baselines." >&2
+fi
 
 echo "==> Emitting scenario SVGs (builds the binary, drives it via PTY)"
-rm -rf "$SVGS" && mkdir -p "$SVGS"
 MUDPUPPY_SVG_DIR="$SVGS" cargo test --test image_diff -- --nocapture
 
 rm -rf "$REVIEW"

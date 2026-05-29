@@ -1,10 +1,10 @@
 name: Snapshot review
 description: >
-  Run the containerized pixel oracle. On mismatch, publish a review bundle to an
-  S3-compatible object store and post (or update) a single PR comment linking to
-  it, then fail the check so it stays red until `approve snapshots`. All logic
-  lives in scripts/ so the calling workflow stays tiny. Modeled on willet-cloud's
-  snapshot-review action.
+  Run the pixel oracle (natively — the caller installs the toolchain, resvg, and
+  ImageMagick). On mismatch, publish a review bundle to an S3-compatible object
+  store and post (or update) a single PR comment linking to it, then fail the
+  check so it stays red until `approve snapshots`. All logic lives in scripts/ so
+  the calling workflow stays tiny. Modeled on willet-cloud's snapshot-review action.
 
 inputs:
   s3-endpoint: { required: true, description: S3-compatible endpoint URL }
@@ -18,12 +18,13 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Run pixel oracle (containerized)
+    - name: Run pixel oracle
       id: snap
       shell: bash
       continue-on-error: true
-      # Call the script directly — the runner needs only Docker + git + aws; the
-      # oracle itself runs in the pinned container.
+      # Renders + pixel-diffs natively against e2e/baselines. resvg/ImageMagick
+      # and the toolchain are installed by the caller; the vendored font + pinned
+      # resvg version make the renders byte-identical to the baselines.
       run: ./scripts/test-snapshots.sh
 
     - name: Publish review bundle + comment

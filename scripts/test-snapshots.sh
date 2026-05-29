@@ -1,39 +1,22 @@
 #!/usr/bin/env bash
-# Run the exact-match pixel oracle inside the pinned amd64 container so renders
-# are byte-identical on every machine (see e2e/Dockerfile). This is the single
-# canonical entry point — the *only* sanctioned way to (re)generate baselines,
-# so they can never drift in from a dev host. Mirrors willet-cloud's
-# scripts/test-snapshots.sh.
+# Single host entry point for the exact-match pixel oracle (see e2e/README.md).
+# Renders the real binary's settled screen and pixel-diffs it against the
+# committed baselines at zero tolerance. It is the *only* sanctioned way to
+# (re)generate baselines, so they can never drift in from an ad-hoc render.
 #
 #   ./scripts/test-snapshots.sh            compare against committed baselines
 #   ./scripts/test-snapshots.sh --update   regenerate (re-bless) baselines
 #
-# The fast Layer-1 (`cargo test`) suite is unaffected; this is the slow,
-# containerized layer.
+# Runs NATIVELY — no container. We verified the renders are byte-identical across
+# arch/OS (macOS/arm64 == linux/amd64, AE=0) once the font file and resvg version
+# are pinned, so the container only ever cost build time we couldn't cache. The
+# two pinned knobs live in e2e/scripts/run.sh (the vendored font + resvg version).
+#
+# Requires: cargo, resvg 0.47.0, ImageMagick (`compare`/`identify`). On macOS:
+#   brew install resvg imagemagick
+#
+# The fast Layer-1 (`cargo test`) suite is unaffected; this is the slower layer.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$REPO_ROOT"
-
-IMAGE="mudpuppy-snapshots:local"
-PLATFORM="linux/amd64"   # the canonical arch; emulated on Apple Silicon
-
-UPDATE_ARG=()
-[[ "${1:-}" == "--update" ]] && UPDATE_ARG=(--update)
-
-echo "==> Building $IMAGE ($PLATFORM)"
-docker build --platform "$PLATFORM" -f e2e/Dockerfile -t "$IMAGE" e2e
-
-echo "==> Running snapshot oracle in container"
-# - Repo bind-mounted RW so regenerated baselines + the review bundle land back
-#   on the host. CARGO_TARGET_DIR is set inside the image to /tmp (off the
-#   mount) so the host's arm64 target/ never collides with the amd64 build.
-# - Named volumes cache the cargo registry + target across runs (first run is
-#   slow: it compiles the binary and its deps).
-exec docker run --rm \
-  --platform "$PLATFORM" \
-  -v "$REPO_ROOT:/work" \
-  -v mudpuppy-e2e-cargo-registry:/usr/local/cargo/registry \
-  -v mudpuppy-e2e-cargo-target:/tmp/cargo-target \
-  "$IMAGE" \
-  ${UPDATE_ARG[@]+"${UPDATE_ARG[@]}"}
+exec "$REPO_ROOT/e2e/scripts/run.sh" "$@"

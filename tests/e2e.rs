@@ -12,14 +12,13 @@
 //! Following "assert coarsely, eyeball richly": we interpret the escape stream
 //! with `vt100` into the settled character grid and assert on what a user would
 //! see, plus the verbatim alt-screen enter/leave sequences and the process exit
-//! code. The exact-match *pixel* oracle (real renders in the pinned amd64
-//! container) is a separate layer — see `image_diff.rs` and `e2e/README.md`.
+//! code. The exact-match *pixel* oracle (real `resvg` renders) is a separate
+//! layer — see `image_diff.rs` and `e2e/README.md`.
 //!
 //! These are hermetic: each test builds its own throwaway repo, points the
 //! binary at it, and never touches the mudpuppy repo itself. `git` is the only
 //! external requirement (a hard runtime dependency anyway), and PTYs exist on
-//! both macOS dev and the Linux CI runners, so no Docker is needed for this
-//! layer.
+//! both macOS dev and the Linux CI runners.
 
 mod common;
 
