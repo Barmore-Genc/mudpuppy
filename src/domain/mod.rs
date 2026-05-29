@@ -8,5 +8,5 @@
 mod annotation;
 mod state;
 
-pub use annotation::{Annotation, Author, Severity, Side, Status, Tag};
+pub use annotation::{Annotation, Author, ParseEnumError, Severity, Side, Status, Tag};
 pub use state::{StateFile, Target, Turn, SCHEMA_VERSION};

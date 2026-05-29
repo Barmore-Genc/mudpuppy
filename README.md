@@ -160,7 +160,9 @@ full session-resolution rules.
 records what's being reviewed so a stored review can be matched back to its diff.
 
 State lives under the platform data dir, keyed by repo and target, e.g.
-`~/.local/share/mudpuppy/<repo-slug>/<target>/annotations.json`.
+`~/.local/share/mudpuppy/<repo-slug>/<target>/annotations.json`. Set
+`MUDPUPPY_DATA_DIR` to override where the store lives (handy for scratch reviews
+and tests).
 
 ## Ideas not yet committed to
 
