@@ -8,7 +8,7 @@
 //! not a TUI is running (PLAN.md §6, §7). Writes go through [`store::update`], so
 //! they merge-by-id under a lock and never clobber a concurrent writer.
 //!
-//! [`wait`] is the exception that reads *and waits*: it blocks on store-directory
+//! `wait` is the exception that reads *and waits*: it blocks on store-directory
 //! changes (the `notify` coordination bus) until the human releases the turn,
 //! then prints what they changed (PLAN.md §6). For this milestone the agent
 //! targets **local** changes (the common case); attaching to a live TUI's PR
