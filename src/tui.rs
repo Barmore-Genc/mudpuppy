@@ -10,9 +10,15 @@
 //! As of milestone 2 the viewer also **reads** the annotation store: it draws
 //! severity-coloured gutter markers on annotated lines, lists annotations in a
 //! toggleable side panel, and live-reloads when the store changes on disk so an
-//! agent's comments appear while the TUI is open. Authoring from inside the TUI,
-//! the `wait` turn protocol, and syntax highlighting are still to come; this
-//! module reads the store but does not yet write it.
+//! agent's comments appear while the TUI is open.
+//!
+//! Milestone 3 adds the human's half of the turn protocol (PLAN.md §6): when an
+//! agent is blocked in `agent wait`, the store's `turn.agent_waiting` flag is
+//! set and the status bar surfaces it; pressing `r` **releases the turn** —
+//! bumping `turn.seq`, handing ownership back to the agent, and (on first
+//! contact) recording approval. That store write is what wakes the waiting
+//! agent. Authoring annotations from inside the TUI and syntax highlighting are
+//! still to come.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -27,7 +33,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::diff::{parse_diff, DiffLine, FileDiff, FileStatus, LineKind};
-use crate::domain::{Annotation, Author, Severity, Side, Status, Target};
+use crate::domain::{Annotation, Author, Severity, Side, StateFile, Status, Target, Turn};
 use crate::session::Session;
 use crate::{source, store};
 
@@ -60,8 +66,8 @@ pub fn launch(pr: Option<String>, base: Option<String>) -> Result<()> {
     // empty, store-less view rather than aborting.
     let mut app = App::new(files, loaded.target.clone());
     if let Ok(session) = Session::resolve(loaded.target) {
-        let annotations = store::load(&session.store_path)?.map(|s| s.annotations);
-        app.attach_store(session.store_path, annotations.unwrap_or_default());
+        let state = store::load(&session.store_path)?;
+        app.attach_store(session.store_path, state);
     }
 
     // `ratatui::init` enters the alternate screen, turns on raw mode, and
@@ -175,6 +181,9 @@ struct App {
     show_panel: bool,
     /// Annotations loaded from the store (both authors, every status).
     annotations: Vec<Annotation>,
+    /// The turn-protocol block from the store, kept in sync on reload so the
+    /// status bar can surface "agent is waiting" and `r` can release correctly.
+    turn: Turn,
     /// Path to the annotation store, when one was resolved; drives live reload.
     store_path: Option<PathBuf>,
     /// Last-seen store mtime, compared on each poll to detect external writes.
@@ -199,6 +208,7 @@ impl App {
             show_help: false,
             show_panel: false,
             annotations: Vec::new(),
+            turn: Turn::default(),
             store_path: None,
             store_mtime: None,
             diff_height: 1,
@@ -206,17 +216,21 @@ impl App {
         }
     }
 
-    /// Attach a resolved store path and its current annotations, recording the
-    /// store's mtime so [`App::reload_if_changed`] can detect later writes.
-    fn attach_store(&mut self, path: PathBuf, annotations: Vec<Annotation>) {
+    /// Attach a resolved store path and its current state (annotations + turn),
+    /// recording the store's mtime so [`App::reload_if_changed`] can detect later
+    /// writes. An absent state leaves the empty defaults in place.
+    fn attach_store(&mut self, path: PathBuf, state: Option<StateFile>) {
         self.store_mtime = mtime(&path);
         self.store_path = Some(path);
-        self.annotations = annotations;
+        if let Some(state) = state {
+            self.annotations = state.annotations;
+            self.turn = state.turn;
+        }
     }
 
-    /// Reload annotations if the store file changed on disk since the last check.
-    /// Cheap (one `stat`) on the common no-change path; silent on errors so a
-    /// transient read race never disturbs browsing.
+    /// Reload annotations and turn state if the store file changed on disk since
+    /// the last check. Cheap (one `stat`) on the common no-change path; silent on
+    /// errors so a transient read race never disturbs browsing.
     fn reload_if_changed(&mut self) {
         let Some(path) = &self.store_path else { return };
         let current = mtime(path);
@@ -226,6 +240,30 @@ impl App {
         self.store_mtime = current;
         if let Ok(Some(state)) = store::load(path) {
             self.annotations = state.annotations;
+            self.turn = state.turn;
+        }
+    }
+
+    /// Release the turn back to the agent (PLAN.md §6): bump `seq`, take
+    /// ownership, clear the waiting flag, and record approval (the human's first
+    /// release doubles as first-contact approval). The atomic store write is what
+    /// wakes an agent blocked in `agent wait`. A no-op when no store is attached.
+    fn release_turn(&mut self) {
+        let Some(path) = self.store_path.clone() else {
+            return;
+        };
+        let updated = store::update(&path, &self.target, |s| {
+            s.turn.seq += 1;
+            s.turn.owner = Author::Agent;
+            s.turn.agent_waiting = false;
+            s.turn.approved = true;
+            s.turn.clone()
+        });
+        if let Ok(turn) = updated {
+            self.turn = turn;
+            // We just wrote the store; advance our mtime baseline so the next
+            // poll doesn't treat our own write as an external change.
+            self.store_mtime = mtime(&path);
         }
     }
 
@@ -306,6 +344,7 @@ impl App {
             KeyCode::Char('c') if ctrl => return true,
             KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('a') => self.show_panel = !self.show_panel,
+            KeyCode::Char('r') => self.release_turn(),
             KeyCode::Tab | KeyCode::BackTab => self.toggle_focus(),
 
             // Half / full page, regardless of focus, scroll the diff.
@@ -592,14 +631,31 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         scroll_pct,
     );
 
-    let line = Line::from(vec![
-        Span::raw(left),
-        Span::raw("  "),
+    let mut spans = vec![Span::raw(left)];
+    // When an agent is blocked in `agent wait`, make it impossible to miss and
+    // advertise the release key (PLAN.md §6).
+    if app.turn.agent_waiting {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            " agent waiting ",
+            Style::default()
+                .bg(Color::Yellow)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("r", Style::default().fg(Color::Yellow)));
+        spans.push(Span::raw(" release  "));
+    } else {
+        spans.push(Span::raw("  "));
+    }
+    spans.extend([
         Span::styled("?", Style::default().fg(Color::Yellow)),
         Span::raw(" help  "),
         Span::styled("q", Style::default().fg(Color::Yellow)),
         Span::raw(" quit"),
     ]);
+    let line = Line::from(spans);
     frame.render_widget(
         Paragraph::new(line).style(Style::default().bg(Color::Rgb(30, 33, 40)).fg(Color::Gray)),
         area,
@@ -607,33 +663,33 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The centered help overlay listing every keybinding.
+///
+/// Kept compact (cyan section headers, no blank separators) so the whole list —
+/// including the closing hint — fits within a short, 24-row terminal.
 fn render_help(frame: &mut Frame, area: Rect) {
+    let section =
+        |name: &'static str| Line::from(Span::styled(name, Style::default().fg(Color::Cyan)));
     let text = vec![
         Line::from(Span::styled(
             "mudpuppy — diff viewer",
             Style::default().add_modifier(Modifier::BOLD),
         )),
-        Line::raw(""),
-        Line::from(Span::styled("Navigation", Style::default().fg(Color::Cyan))),
+        section("Navigation"),
         Line::raw("  j / k        down / up (scroll diff, move file selection)"),
         Line::raw("  Ctrl-d / -u  half page down / up"),
         Line::raw("  Ctrl-f / -b  full page down / up"),
         Line::raw("  g / G        top / bottom (or first / last file)"),
         Line::raw("  } / {        next / prev hunk   (also n / N)"),
         Line::raw("  J / K        next / prev file (from the diff pane)"),
-        Line::raw(""),
-        Line::from(Span::styled("Focus", Style::default().fg(Color::Cyan))),
+        section("Focus"),
         Line::raw("  Tab          switch between file tree and diff"),
         Line::raw("  l / Enter    file tree → diff"),
         Line::raw("  h            diff → file tree"),
-        Line::raw(""),
-        Line::from(Span::styled(
-            "Annotations",
-            Style::default().fg(Color::Cyan),
-        )),
+        section("Annotations"),
         Line::raw("  a            toggle the annotations panel"),
-        Line::raw(""),
-        Line::from(Span::styled("Other", Style::default().fg(Color::Cyan))),
+        section("Turn"),
+        Line::raw("  r            release the turn back to the agent"),
+        section("Other"),
         Line::raw("  ?            toggle this help"),
         Line::raw("  q / Ctrl-c   quit"),
         Line::raw(""),
@@ -1373,5 +1429,62 @@ rename to src/relocated.rs
         let here = a.current_file_annotations();
         assert_eq!(here.len(), 1);
         assert_eq!(here[0].id, "a0000001");
+    }
+
+    // ---- turn protocol: the human's release (PLAN.md §6) -------------------
+
+    #[test]
+    fn r_releases_the_turn_back_to_the_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("annotations.json");
+        let target = Target::Local {
+            base: "main".to_string(),
+            head_sha: "abc".to_string(),
+        };
+
+        // Seed a store where an agent is blocked waiting on the human at seq 3.
+        let mut seed = StateFile::new(target.clone());
+        seed.turn.agent_waiting = true;
+        seed.turn.owner = Author::Human;
+        seed.turn.seq = 3;
+        store::save(&path, &seed).unwrap();
+
+        let mut a = App::new(parse_diff(FIXTURE), target);
+        a.attach_store(path.clone(), store::load(&path).unwrap());
+        assert!(a.turn.agent_waiting, "attach loads the turn block");
+
+        a.handle_key(key(KeyCode::Char('r')));
+
+        // In memory: ownership handed back, waiting cleared.
+        assert_eq!(a.turn.owner, Author::Agent);
+        assert!(!a.turn.agent_waiting);
+        // On disk: seq bumped past what the waiter recorded, and first-contact
+        // approval is now set — this write is what unblocks `agent wait`.
+        let saved = store::load(&path).unwrap().unwrap();
+        assert_eq!(saved.turn.seq, 4);
+        assert_eq!(saved.turn.owner, Author::Agent);
+        assert!(!saved.turn.agent_waiting);
+        assert!(saved.turn.approved);
+    }
+
+    #[test]
+    fn r_without_a_store_is_a_harmless_noop() {
+        // No store attached (resolution failed / store-less view): `r` must not
+        // panic and leaves the default turn untouched.
+        let mut a = app();
+        a.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(a.turn, Turn::default());
+    }
+
+    #[test]
+    fn status_bar_surfaces_a_waiting_agent() {
+        let mut a = app();
+        a.turn.agent_waiting = true;
+        let term = drive(&mut a, 100, 24, &[]);
+        assert!(
+            screen(&term).contains("agent waiting"),
+            "status bar should advertise the waiting agent:\n{}",
+            screen(&term)
+        );
     }
 }

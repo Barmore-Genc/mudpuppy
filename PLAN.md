@@ -242,9 +242,15 @@ store); only `wait` needs a live human to ever unblock.
    from *inside* the TUI (needs a line cursor), and anchoring + staleness
    handling. This is the proof-of-concept slice: the agent writes, the human's
    TUI shows it live.
-3. **Turn protocol.** The `wait` rendezvous over `notify` (replacing the mtime
-   poll), first-contact approval, the live-session pidfile, and the TUI's
-   turn-release keybind. Closes the end-to-end turn-based loop.
+3. **Turn protocol.** 🟡 In progress. Done: the `agent wait` rendezvous over
+   `notify` — it records `turn.seq`, marks `agent_waiting`, blocks on
+   store-directory changes, wakes when the human bumps `seq`, and prints the
+   human's added/changed/removed annotations (honoring `--timeout` and Ctrl-C);
+   and the TUI's `r` turn-release keybind, which bumps `seq`, hands ownership
+   back to the agent, surfaces "agent is waiting" in the status bar, and doubles
+   as first-contact approval. Still to do: the live-session pidfile and switching
+   the TUI's live reload from the mtime poll to `notify`. Closes the end-to-end
+   turn-based loop.
 
 ## 11. Testing
 

@@ -10,9 +10,10 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
-use common::repo_with_changes;
+use common::{repo_with_changes, Session};
 
 /// Run `mudpuppy <args>` inside `repo`, with the store redirected to `data`.
 /// Returns `(stdout, stderr, success)`.
@@ -287,4 +288,139 @@ fn reset_clears_the_session() {
 
     let (stdout, _, _) = run(repo, data, &["agent", "comment", "list"]);
     assert!(stdout.contains("no annotations") || stdout.contains("no matching"));
+}
+
+/// Spawn `mudpuppy <args>` detached, capturing stdout/stderr, so the test can
+/// manipulate the store while the child blocks. (`run` blocks on `.output()`,
+/// which can't interleave with `agent wait`.)
+fn spawn(repo: &Path, data: &Path, args: &[&str]) -> std::process::Child {
+    Command::new(env!("CARGO_BIN_EXE_mudpuppy"))
+        .args(args)
+        .current_dir(repo)
+        .env("MUDPUPPY_DATA_DIR", data)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mudpuppy")
+}
+
+/// Poll `f` until it returns `Some`, or give up after `timeout`.
+fn poll_until<T>(timeout: Duration, mut f: impl FnMut() -> Option<T>) -> Option<T> {
+    let start = Instant::now();
+    loop {
+        if let Some(v) = f() {
+            return Some(v);
+        }
+        if start.elapsed() > timeout {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Read the store as JSON, if it exists yet.
+fn read_store(store: &Path) -> Option<serde_json::Value> {
+    serde_json::from_str(&std::fs::read_to_string(store).ok()?).ok()
+}
+
+#[test]
+fn wait_blocks_until_the_tui_releases_the_turn() {
+    let repo = repo_with_changes();
+    let data = tempfile::tempdir().unwrap();
+    let (repo, data) = (repo.path(), data.path());
+
+    // Seed an agent comment so there's a real session for the TUI to open onto.
+    let (_, stderr, ok) = run(
+        repo,
+        data,
+        &[
+            "agent",
+            "comment",
+            "add",
+            "--file",
+            "a_app.rs",
+            "--line",
+            "1",
+            "--body",
+            "look here",
+        ],
+    );
+    assert!(ok, "seed add failed: {stderr}");
+
+    // `agent wait` blocks; a generous --timeout is only a safety net so a bug
+    // can't hang the suite forever.
+    let child = spawn(repo, data, &["agent", "wait", "--timeout", "30"]);
+
+    // Wait until `wait` has flipped `agent_waiting` on — proof it's blocked.
+    poll_until(Duration::from_secs(10), || {
+        let v = read_store(&find_store(data)?)?;
+        (v["turn"]["agent_waiting"] == serde_json::json!(true)).then_some(())
+    })
+    .expect("`agent wait` should mark agent_waiting");
+
+    // Launch the *real* TUI on the same repo + store. It reads the turn block and
+    // surfaces that the agent is waiting.
+    let mut tui = Session::launch_with_env(repo, &[("MUDPUPPY_DATA_DIR", data)]);
+    assert!(
+        tui.wait_for_screen("agent waiting", Duration::from_secs(10)),
+        "TUI never showed the waiting agent; screen was:\n{}",
+        tui.screen()
+    );
+
+    // The human releases the turn with `r`; that store write is what wakes `wait`.
+    tui.feed(b"r");
+
+    let out = child.wait_with_output().expect("wait should exit");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "wait should exit 0 once the TUI releases; stderr: {stderr}"
+    );
+    // The TUI released without authoring anything, so there are no annotation
+    // changes to report — but the rendezvous still completed.
+    assert!(
+        stdout.contains("turn released with no changes"),
+        "wait should report the (empty) release: {stdout}"
+    );
+
+    // The release bumped seq and handed ownership back to the agent.
+    let v = read_store(&find_store(data).unwrap()).unwrap();
+    assert_eq!(v["turn"]["owner"], serde_json::json!("agent"));
+    assert_eq!(v["turn"]["agent_waiting"], serde_json::json!(false));
+    assert!(v["turn"]["seq"].as_u64().unwrap() >= 1);
+    assert_eq!(
+        v["turn"]["approved"],
+        serde_json::json!(true),
+        "first release approves"
+    );
+
+    // The TUI itself quits cleanly.
+    tui.feed(b"q");
+    assert!(tui
+        .wait(Duration::from_secs(10))
+        .is_some_and(|s| s.success()));
+}
+
+#[test]
+fn wait_times_out_cleanly_and_clears_the_flag() {
+    let repo = repo_with_changes();
+    let data = tempfile::tempdir().unwrap();
+    let (repo, data) = (repo.path(), data.path());
+
+    // No release ever arrives; a 1s timeout must return promptly, exit non-zero,
+    // and leave `agent_waiting` cleared so the next round isn't confused.
+    let (_, stderr, ok) = run(repo, data, &["agent", "wait", "--timeout", "1"]);
+    assert!(!ok, "a timeout is a non-zero exit");
+    assert!(stderr.contains("timed out"), "stderr: {stderr}");
+
+    let store = find_store(data).expect("wait creates the store");
+    let v = read_store(&store).unwrap();
+    assert_eq!(
+        v["turn"]["agent_waiting"],
+        serde_json::json!(false),
+        "agent_waiting must be cleared after a timeout"
+    );
 }
