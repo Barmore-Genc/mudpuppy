@@ -87,6 +87,43 @@ impl StateFile {
     pub fn get(&self, id: &str) -> Option<&Annotation> {
         self.annotations.iter().find(|a| a.id == id)
     }
+
+    /// Find a mutable annotation by id.
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut Annotation> {
+        self.annotations.iter_mut().find(|a| a.id == id)
+    }
+
+    /// Merge one annotation in **by id**: replace an existing entry with the same
+    /// `id`, or append it if new. This is the per-record half of the store's
+    /// merge-by-id contract (PLAN.md §4); the store reloads current state before
+    /// calling it so a concurrent writer's other records are preserved.
+    ///
+    /// Returns `true` if an existing annotation was replaced.
+    pub fn upsert(&mut self, annotation: Annotation) -> bool {
+        match self.get_mut(&annotation.id) {
+            Some(existing) => {
+                *existing = annotation;
+                true
+            }
+            None => {
+                self.annotations.push(annotation);
+                false
+            }
+        }
+    }
+
+    /// Remove an annotation by id, returning it if it was present.
+    pub fn remove(&mut self, id: &str) -> Option<Annotation> {
+        let idx = self.annotations.iter().position(|a| a.id == id)?;
+        Some(self.annotations.remove(idx))
+    }
+
+    /// Whether any annotation threads as a reply under `id`.
+    pub fn has_replies(&self, id: &str) -> bool {
+        self.annotations
+            .iter()
+            .any(|a| a.reply_to.as_deref() == Some(id))
+    }
 }
 
 #[cfg(test)]
@@ -144,6 +181,54 @@ mod tests {
         assert_eq!(t.seq, 0);
         assert!(!t.agent_waiting);
         assert!(!t.approved);
+    }
+
+    fn ann(id: &str, reply_to: Option<&str>) -> Annotation {
+        Annotation {
+            id: id.to_string(),
+            author: Author::Agent,
+            file: "src/lib.rs".to_string(),
+            line: 1,
+            side: super::super::Side::Right,
+            severity: super::super::Severity::Info,
+            tag: None,
+            status: super::super::Status::Open,
+            body: "b".to_string(),
+            reply_to: reply_to.map(str::to_string),
+            created_at: "2026-05-28T12:00:00Z".parse().unwrap(),
+            updated_at: "2026-05-28T12:00:00Z".parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn upsert_appends_then_replaces_by_id() {
+        let mut s = StateFile::new(Target::Local {
+            base: "main".to_string(),
+            head_sha: "abc".to_string(),
+        });
+        assert!(!s.upsert(ann("aaa", None)), "first insert is an append");
+        assert_eq!(s.annotations.len(), 1);
+
+        let mut updated = ann("aaa", None);
+        updated.body = "edited".to_string();
+        assert!(s.upsert(updated), "same id replaces in place");
+        assert_eq!(s.annotations.len(), 1);
+        assert_eq!(s.get("aaa").unwrap().body, "edited");
+    }
+
+    #[test]
+    fn remove_and_has_replies() {
+        let mut s = StateFile::new(Target::Local {
+            base: "main".to_string(),
+            head_sha: "abc".to_string(),
+        });
+        s.upsert(ann("parent", None));
+        s.upsert(ann("child", Some("parent")));
+        assert!(s.has_replies("parent"));
+        assert!(!s.has_replies("child"));
+        assert_eq!(s.remove("child").unwrap().id, "child");
+        assert!(!s.has_replies("parent"));
+        assert!(s.remove("missing").is_none());
     }
 
     #[test]

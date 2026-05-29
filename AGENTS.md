@@ -44,12 +44,16 @@ testable core) and a thin binary:
 - `src/lib.rs` + `src/main.rs` — library root and the thin binary that parses
   the command tree and dispatches into it.
 - `src/` modules: `domain` (schema types — implemented and tested), `cli` (clap
-  command surface — implemented), and skeletons for `source` (local-`git` /
-  PR-`gh` diff providers), `diff` (hand-rolled unified-diff parser + anchoring),
-  `store` (load/merge/save, locking, the turn protocol), `session` (repo/target
-  resolution + resume), `tui` (ratatui app), and `agent` (the `agent`
-  subcommands). Skeleton modules carry doc comments describing their job and
-  fill in as their milestone (PLAN.md §10) lands.
+  command surface — implemented), `source` (local-`git` / PR-`gh` diff
+  providers), `diff` (hand-rolled unified-diff parser + anchoring), `store`
+  (load / merge-by-id / atomic+locked save), `session` (repo/target resolution +
+  store-path derivation), `tui` (ratatui app — read-only diff browsing plus
+  annotation display + live reload), and `agent` (the `agent comment` lifecycle,
+  `diff`, and `reset`). Still to land (milestone 3): the `agent wait` turn
+  rendezvous, first-contact approval, `notify`-based reload (the TUI currently
+  polls the store's mtime), authoring annotations from inside the TUI, and
+  staleness re-anchoring. Modules carry doc comments describing their job and the
+  milestone boundary (PLAN.md §10).
 - `Cargo.toml` — manifest. Dependencies are added per-milestone as they're first
   used, not all up front; see the note there and PLAN.md §2.
 - `.github/workflows/` — CI: formatting, lints, tests, docs, and a security

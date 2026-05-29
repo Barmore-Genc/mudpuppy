@@ -5,8 +5,18 @@
 //! Rendering is **virtualized**: only the rows currently in the viewport are
 //! turned into styled spans, and a file's hunks are parsed lazily the first
 //! time it is opened (and cached), so a 50k-line diff never gets materialized in
-//! full. Annotations, syntax highlighting, and live reload arrive in later
-//! milestones; this module deliberately neither reads nor writes the store.
+//! full.
+//!
+//! As of milestone 2 the viewer also **reads** the annotation store: it draws
+//! severity-coloured gutter markers on annotated lines, lists annotations in a
+//! toggleable side panel, and live-reloads when the store changes on disk so an
+//! agent's comments appear while the TUI is open. Authoring from inside the TUI,
+//! the `wait` turn protocol, and syntax highlighting are still to come; this
+//! module reads the store but does not yet write it.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -17,8 +27,17 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::diff::{parse_diff, DiffLine, FileDiff, FileStatus, LineKind};
-use crate::domain::Target;
-use crate::source;
+use crate::domain::{Annotation, Author, Severity, Side, Status, Target};
+use crate::session::Session;
+use crate::{source, store};
+
+/// How often the event loop wakes to check the store's mtime for live reload.
+/// A coarse poll (rather than `notify`) is enough for the proof of concept; the
+/// filesystem-watch bus arrives with the turn protocol in milestone 3.
+const POLL_INTERVAL: Duration = Duration::from_millis(400);
+
+/// The glyph drawn in the annotation gutter column on an annotated line.
+const MARK: &str = "●";
 
 /// Launch the interactive review UI.
 ///
@@ -36,7 +55,14 @@ pub fn launch(pr: Option<String>, base: Option<String>) -> Result<()> {
         return Ok(());
     }
 
-    let mut app = App::new(files, loaded.target);
+    // Resolve where this review's annotations live and load any that exist.
+    // Resolution failure shouldn't block browsing the diff, so degrade to an
+    // empty, store-less view rather than aborting.
+    let mut app = App::new(files, loaded.target.clone());
+    if let Ok(session) = Session::resolve(loaded.target) {
+        let annotations = store::load(&session.store_path)?.map(|s| s.annotations);
+        app.attach_store(session.store_path, annotations.unwrap_or_default());
+    }
 
     // `ratatui::init` enters the alternate screen, turns on raw mode, and
     // installs a panic hook that restores the terminal; `restore` undoes it.
@@ -47,15 +73,23 @@ pub fn launch(pr: Option<String>, base: Option<String>) -> Result<()> {
 }
 
 /// The draw → read-event → handle loop. Returns when the user quits.
+///
+/// Reads are polled with a timeout so an idle UI still wakes periodically to
+/// pick up store changes another process (the agent) wrote — the proof-of-concept
+/// stand-in for `notify`-based live reload.
 fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|frame| render(frame, app))?;
-        // Only act on key *presses*; on Windows crossterm also emits release and
-        // repeat events that would otherwise double every keystroke.
-        if let Event::Key(key) = event::read()? {
-            if key.kind == KeyEventKind::Press && app.handle_key(key) {
-                return Ok(());
+        if event::poll(POLL_INTERVAL)? {
+            // Only act on key *presses*; on Windows crossterm also emits release
+            // and repeat events that would otherwise double every keystroke.
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press && app.handle_key(key) {
+                    return Ok(());
+                }
             }
+        } else {
+            app.reload_if_changed();
         }
     }
 }
@@ -137,6 +171,14 @@ struct App {
     /// Top visible file row of the tree, so the selection stays on screen.
     tree_scroll: usize,
     show_help: bool,
+    /// Whether the annotations side panel is shown.
+    show_panel: bool,
+    /// Annotations loaded from the store (both authors, every status).
+    annotations: Vec<Annotation>,
+    /// Path to the annotation store, when one was resolved; drives live reload.
+    store_path: Option<PathBuf>,
+    /// Last-seen store mtime, compared on each poll to detect external writes.
+    store_mtime: Option<SystemTime>,
     /// Diff-pane inner height from the last render, used for paging/clamping.
     diff_height: usize,
     /// File-tree inner height from the last render, used to keep selection visible.
@@ -155,9 +197,57 @@ impl App {
             scroll: 0,
             tree_scroll: 0,
             show_help: false,
+            show_panel: false,
+            annotations: Vec::new(),
+            store_path: None,
+            store_mtime: None,
             diff_height: 1,
             tree_height: 1,
         }
+    }
+
+    /// Attach a resolved store path and its current annotations, recording the
+    /// store's mtime so [`App::reload_if_changed`] can detect later writes.
+    fn attach_store(&mut self, path: PathBuf, annotations: Vec<Annotation>) {
+        self.store_mtime = mtime(&path);
+        self.store_path = Some(path);
+        self.annotations = annotations;
+    }
+
+    /// Reload annotations if the store file changed on disk since the last check.
+    /// Cheap (one `stat`) on the common no-change path; silent on errors so a
+    /// transient read race never disturbs browsing.
+    fn reload_if_changed(&mut self) {
+        let Some(path) = &self.store_path else { return };
+        let current = mtime(path);
+        if current == self.store_mtime {
+            return;
+        }
+        self.store_mtime = current;
+        if let Ok(Some(state)) = store::load(path) {
+            self.annotations = state.annotations;
+        }
+    }
+
+    /// Annotations anchored to the file currently open in the diff pane.
+    fn current_file_annotations(&self) -> Vec<&Annotation> {
+        let path = self.current().display_path();
+        self.annotations.iter().filter(|a| a.file == path).collect()
+    }
+
+    /// A `(side, line) -> severity` map of gutter marks for the current file,
+    /// keeping the most severe annotation when several anchor to one line.
+    /// `Severity` is `Ord`, so `max` picks the colour the gutter should show.
+    fn line_marks(&self) -> HashMap<(Side, u32), Severity> {
+        let path = self.current().display_path();
+        let mut marks: HashMap<(Side, u32), Severity> = HashMap::new();
+        for a in self.annotations.iter().filter(|a| a.file == path) {
+            marks
+                .entry((a.side, a.line))
+                .and_modify(|s| *s = (*s).max(a.severity))
+                .or_insert(a.severity);
+        }
+        marks
     }
 
     /// Open file `idx`, rebuilding the cached view and resetting the scroll.
@@ -215,6 +305,7 @@ impl App {
             KeyCode::Char('q') => return true,
             KeyCode::Char('c') if ctrl => return true,
             KeyCode::Char('?') => self.show_help = true,
+            KeyCode::Char('a') => self.show_panel = !self.show_panel,
             KeyCode::Tab | KeyCode::BackTab => self.toggle_focus(),
 
             // Half / full page, regardless of focus, scroll the diff.
@@ -277,8 +368,21 @@ impl App {
 fn render(frame: &mut Frame, app: &mut App) {
     let [main, status] =
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
-    let [tree, diff] =
-        Layout::horizontal([Constraint::Percentage(28), Constraint::Min(0)]).areas(main);
+
+    // The annotations panel claims a right-hand column when toggled on.
+    let (tree, diff, panel) = if app.show_panel {
+        let [tree, diff, panel] = Layout::horizontal([
+            Constraint::Percentage(24),
+            Constraint::Min(0),
+            Constraint::Length(40),
+        ])
+        .areas(main);
+        (tree, diff, Some(panel))
+    } else {
+        let [tree, diff] =
+            Layout::horizontal([Constraint::Percentage(28), Constraint::Min(0)]).areas(main);
+        (tree, diff, None)
+    };
 
     // Inner heights (minus the one-row borders top and bottom) drive paging and
     // keep the tree selection visible.
@@ -288,6 +392,9 @@ fn render(frame: &mut Frame, app: &mut App) {
 
     render_tree(frame, tree, app);
     render_diff(frame, diff, app);
+    if let Some(panel) = panel {
+        render_panel(frame, panel, app);
+    }
     render_status(frame, status, app);
 
     if app.show_help {
@@ -349,25 +456,101 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
 }
 
 /// The center diff pane: only the visible window of rows is built into spans.
+/// Lines carrying annotations get a severity-coloured gutter mark; when the file
+/// has any annotations every row reserves the mark column so text stays aligned.
 fn render_diff(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == Focus::Diff;
+    let marks = app.line_marks();
+    let gutter = !marks.is_empty();
     let file = app.current();
     let height = app.diff_height.max(1);
     let end = (app.scroll + height).min(app.view.rows.len());
 
     let lines: Vec<Line> = app.view.rows[app.scroll..end]
         .iter()
-        .map(row_to_line)
+        .map(|row| row_to_line(row, gutter, &marks))
         .collect();
 
-    let title = format!(
-        " {} [{}] {}/{} ",
-        file.display_path(),
-        status_word(&file.status),
-        app.selected + 1,
-        app.files.len()
-    );
+    let count = marks.len();
+    let title = if count == 0 {
+        format!(
+            " {} [{}] {}/{} ",
+            file.display_path(),
+            status_word(&file.status),
+            app.selected + 1,
+            app.files.len()
+        )
+    } else {
+        format!(
+            " {} [{}] {}/{}  {MARK}{count} ",
+            file.display_path(),
+            status_word(&file.status),
+            app.selected + 1,
+            app.files.len(),
+        )
+    };
     frame.render_widget(Paragraph::new(lines).block(bordered(&title, focused)), area);
+}
+
+/// The right-hand annotations panel: every annotation on the current file, each
+/// with a severity-coloured mark, its anchor line, author, optional tag, status,
+/// and a one-line body preview. Threaded replies are indented under their parent.
+fn render_panel(frame: &mut Frame, area: Rect, app: &App) {
+    let path = app.current().display_path();
+    let here = app.current_file_annotations();
+
+    let mut lines: Vec<Line> = Vec::new();
+    if here.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No annotations on this file.",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )));
+        let elsewhere = app.annotations.len();
+        if elsewhere > 0 {
+            lines.push(Line::raw(""));
+            lines.push(Line::from(Span::styled(
+                format!("{elsewhere} on other files."),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    } else {
+        for a in &here {
+            let indent = if a.is_reply() { "  " } else { "" };
+            let tag = a
+                .tag
+                .map(|t| format!(" {}", tag_symbol(t)))
+                .unwrap_or_default();
+            let header = format!(
+                "{indent}{MARK} L{} {}{}  {}",
+                a.line,
+                author_word(a.author),
+                tag,
+                ann_status(a.status),
+            );
+            lines.push(Line::from(vec![Span::styled(
+                header,
+                Style::default().fg(severity_color(a.severity)),
+            )]));
+            // First body line as a preview; the panel stays scannable.
+            if let Some(preview) = a.body.lines().next() {
+                lines.push(Line::from(Span::styled(
+                    format!("{indent}  {preview}"),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+            lines.push(Line::raw(""));
+        }
+    }
+
+    let title = format!(" Annotations · {} ({}) ", path, here.len());
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(bordered(&title, false))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 /// The bottom status bar: target, position, counts, focus, and the help hint.
@@ -388,13 +571,23 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         Focus::Diff => "diff",
     };
 
+    // The annotation segment is omitted entirely when there are none, so an
+    // unannotated review reads exactly as the milestone-1 viewer did.
+    let annotations = if app.annotations.is_empty() {
+        String::new()
+    } else {
+        let open = app.annotations.iter().filter(|a| a.is_open()).count();
+        format!("  ·  {MARK} {} ({open} open)", app.annotations.len())
+    };
+
     let left = format!(
-        " {}  ·  file {}/{}  ·  +{} -{}  ·  [{}] {}",
+        " {}  ·  file {}/{}  ·  +{} -{}{}  ·  [{}] {}",
         target_desc(&app.target),
         app.selected + 1,
         app.files.len(),
         file.additions,
         file.deletions,
+        annotations,
         focus,
         scroll_pct,
     );
@@ -434,6 +627,12 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::raw("  l / Enter    file tree → diff"),
         Line::raw("  h            diff → file tree"),
         Line::raw(""),
+        Line::from(Span::styled(
+            "Annotations",
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::raw("  a            toggle the annotations panel"),
+        Line::raw(""),
         Line::from(Span::styled("Other", Style::default().fg(Color::Cyan))),
         Line::raw("  ?            toggle this help"),
         Line::raw("  q / Ctrl-c   quit"),
@@ -454,28 +653,35 @@ fn render_help(frame: &mut Frame, area: Rect) {
     );
 }
 
-/// Turn one diff row into a styled line.
-fn row_to_line(row: &Row) -> Line<'static> {
+/// Turn one diff row into a styled line. `gutter` reserves the annotation-mark
+/// column (so non-content rows stay aligned with marked lines); `marks` supplies
+/// the per-`(side, line)` severities to colour the mark.
+fn row_to_line(row: &Row, gutter: bool, marks: &HashMap<(Side, u32), Severity>) -> Line<'static> {
+    let pad = if gutter { " " } else { "" };
     match row {
         Row::Hunk(text) => Line::from(Span::styled(
-            text.clone(),
+            format!("{pad}{text}"),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )),
         Row::Notice(text) => Line::from(Span::styled(
-            text.clone(),
+            format!("{pad}{text}"),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
         )),
-        Row::Line(line) => diff_line(line),
+        Row::Line(line) => diff_line(line, gutter, marks),
     }
 }
 
-/// Format a content line: a `old new` gutter, a `+`/`-`/space marker, then the
-/// text, coloured by kind.
-fn diff_line(line: &DiffLine) -> Line<'static> {
+/// Format a content line: an optional annotation mark, an `old new` gutter, a
+/// `+`/`-`/space marker, then the text, coloured by kind.
+fn diff_line(
+    line: &DiffLine,
+    gutter: bool,
+    marks: &HashMap<(Side, u32), Severity>,
+) -> Line<'static> {
     let (marker, color) = match line.kind {
         LineKind::Addition => ('+', Color::Green),
         LineKind::Deletion => ('-', Color::Red),
@@ -484,7 +690,7 @@ fn diff_line(line: &DiffLine) -> Line<'static> {
 
     let old = line.old_lineno.map(|n| n.to_string()).unwrap_or_default();
     let new = line.new_lineno.map(|n| n.to_string()).unwrap_or_default();
-    let gutter = format!("{old:>5} {new:>5} ");
+    let numbers = format!("{old:>5} {new:>5} ");
 
     // Tabs render unpredictably across terminals; expand to a 4-space stop.
     let content = line.content.replace('\t', "    ");
@@ -494,11 +700,29 @@ fn diff_line(line: &DiffLine) -> Line<'static> {
         _ => Style::default().fg(color),
     };
 
-    Line::from(vec![
-        Span::styled(gutter, Style::default().fg(Color::DarkGray)),
-        Span::styled(format!("{marker} "), Style::default().fg(color)),
-        Span::styled(content, text_style),
-    ])
+    let mut spans = Vec::with_capacity(4);
+    if gutter {
+        // The mark sits on whichever side the line exists on (an addition only
+        // on RIGHT, a deletion only on LEFT, context on either).
+        let severity = line
+            .new_lineno
+            .and_then(|n| marks.get(&(Side::Right, n)))
+            .or_else(|| line.old_lineno.and_then(|n| marks.get(&(Side::Left, n))));
+        match severity {
+            Some(sev) => spans.push(Span::styled(
+                MARK,
+                Style::default().fg(severity_color(*sev)),
+            )),
+            None => spans.push(Span::raw(" ")),
+        }
+    }
+    spans.push(Span::styled(numbers, Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(
+        format!("{marker} "),
+        Style::default().fg(color),
+    ));
+    spans.push(Span::styled(content, text_style));
+    Line::from(spans)
 }
 
 /// A bordered block whose border brightens when its pane is focused.
@@ -532,6 +756,49 @@ fn status_word(status: &FileStatus) -> &'static str {
         FileStatus::Modified => "modified",
         FileStatus::Renamed => "renamed",
     }
+}
+
+/// The gutter/panel colour for an annotation's severity.
+fn severity_color(severity: Severity) -> Color {
+    match severity {
+        Severity::Info => Color::Blue,
+        Severity::Suggestion => Color::Cyan,
+        Severity::Warning => Color::Yellow,
+        Severity::Blocker => Color::Red,
+    }
+}
+
+/// Single-word author label for the annotations panel.
+fn author_word(author: Author) -> &'static str {
+    match author {
+        Author::Agent => "agent",
+        Author::Human => "human",
+    }
+}
+
+/// Single-word status label for an annotation (distinct from a file's status).
+fn ann_status(status: Status) -> &'static str {
+    match status {
+        Status::Open => "open",
+        Status::Resolved => "resolved",
+        Status::Wontfix => "wontfix",
+        Status::Withdrawn => "withdrawn",
+    }
+}
+
+/// The one-character tag symbol shown in the panel.
+fn tag_symbol(tag: crate::domain::Tag) -> &'static str {
+    use crate::domain::Tag;
+    match tag {
+        Tag::Question => "?",
+        Tag::Concern => "!",
+        Tag::Direction => ">",
+    }
+}
+
+/// The store file's modification time, or `None` if it can't be read.
+fn mtime(path: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// Short description of what's under review, for the status bar.
@@ -665,6 +932,38 @@ rename to src/relocated.rs
         )
     }
 
+    /// Build an annotation with byte-stable fields (fixed clock/id) for snapshots.
+    fn note(
+        id: &str,
+        author: Author,
+        file: &str,
+        side: Side,
+        line: u32,
+        sev: Severity,
+    ) -> Annotation {
+        Annotation {
+            id: id.to_string(),
+            author,
+            file: file.to_string(),
+            line,
+            side,
+            severity: sev,
+            tag: None,
+            status: Status::Open,
+            body: format!("body for {id}"),
+            reply_to: None,
+            created_at: "2026-05-28T12:00:00Z".parse().unwrap(),
+            updated_at: "2026-05-28T12:00:00Z".parse().unwrap(),
+        }
+    }
+
+    /// An app pre-loaded with annotations (no store path; reload is not exercised).
+    fn annotated_app(annotations: Vec<Annotation>) -> App {
+        let mut a = app();
+        a.annotations = annotations;
+        a
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -711,6 +1010,19 @@ rename to src/relocated.rs
         let buf = term.backend().buffer();
         (0..buf.area.height).any(|y| {
             (0..buf.area.width).any(|x| buf.cell((x, y)).map(|c| c.style().bg) == Some(Some(bg)))
+        })
+    }
+
+    /// Whether any cell in `rows` (inclusive y range) renders `sym` with `fg`.
+    /// Used to find a gutter mark in the diff *body* while ignoring the same
+    /// glyph in the pane title (y == 0) and the status bar (bottom row).
+    fn has_fg_symbol(term: &Terminal<TestBackend>, sym: &str, fg: Color, rows: (u16, u16)) -> bool {
+        let buf = term.backend().buffer();
+        (rows.0..=rows.1).any(|y| {
+            (0..buf.area.width).any(|x| {
+                buf.cell((x, y))
+                    .is_some_and(|c| c.symbol() == sym && c.style().fg == Some(fg))
+            })
         })
     }
 
@@ -941,5 +1253,125 @@ rename to src/relocated.rs
             any_cell_has_bg(&term, Color::Rgb(30, 33, 40)),
             "status bar has its background fill"
         );
+    }
+
+    // ---- annotations: gutter marks, panel, and the lookup map --------------
+
+    /// Two annotations on alpha.rs (the file open at launch): a blocker on the
+    /// `let x = 2;` addition (RIGHT line 2) and an info on a context line.
+    fn alpha_notes() -> Vec<Annotation> {
+        vec![
+            note(
+                "blk00001",
+                Author::Agent,
+                "src/alpha.rs",
+                Side::Right,
+                2,
+                Severity::Blocker,
+            ),
+            note(
+                "inf00002",
+                Author::Human,
+                "src/alpha.rs",
+                Side::Right,
+                4,
+                Severity::Info,
+            ),
+        ]
+    }
+
+    #[test]
+    fn gutter_marks_render_on_annotated_lines() {
+        let term = drive(&mut annotated_app(alpha_notes()), 100, 24, &[]);
+        // A severity-coloured mark appears in the diff body (rows 1..22, between
+        // the pane title and the status bar). The blocker is red; the info, blue.
+        assert!(has_fg_symbol(&term, MARK, Color::Red, (1, 22)));
+        assert!(has_fg_symbol(&term, MARK, Color::Blue, (1, 22)));
+        insta::assert_snapshot!(screen(&term));
+    }
+
+    #[test]
+    fn unannotated_file_has_no_gutter_column() {
+        // README.md (file index 2) carries no annotations, so its diff body has
+        // no reserved mark column — even while other files do.
+        let mut a = annotated_app(alpha_notes());
+        let term = drive(&mut a, 100, 24, &[key(KeyCode::Char('j')); 2]);
+        assert_eq!(a.current().display_path(), "README.md");
+        assert!(a.line_marks().is_empty());
+        // No mark in the diff body; the status bar's total-count glyph (bottom
+        // row) is expected and excluded by the row range.
+        assert!(!has_fg_symbol(&term, MARK, Color::Red, (1, 22)));
+        assert!(!has_fg_symbol(&term, MARK, Color::Blue, (1, 22)));
+    }
+
+    #[test]
+    fn annotations_panel_lists_current_file() {
+        // `a` toggles the panel; it lists alpha.rs's two annotations.
+        let mut a = annotated_app(alpha_notes());
+        let term = drive(&mut a, 100, 24, &[key(KeyCode::Char('a'))]);
+        assert!(a.show_panel);
+        let text = screen(&term);
+        assert!(text.contains("Annotations"));
+        assert!(text.contains("L2 agent"));
+        assert!(text.contains("L4 human"));
+        insta::assert_snapshot!(text);
+    }
+
+    #[test]
+    fn status_bar_shows_annotation_count() {
+        let term = drive(&mut annotated_app(alpha_notes()), 100, 24, &[]);
+        // Two annotations, both open.
+        assert!(screen(&term).contains("2 (2 open)"));
+    }
+
+    #[test]
+    fn line_marks_keep_the_most_severe_per_line() {
+        // A warning and a blocker collide on the same (side, line): blocker wins.
+        let a = annotated_app(vec![
+            note(
+                "w0000001",
+                Author::Agent,
+                "src/alpha.rs",
+                Side::Right,
+                2,
+                Severity::Warning,
+            ),
+            note(
+                "b0000002",
+                Author::Agent,
+                "src/alpha.rs",
+                Side::Right,
+                2,
+                Severity::Blocker,
+            ),
+        ]);
+        let marks = a.line_marks();
+        assert_eq!(marks.get(&(Side::Right, 2)), Some(&Severity::Blocker));
+    }
+
+    #[test]
+    fn current_file_annotations_filter_by_path() {
+        let a = annotated_app(vec![
+            note(
+                "a0000001",
+                Author::Agent,
+                "src/alpha.rs",
+                Side::Right,
+                2,
+                Severity::Info,
+            ),
+            note(
+                "o0000002",
+                Author::Agent,
+                "README.md",
+                Side::Right,
+                1,
+                Severity::Info,
+            ),
+        ]);
+        // alpha.rs is selected at launch.
+        let here = a.current_file_annotations();
+        assert_eq!(here.len(), 1);
+        assert_eq!(here[0].id, "a0000001");
     }
 }

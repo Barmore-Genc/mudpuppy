@@ -118,11 +118,18 @@ all has to work for local-only repos with no PR number.
 
 **Session key = canonical git repo root + review target.** Target is `local`
 (default) or `pr:<n>`. The store path encodes both:
-`~/.local/share/mudpuppy/<repo-slug>/<target>/annotations.json`, where
-`<repo-slug>` is the remote `owner/repo` when there is one, else the sanitized
-canonical repo path (so no-remote repos work). Keying off the **repo, not a
-process**, is what makes resume automatic: reopen in the same repo → same path →
-state reloads.
+`<data-dir>/mudpuppy/<repo-slug>/<target>/annotations.json`, where `<data-dir>`
+is the platform data dir (`~/.local/share` on Linux) or the `MUDPUPPY_DATA_DIR`
+override, and `<repo-slug>` is the remote `owner/repo` when there is one, else
+the sanitized canonical repo path (so no-remote repos work). A `local` target
+maps to the `local/` subdir; a PR maps to `pr/<sanitized>/`. Keying off the
+**repo, not a process**, is what makes resume automatic: reopen in the same repo
+→ same path → state reloads.
+
+> **Status (milestone 2):** path derivation + the store (load / merge-by-id /
+> atomic+locked save) are implemented (`session`, `store`). The liveness pidfile,
+> live-session attach, and reset-vs-staleness distinction are still to come; the
+> agent currently resolves the `local` target directly.
 
 **Resolution order** for any command (no flags needed in the common case):
 
@@ -223,16 +230,21 @@ store); only `wait` needs a live human to ever unblock.
 
 ## 10. Build order (milestones)
 
-1. **Read-only viewer.** Cargo project + module skeleton; the diff-source
-   abstraction (local `git` + PR `gh`); hand-rolled parser; ratatui browsing
-   (file tree / diff pane / status bar) with syntect highlighting and
-   virtualized rendering; session/store-path resolution. No annotations yet.
-   Proves the hard rendering/scale problem early.
-2. **Annotations in the TUI.** Create / read / reply / status in the store;
-   atomic+locked merge-by-id writes; gutter + side panel; anchoring + staleness
-   handling; live reload.
-3. **Agent CLI.** The `agent` subcommands, the `wait` turn rendezvous over
-   `notify`, first-contact approval, and `reset`. End-to-end turn-based loop.
+1. **Read-only viewer.** ✅ Done. Cargo project + module skeleton; the
+   diff-source abstraction (local `git` + PR `gh`); hand-rolled parser; ratatui
+   browsing (file tree / diff pane / status bar) with virtualized rendering. (Syntect
+   highlighting deferred.) Proved the hard rendering/scale problem early.
+2. **Annotations in the store + TUI.** 🟡 In progress. Done: the `store`
+   (atomic+locked merge-by-id writes), `session` store-path resolution, the
+   `agent comment` lifecycle (add / list / edit / cancel / resolve / reopen /
+   wontfix) + `diff` + `reset`, and TUI **display** (gutter markers, side panel,
+   status count) with mtime-poll live reload. Still to do: authoring annotations
+   from *inside* the TUI (needs a line cursor), and anchoring + staleness
+   handling. This is the proof-of-concept slice: the agent writes, the human's
+   TUI shows it live.
+3. **Turn protocol.** The `wait` rendezvous over `notify` (replacing the mtime
+   poll), first-contact approval, the live-session pidfile, and the TUI's
+   turn-release keybind. Closes the end-to-end turn-based loop.
 
 ## 11. Testing
 

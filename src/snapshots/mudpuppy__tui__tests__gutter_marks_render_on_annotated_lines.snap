@@ -1,0 +1,28 @@
+---
+source: src/tui.rs
+expression: screen(&term)
+---
+"┌ Files (7) ───────────────┐┌ src/alpha.rs [modified] 1/7  ●2 ─────────────────────────────────────┐"
+"│M src/alpha.rs  +3 -2     ││ @@ -1,4 +1,5 @@ fn alpha() {                                         │"
+"│M src/long.rs  +4 -2      ││     1     1   use std::io;                                           │"
+"│M README.md  +1 -1        ││     2       - let x = 1;                                             │"
+"│A src/new_module.rs  +3 -0││●          2 + let x = 2;                                             │"
+"│D old.txt  +0 -2          ││           3 + let y = 3;                                             │"
+"│A assets/logo.png  +0 -0  ││●    3     4   println!("{x}");                                       │"
+"│R src/relocated.rs  +0 -0 ││     4     5   done                                                   │"
+"│                          ││ @@ -20,2 +21,2 @@ fn beta() {                                        │"
+"│                          ││    20    21   let beta = compute();                                  │"
+"│                          ││    21       - old beta                                               │"
+"│                          ││          22 + new beta                                               │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"└──────────────────────────┘└──────────────────────────────────────────────────────────────────────┘"
+" local vs main  ·  file 1/7  ·  +3 -2  ·  ● 2 (2 open)  ·  [tree] ALL  ? help  q quit               "

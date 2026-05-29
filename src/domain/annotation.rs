@@ -1,7 +1,25 @@
 //! The [`Annotation`] type and its associated enums.
 
+use std::str::FromStr;
+
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Failure to parse one of the annotation enums from a CLI string.
+///
+/// Carries the offending value and the set of accepted spellings so the agent
+/// gets an actionable message (its only feedback channel is the CLI).
+#[derive(Debug, Error, PartialEq, Eq)]
+#[error("invalid {kind} `{value}` (expected one of: {expected})")]
+pub struct ParseEnumError {
+    /// Which enum was being parsed (e.g. `severity`).
+    pub kind: &'static str,
+    /// The string that failed to parse.
+    pub value: String,
+    /// Comma-separated list of accepted spellings.
+    pub expected: &'static str,
+}
 
 /// Who authored an annotation (or owns the current turn).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -57,11 +75,93 @@ pub enum Status {
 /// Which side of the diff a line lives on, used purely for anchoring.
 ///
 /// `Right` is the added/new side; `Left` is the removed/old side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Side {
     Right,
     Left,
+}
+
+impl FromStr for Author {
+    type Err = ParseEnumError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "agent" => Ok(Author::Agent),
+            "human" => Ok(Author::Human),
+            _ => Err(ParseEnumError {
+                kind: "author",
+                value: s.to_string(),
+                expected: "agent, human",
+            }),
+        }
+    }
+}
+
+impl FromStr for Severity {
+    type Err = ParseEnumError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "info" => Ok(Severity::Info),
+            "suggestion" => Ok(Severity::Suggestion),
+            "warning" => Ok(Severity::Warning),
+            "blocker" => Ok(Severity::Blocker),
+            _ => Err(ParseEnumError {
+                kind: "severity",
+                value: s.to_string(),
+                expected: "info, suggestion, warning, blocker",
+            }),
+        }
+    }
+}
+
+impl FromStr for Tag {
+    type Err = ParseEnumError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // Accept the wire symbols and the spelled-out names interchangeably; the
+        // agent may reach for either.
+        match s.to_ascii_lowercase().as_str() {
+            "?" | "question" => Ok(Tag::Question),
+            "!" | "concern" => Ok(Tag::Concern),
+            ">" | "direction" => Ok(Tag::Direction),
+            _ => Err(ParseEnumError {
+                kind: "tag",
+                value: s.to_string(),
+                expected: "?, !, >",
+            }),
+        }
+    }
+}
+
+impl FromStr for Status {
+    type Err = ParseEnumError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "open" => Ok(Status::Open),
+            "resolved" => Ok(Status::Resolved),
+            "wontfix" => Ok(Status::Wontfix),
+            "withdrawn" => Ok(Status::Withdrawn),
+            _ => Err(ParseEnumError {
+                kind: "status",
+                value: s.to_string(),
+                expected: "open, resolved, wontfix, withdrawn",
+            }),
+        }
+    }
+}
+
+impl FromStr for Side {
+    type Err = ParseEnumError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "right" => Ok(Side::Right),
+            "left" => Ok(Side::Left),
+            _ => Err(ParseEnumError {
+                kind: "side",
+                value: s.to_string(),
+                expected: "right, left",
+            }),
+        }
+    }
 }
 
 /// A single annotation on a line of the diff under review.
@@ -169,6 +269,27 @@ mod tests {
         assert!(Severity::Info < Severity::Suggestion);
         assert!(Severity::Suggestion < Severity::Warning);
         assert!(Severity::Warning < Severity::Blocker);
+    }
+
+    #[test]
+    fn enums_parse_from_cli_strings_case_insensitively() {
+        assert_eq!("agent".parse::<Author>().unwrap(), Author::Agent);
+        assert_eq!("HUMAN".parse::<Author>().unwrap(), Author::Human);
+        assert_eq!("blocker".parse::<Severity>().unwrap(), Severity::Blocker);
+        assert_eq!("Left".parse::<Side>().unwrap(), Side::Left);
+        assert_eq!("wontfix".parse::<Status>().unwrap(), Status::Wontfix);
+        // Tags accept both the wire symbol and the spelled-out name.
+        assert_eq!("?".parse::<Tag>().unwrap(), Tag::Question);
+        assert_eq!("concern".parse::<Tag>().unwrap(), Tag::Concern);
+    }
+
+    #[test]
+    fn unknown_enum_value_reports_accepted_set() {
+        let err = "critical".parse::<Severity>().unwrap_err();
+        assert_eq!(err.kind, "severity");
+        assert_eq!(err.value, "critical");
+        let msg = err.to_string();
+        assert!(msg.contains("info, suggestion, warning, blocker"), "{msg}");
     }
 
     #[test]

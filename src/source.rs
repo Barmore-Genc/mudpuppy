@@ -29,20 +29,32 @@ pub struct LoadedDiff {
     pub raw: String,
 }
 
-/// Load the diff under review.
+/// Load the diff under review along with its [`Target`].
 ///
 /// `pr` selects a pull-request target (anything `gh pr diff` accepts: a number,
 /// `owner/repo#123`, or a URL); otherwise the review targets local changes,
 /// with `base` overriding the inferred base ref.
 pub fn load(pr: Option<&str>, base: Option<&str>) -> Result<LoadedDiff> {
+    let target = resolve_target(pr, base)?;
+    let raw = raw_diff(&target)?;
+    Ok(LoadedDiff { target, raw })
+}
+
+/// Resolve just the [`Target`] (base ref + head SHA) without fetching the diff
+/// body. The agent's write commands need the target — to stamp a fresh store and
+/// to key its path — but not the (potentially huge) diff text, so they take this
+/// cheaper path. [`load`] produces an identical target.
+pub fn resolve_target(pr: Option<&str>, base: Option<&str>) -> Result<Target> {
     match pr {
-        Some(pr) => load_pr(pr),
-        None => load_local(base),
+        Some(pr) => resolve_pr_target(pr),
+        None => resolve_local_target(base),
     }
 }
 
-/// Load local `git` changes against `base` (or the inferred default branch).
-fn load_local(base: Option<&str>) -> Result<LoadedDiff> {
+/// Resolve the local-changes target against `base` (or the inferred default
+/// branch). The base ref is stored as `"HEAD"` when none could be resolved,
+/// which [`raw_diff`] reads as "uncommitted changes vs HEAD".
+fn resolve_local_target(base: Option<&str>) -> Result<Target> {
     // Doubles as the "are we in a git repo?" check.
     git(&["rev-parse", "--show-toplevel"])
         .context("not inside a git repository (mudpuppy reviews a repo's changes)")?;
@@ -52,39 +64,20 @@ fn load_local(base: Option<&str>) -> Result<LoadedDiff> {
         None => default_branch()?,
     };
 
-    let raw = match &resolved_base {
-        // Compare the working tree against the merge-base of <base> and HEAD, so
-        // the diff is exactly this branch's work including uncommitted edits.
-        Some(base_ref) => git(&["diff", "--merge-base", base_ref])
-            .with_context(|| format!("computing diff against base `{base_ref}`"))?,
-        // No base to anchor to (no default branch found, none given): fall back
-        // to uncommitted changes against HEAD.
-        None => git(&["diff", "HEAD"]).context("computing diff against HEAD")?,
-    };
-
     let head_sha = git(&["rev-parse", "HEAD"])
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
 
-    Ok(LoadedDiff {
-        target: Target::Local {
-            base: resolved_base.unwrap_or_else(|| "HEAD".to_string()),
-            head_sha,
-        },
-        raw,
+    Ok(Target::Local {
+        base: resolved_base.unwrap_or_else(|| "HEAD".to_string()),
+        head_sha,
     })
 }
 
-/// Load a GitHub pull request's diff via `gh` (read-only).
-fn load_pr(pr: &str) -> Result<LoadedDiff> {
-    // `gh pr diff` accepts a number or URL directly, but not the documented
-    // `owner/repo#123` form — translate that into `<n> --repo owner/repo`.
+/// Resolve a pull-request target via `gh pr view` (read-only). The head SHA is
+/// best-effort: the diff is still usable without it.
+fn resolve_pr_target(pr: &str) -> Result<Target> {
     let selector = gh_pr_selector(pr);
-    let mut diff_args = vec!["pr", "diff"];
-    diff_args.extend(selector.iter().map(String::as_str));
-    let raw = gh(&diff_args).with_context(|| format!("fetching diff for PR `{pr}`"))?;
-
-    // Best-effort head SHA; the diff is still usable without it.
     let mut view_args = vec!["pr", "view"];
     view_args.extend(selector.iter().map(String::as_str));
     view_args.extend(["--json", "headRefOid", "-q", ".headRefOid"]);
@@ -92,13 +85,35 @@ fn load_pr(pr: &str) -> Result<LoadedDiff> {
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
 
-    Ok(LoadedDiff {
-        target: Target::Pr {
-            pr: pr.to_string(),
-            head_sha,
-        },
-        raw,
+    Ok(Target::Pr {
+        pr: pr.to_string(),
+        head_sha,
     })
+}
+
+/// Fetch the raw unified diff for an already-resolved [`Target`].
+fn raw_diff(target: &Target) -> Result<String> {
+    match target {
+        Target::Local { base, .. } if base == "HEAD" => {
+            // No base anchor: uncommitted changes against HEAD.
+            git(&["diff", "HEAD"]).context("computing diff against HEAD")
+        }
+        Target::Local { base, .. } => {
+            // Compare the working tree against the merge-base of <base> and HEAD,
+            // so the diff is exactly this branch's work including uncommitted
+            // edits.
+            git(&["diff", "--merge-base", base])
+                .with_context(|| format!("computing diff against base `{base}`"))
+        }
+        Target::Pr { pr, .. } => {
+            // `gh pr diff` accepts a number or URL directly, but not the
+            // documented `owner/repo#123` form — translate that.
+            let selector = gh_pr_selector(pr);
+            let mut diff_args = vec!["pr", "diff"];
+            diff_args.extend(selector.iter().map(String::as_str));
+            gh(&diff_args).with_context(|| format!("fetching diff for PR `{pr}`"))
+        }
+    }
 }
 
 /// Build the `gh` PR selector arguments for a user-supplied PR reference.
@@ -137,8 +152,9 @@ fn default_branch() -> Result<Option<String>> {
     Ok(None)
 }
 
-/// Run `git` with `args`, returning stdout on success.
-fn git(args: &[&str]) -> Result<String> {
+/// Run `git` with `args`, returning stdout on success. Shared with [`crate::session`],
+/// which needs the repo root and remote URL to derive the store path.
+pub(crate) fn git(args: &[&str]) -> Result<String> {
     run("git", args)
 }
 
