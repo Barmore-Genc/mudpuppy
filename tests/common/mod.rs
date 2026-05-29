@@ -38,6 +38,13 @@ pub struct Session {
 impl Session {
     /// Launch the real binary with its cwd inside `repo`.
     pub fn launch(repo: &Path) -> Session {
+        Session::launch_with_env(repo, &[])
+    }
+
+    /// Launch with extra environment variables on top of the standard terminal +
+    /// git-config isolation — e.g. `MUDPUPPY_DATA_DIR` so the TUI shares a store
+    /// with a headless `agent` process in the same test.
+    pub fn launch_with_env(repo: &Path, extra_env: &[(&str, &Path)]) -> Session {
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
@@ -55,6 +62,9 @@ impl Session {
         cmd.env("TERM", "xterm-256color");
         cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
         cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
 
         let child = pair.slave.spawn_command(cmd).expect("spawn binary");
         let mut reader = pair.master.try_clone_reader().expect("clone reader");
