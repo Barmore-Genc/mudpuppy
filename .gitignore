@@ -5,6 +5,14 @@
 # Backtrace/profiling output
 *.profraw
 
+# insta pending snapshots — review with `cargo insta review`, never commit.
+# Accepted `.snap` baselines ARE committed (they're the test oracle).
+*.snap.new
+
+# Pixel-oracle review bundle (regenerated each run). The committed oracle is
+# e2e/baselines/*.png; the review/ dir is just the expected|actual|diff viewer.
+/e2e/review/
+
 # Editor / OS cruft
 .DS_Store
 *.swp

@@ -1,0 +1,28 @@
+---
+source: src/tui.rs
+expression: screen(&term)
+---
+"┌ Files (7) ───────────────┐┌ assets/logo.png [added] 6/7 ─────────────────────────────────────────┐"
+"│M src/alpha.rs  +3 -2     ││Binary file — no textual diff to show                                 │"
+"│M src/long.rs  +4 -2      ││                                                                      │"
+"│M README.md  +1 -1        ││                                                                      │"
+"│A src/new_module.rs  +3 -0││                                                                      │"
+"│D old.txt  +0 -2          ││                                                                      │"
+"│A assets/logo.png  +0 -0  ││                                                                      │"
+"│R src/relocated.rs  +0 -0 ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"└──────────────────────────┘└──────────────────────────────────────────────────────────────────────┘"
+" local vs main  ·  file 6/7  ·  +0 -0  ·  [tree] ALL  ? help  q quit                                "

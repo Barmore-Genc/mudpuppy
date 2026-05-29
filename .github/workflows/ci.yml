@@ -88,17 +88,45 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps --all-features
 
+  # Exact-match pixel oracle (TESTING.md Layer 2 / e2e/README.md): render the
+  # real binary inside the pinned amd64 container and pixel-diff against the
+  # committed baselines. PRs only — the review bundle + comment need PR context,
+  # and this is the slow (containerized) layer. The ubuntu runner *is* native
+  # amd64, so no emulation here; baselines are canonical on this arch.
+  snapshots:
+    name: snapshots (pixel oracle)
+    needs: detect
+    if: needs.detect.outputs.has_cargo == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      # Renders the real binary in the pinned amd64 container, pixel-diffs vs
+      # e2e/baselines, and on mismatch publishes the review bundle to S3 +
+      # comments the capability URL (reuses the org CI_S3_* / CI_APPROVE_TOKEN).
+      - uses: ./.github/actions/snapshot-review
+        with:
+          s3-endpoint: ${{ vars.CI_S3_ENDPOINT }}
+          s3-region: ${{ vars.CI_S3_REGION }}
+          s3-bucket: ${{ vars.CI_S3_BUCKET }}
+          s3-key-id: ${{ secrets.CI_S3_KEY_ID }}
+          s3-app-key: ${{ secrets.CI_S3_APP_KEY }}
+          public-base: ${{ vars.CI_S3_PUBLIC_BASE }}
+          github-token: ${{ github.token }}
+
   # A single required check that's easy to mark as required in branch protection:
   # it passes when every dependent job either succeeded or was correctly skipped.
   ci-ok:
     name: CI passed
-    needs: [fmt, clippy, test, docs]
+    needs: [fmt, clippy, test, docs, snapshots]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Verify no job failed
         run: |
-          results='${{ needs.fmt.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.docs.result }}'
+          results='${{ needs.fmt.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.docs.result }} ${{ needs.snapshots.result }}'
           echo "Job results: $results"
           for r in $results; do
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then

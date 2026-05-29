@@ -1,0 +1,73 @@
+name: Snapshot review
+description: >
+  Run the containerized pixel oracle. On mismatch, publish a review bundle to an
+  S3-compatible object store and post (or update) a single PR comment linking to
+  it, then fail the check so it stays red until `approve baseline`. All logic
+  lives in scripts/ so the calling workflow stays tiny. Modeled on willet-cloud's
+  snapshot-review action.
+
+inputs:
+  s3-endpoint: { required: true, description: S3-compatible endpoint URL }
+  s3-region: { required: true, description: S3 region }
+  s3-bucket: { required: true, description: Public bucket name }
+  s3-key-id: { required: true, description: S3 access key id }
+  s3-app-key: { required: true, description: S3 secret access key }
+  public-base: { required: true, description: Public base URL for bucket objects (no trailing slash) }
+  github-token: { required: true, description: Token with PR write for commenting }
+
+runs:
+  using: composite
+  steps:
+    - name: Run pixel oracle (containerized)
+      id: snap
+      shell: bash
+      continue-on-error: true
+      # Call the script directly — the runner needs only Docker + git + aws; the
+      # oracle itself runs in the pinned container.
+      run: ./scripts/test-snapshots.sh
+
+    - name: Publish review bundle + comment
+      if: steps.snap.outcome == 'failure'
+      shell: bash
+      env:
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        CI_S3_ENDPOINT: ${{ inputs.s3-endpoint }}
+        CI_S3_REGION: ${{ inputs.s3-region }}
+        CI_S3_BUCKET: ${{ inputs.s3-bucket }}
+        CI_S3_KEY_ID: ${{ inputs.s3-key-id }}
+        CI_S3_APP_KEY: ${{ inputs.s3-app-key }}
+        CI_S3_PUBLIC_BASE: ${{ inputs.public-base }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        URL="$(./scripts/snapshot-bundle.sh | tail -n1)"
+        MARKER="<!-- snapshot-review -->"
+        BODY="$MARKER
+        ### 📸 Snapshot changes need review
+
+        This PR changed rendered output. Review the diffs:
+
+        **[→ Open snapshot review]($URL)**
+
+        If the new rendering is correct, comment \`approve baseline\` and the
+        baselines will be updated on this branch automatically."
+
+        # Upsert: edit our previous comment if present, else create one.
+        PR="${PR_NUMBER}"
+        ID="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+              --jq "map(select(.body|startswith(\"$MARKER\")))|last|.id // empty")"
+        if [[ -n "$ID" ]]; then
+          gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${ID}" \
+            -f body="$BODY" >/dev/null
+        else
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+            -f body="$BODY" >/dev/null
+        fi
+
+    - name: Fail if snapshots mismatched
+      if: steps.snap.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "Snapshot mismatch — see the review comment on the PR." >&2
+        exit 1

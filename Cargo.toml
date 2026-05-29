@@ -42,10 +42,30 @@ jiff = { version = "0.2", features = ["serde"] }
 thiserror = "2"
 anyhow = "1"
 
-# NOTE: the remaining planned dependencies (ratatui + crossterm, tokio, notify,
-# syntect, directories, tempfile, fs4) are intentionally not added yet. Each
-# lands with the milestone that first uses it (see PLAN.md §2 and §10) to keep
-# the dependency set lean and justified.
+# Terminal UI for the diff viewer. crossterm is used via ratatui's re-export
+# (`ratatui::crossterm`) so the two can't drift out of version sync.
+ratatui = "0.29"
+
+# NOTE: the remaining planned dependencies (tokio, notify, syntect, directories,
+# tempfile, fs4) are intentionally not added yet. Each lands with the milestone
+# that first uses it (see PLAN.md §2 and §10) to keep the dependency set lean
+# and justified.
 
 [dev-dependencies]
 serde_json = "1"
+
+# Layer 1 (unit/integration) — snapshot the ratatui `TestBackend` buffer. See
+# TESTING.md: `cargo insta review` accepts/rejects, tests fail on mismatch.
+insta = "1"
+
+# Layer 2 (end-to-end) — drive the real binary through a pseudo-terminal. A PTY
+# is required because the TUI enters raw mode + the alternate screen, which a
+# plain piped subprocess can't provide. `vt100` interprets the escape stream
+# into a settled character grid, so assertions read the *screen a user sees*
+# (robust to ratatui's incremental cell-level redraws) rather than scraping raw
+# bytes. vt100 0.15 rides unicode-width 0.1, side-stepping ratatui's 0.2.0 pin.
+portable-pty = "0.9"
+vt100 = "0.15"
+
+# Byte-stable throwaway git repos for the e2e fixtures (never the real repo).
+tempfile = "3"
