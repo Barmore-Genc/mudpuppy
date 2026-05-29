@@ -1,8 +1,8 @@
 # e2e — the exact-match pixel oracle
 
 This is **Layer 2's exact-match oracle** from [`../TESTING.md`](../TESTING.md):
-the real binary, rendered to **actual pixels** inside a **pinned `linux/amd64`
-container** and pixel-diffed against committed baselines at **zero tolerance**.
+the real binary, rendered to **actual pixels** and pixel-diffed against committed
+baselines at **zero tolerance**.
 
 The design is lifted from willet-cloud's screenshot/approval workflow (Playwright
 + Vitest + pixelmatch in a pinned Playwright image), adapted for a TUI: the
@@ -10,10 +10,18 @@ The design is lifted from willet-cloud's screenshot/approval workflow (Playwrigh
 [`resvg`](https://github.com/linebender/resvg) rasterizing the settled screen
 (emitted as a truecolor SVG) to a lossless PNG.
 
+> **No container.** This oracle used to run in a pinned `linux/amd64` image. We
+> measured the worst case — render natively on macOS/arm64 and diff against the
+> amd64 baselines — and got **AE=0 on every scenario**: with the vendored font
+> file and the `resvg` version pinned, arch and OS don't move a single pixel
+> (resvg is a pure IEEE-float rasterizer). So the container only ever cost build
+> time we couldn't cache. It's gone; the job now builds natively and caches deps
+> like any other Rust job.
+
 > Runnable today. The fast behavioral layers — Layer 1 (`insta` snapshots in
 > `src/tui.rs`) and the Layer-2 PTY smoke suite (`../tests/e2e.rs`) — run on
-> every push as plain `cargo test`, no Docker. *This* layer is the slow,
-> containerized gate that proves the screen is pixel-for-pixel intended.
+> every push as plain `cargo test`. *This* layer is the slower gate that proves
+> the screen is pixel-for-pixel intended.
 
 ## The loop
 
@@ -25,9 +33,11 @@ The design is lifted from willet-cloud's screenshot/approval workflow (Playwrigh
 ./scripts/test-snapshots.sh --update
 ```
 
-Both build `e2e/Dockerfile` and run it; the only difference is the `--update`
-flag. There is **no other sanctioned way to make baselines**, so a stray render
-from a dev host can never drift in (the workflow rule from TESTING.md).
+Both run [`e2e/scripts/run.sh`](./scripts/run.sh) natively; the only difference is
+the `--update` flag. There is **no other sanctioned way to make baselines**, so a
+stray render can never drift in (the workflow rule from TESTING.md). You need
+`cargo`, `resvg` 0.47.0, and ImageMagick on PATH — on macOS:
+`brew install resvg imagemagick`.
 
 End-to-end developer loop — mirrors willet's *write → run → see diff → approve →
 commit*:
@@ -73,16 +83,15 @@ branch. Locally you can always bypass the whole dance with
 ## How it works
 
 Capture and rasterization are split on purpose — capture is deterministic Rust;
-rasterization is the host-sensitive part that must be pinned:
+rasterization is the part whose inputs (font + renderer version) must be pinned:
 
-- **Capture (host or container):** `tests/image_diff.rs`, gated on
-  `MUDPUPPY_SVG_DIR`, drives the binary through a PTY (shared harness in
-  `tests/common/`), waits for the screen to settle, and writes a **truecolor
-  SVG** built straight from the vt100 grid — one `<rect>` run per background
-  color, one `<text>` run per styled glyph span, `textLength`-pinned to an exact
-  column grid.
-- **Rasterize + diff (container only):** [`scripts/run.sh`](./scripts/run.sh)
-  rasterizes each SVG with `resvg` to a lossless 24-bit PNG (pinned font file,
+- **Capture:** `tests/image_diff.rs`, gated on `MUDPUPPY_SVG_DIR`, drives the
+  binary through a PTY (shared harness in `tests/common/`), waits for the screen
+  to settle, and writes a **truecolor SVG** built straight from the vt100 grid —
+  one `<rect>` run per background color, one `<text>` run per styled glyph span,
+  `textLength`-pinned to an exact column grid.
+- **Rasterize + diff:** [`scripts/run.sh`](./scripts/run.sh) rasterizes each SVG
+  with `resvg` to a lossless 24-bit PNG (vendored font file via `--use-font-file`,
   `--skip-system-fonts`), then `compare -metric AE` against the baseline. **AE
   must be 0.** It writes the review bundle to `e2e/review/` (gitignored) and
   exits non-zero on any mismatch or missing baseline.
@@ -100,32 +109,32 @@ rasterization is the host-sensitive part that must be pinned:
 
 | Knob | Value | Set in |
 | --- | --- | --- |
-| Arch | `linux/amd64` (emulated on Apple Silicon, native on CI) | `scripts/test-snapshots.sh`, Dockerfile |
-| Base image / toolchain | `rust:1.91-slim-bookworm` | `Dockerfile` |
-| Renderer | `resvg` 0.47.0 (lossless SVG→PNG) | `Dockerfile`, `scripts/run.sh` |
-| Font | DejaVu Sans Mono (`fonts-dejavu-core`), exact file via `--use-font-file` | `Dockerfile`, `scripts/run.sh` |
+| Renderer | `resvg` 0.47.0 (lossless SVG→PNG) | `scripts/run.sh` (CI installs it in `ci.yml`) |
+| Font | DejaVu Sans Mono, exact vendored file via `--use-font-file` | `e2e/fonts/`, `scripts/run.sh` |
 | Geometry | 100×24, 9×18 px cells, 15 px font | `tests/common/` (the SVG) |
 | Tolerance | 0 differing pixels (`compare -metric AE` == 0) | `scripts/run.sh` |
 
-Changing any rendering knob invalidates every baseline — re-bless with
-`--update`. The viewer is store-free today (no clock, no ids), so there's no
-app-level nondeterminism to control yet; revisit when annotations land
-(TESTING.md §"Determinism prerequisites").
+Only these two inputs — the **font file** and the **resvg version** — move a
+pixel; change either and re-bless with `--update`. The viewer is store-free today
+(no clock, no ids), so there's no app-level nondeterminism to control yet; revisit
+when annotations land (TESTING.md §"Determinism prerequisites").
 
-### Arch note
+### Arch / OS note
 
-Dev is arm64; baselines are canonical on **amd64** (CI's arch). Locally we build
-and render under the pinned `--platform=linux/amd64` image (qemu emulation), so
-locally-regenerated baselines should match CI's native amd64 — `resvg` is a pure
-CPU/IEEE-float rasterizer, which qemu emulates faithfully. If a first CI
-run ever disagrees by a pixel, re-bless on CI via `approve snapshots` so the
-baselines are blessed on the canonical arch.
+There used to be a hard "baselines are canonical on amd64 only" rule, on the
+theory that float rasterization rounds differently across arches. We tested it:
+rendering natively on macOS/arm64 and diffing against the amd64 baselines gives
+**AE=0 on every scenario**. So arch and OS are *not* in the determinism contract —
+only the vendored font file and the resvg version are. You can regenerate
+baselines on any machine with the pinned resvg + the vendored font and they'll
+match CI. (If a render ever disagrees by a pixel, suspect a resvg-version skew
+first.)
 
 ## Files
 
-- `Dockerfile` — the pinned amd64 capture environment (rust + git + resvg +
-  ImageMagick + font).
-- `scripts/run.sh` — in-container: emit SVGs → rasterize → pixel-diff → bundle.
+- `fonts/DejaVuSansMono.ttf` — the vendored, content-pinned glyph source (see
+  `fonts/README.md`).
+- `scripts/run.sh` — emit SVGs → rasterize → pixel-diff → bundle.
 - `baselines/*.png` — committed oracle (the source of truth). ~15–20 KB each.
 - `review/` — generated expected|actual|diff bundle (gitignored).
 - `../scripts/test-snapshots.sh` — the single host entry point.
