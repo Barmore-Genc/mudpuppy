@@ -194,3 +194,71 @@ These make *both* layers stable; lock them in while the `tui` module is young:
   terminal.*
 - The container makes image diffing viable; we still own **arch**, **app-level
   nondeterminism**, and **baseline regen discipline**.
+
+---
+
+## Implementation status
+
+What exists today, against the plan above. The shipped feature is the read-only
+diff viewer (PLAN.md §9, milestone 1), so the tests track exactly that surface.
+
+### Layer 1 — implemented (`src/tui.rs`, `#[cfg(test)] mod tests`)
+
+The viewer's `App::handle_key` (the `update(state, event)` transition) is driven
+with real `crossterm` `KeyEvent`s, rendered into a ratatui `TestBackend`, and
+snapshotted with `insta` (`src/snapshots/*.snap`). Snapshots cover the initial
+view, tree navigation, diff focus + scroll, jump-to-bottom, the help overlay,
+and the binary / metadata-only notices. Behavioural tests cover the rest of the
+keymap and viewport math (`j/k`, `}`/`{`, `g`/`G`, `Ctrl-d/u`, `Tab`, `J/K`,
+quit keys, help swallowing input); style tests assert the buffer carries the
+right colours/modifiers (cyan-bold hunk headers, green/red markers, the
+selection and status-bar fills) — *not just text*.
+
+```sh
+cargo test --lib tui                 # run them
+cargo insta review                   # review/accept snapshot changes
+INSTA_UPDATE=always cargo test --lib tui::tests   # regen all (use sparingly)
+```
+
+The viewer is store-free today, so it has no clock/id nondeterminism to control
+yet — but the fixture diff is a byte-stable `const`, never the live repo.
+
+### Layer 2 — both sub-layers implemented
+
+**(a) PTY smoke suite (`tests/e2e.rs`, every push, no Docker).** Drives the
+**real compiled binary** through a PTY against a throwaway fixture git repo and
+asserts *coarsely, robustly* — the settled screen via `vt100`, plus the verbatim
+alt-screen enter/leave sequences and the process exit code:
+
+| Scenario (TESTING.md tier) | Test |
+| --- | --- |
+| Tier 1 #1 cold launch on a local diff | `cold_launch_renders_local_diff` |
+| Tier 1 #2 keyboard navigation | `keyboard_navigation_updates_the_screen` |
+| Tier 1 #3 clean exit restores the terminal | `clean_exit_restores_the_terminal` |
+| Tier 2 #7 edge state (no changes) | `no_changes_prints_notice_without_entering_tui` |
+
+Runs via `cargo test --all-features` (ubuntu + macOS). The PTY harness lives in
+`tests/common/`. Tier 1 #4 (annotation write round-trips to disk) lands with the
+store milestone; Tier 3 #8 (the `gh` PR path) stays gated.
+
+**(b) Exact-match pixel oracle ([`e2e/`](./e2e/), the gold layer).** The real
+binary rendered to **actual pixels** — the settled screen emitted as a truecolor
+SVG and rasterized losslessly with `resvg` — inside a pinned `linux/amd64`
+container and pixel-diffed (`compare -metric AE`, **zero tolerance**) against
+committed baselines (`e2e/baselines/*.png`). Capture (deterministic Rust,
+`tests/image_diff.rs`) is split from rasterization+diff (`e2e/scripts/run.sh`).
+The workflow — modeled on willet-cloud's screenshot/approval loop — is:
+
+```sh
+./scripts/test-snapshots.sh            # the CI gate: render + pixel-diff
+./scripts/test-snapshots.sh --update   # re-bless baselines (the only sanctioned way)
+```
+
+On a PR, the `snapshots` CI job runs the check; on any pixel change it publishes
+a review bundle (expected | actual | diff `index.html`) to S3 under an
+unguessable capability path and comments the link. A maintainer reviews it and
+comments `approve baseline`, which copies the **exact reviewed bytes** back from
+the bundle and commits them (no re-render, SHA-pinned). This reuses willet-cloud's
+architecture and the same org secrets/vars (`CI_S3_*`, `CI_APPROVE_TOKEN`) — see
+`e2e/README.md`. It satisfies the workflow rule: baselines are only ever
+generated inside the pinned container on the canonical arch.

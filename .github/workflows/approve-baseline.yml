@@ -1,0 +1,146 @@
+# Comment `approve baseline` on a PR to accept the reviewed snapshot changes.
+#
+# This file is read from the DEFAULT branch (issue_comment always is), so a PR
+# author cannot alter the approval logic by editing it on their branch.
+#
+# It does NOT re-render. The review bundle in object storage already holds the
+# exact actual PNGs the reviewer looked at (under baseline/, mirrored at their
+# repo path); we copy those bytes back into the tree and commit. Re-rendering
+# could differ and would defeat the point of the review. Modeled on
+# willet-cloud's approve-baseline workflow; reuses the same org secrets/vars.
+#
+# Requires (org-level): secrets CI_APPROVE_TOKEN, CI_S3_KEY_ID, CI_S3_APP_KEY;
+# vars CI_S3_ENDPOINT, CI_S3_REGION, CI_S3_BUCKET. Same-repo PRs only.
+name: Approve snapshot baseline
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  approve:
+    # PR comments only, author has write access, not a bot. Cheap prefilter (no
+    # trim() in GHA expressions); the exact-match guard below is authoritative.
+    if: >
+      github.event.issue.pull_request &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
+      github.event.comment.user.type != 'Bot' &&
+      startsWith(github.event.comment.body, 'approve baseline')
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Guard — exact command only
+        env:
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          set -euo pipefail
+          # Must equal the command exactly, so "approve baseline please ..."
+          # does not trigger an approval.
+          trimmed="$(printf '%s' "$BODY" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+          if [[ "$trimmed" != "approve baseline" ]]; then
+            echo "Comment is not exactly 'approve baseline' — ignoring." >&2
+            exit 1
+          fi
+
+      - name: Acknowledge
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X POST \
+            "repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=eyes >/dev/null || true
+
+      - name: Resolve PR + reviewed bundle
+        id: ctx
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PR="${{ github.event.issue.number }}"
+
+          # Current PR head (branch + sha).
+          read -r BRANCH HEAD < <(gh pr view "$PR" \
+            --repo "${{ github.repository }}" \
+            --json headRefName,headRefOid \
+            --jq '[.headRefName,.headRefOid]|@tsv')
+
+          # Latest snapshot-review comment → its review URL → PR/SHA/TOKEN.
+          URL="$(gh api "repos/${{ github.repository }}/issues/${PR}/comments" \
+            --jq 'map(select(.body|startswith("<!-- snapshot-review -->")))|last|.body' \
+            | grep -oE 'https?://[^ )]+/[0-9]+/[0-9a-f]+/[0-9a-f]+/index\.html' | tail -n1)"
+          if [[ -z "$URL" ]]; then
+            echo "msg=No snapshot review bundle found for this PR." >> "$GITHUB_OUTPUT"
+            echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          # .../<pr>/<sha>/<token>/index.html
+          PREFIX="$(echo "$URL" | grep -oE '[0-9]+/[0-9a-f]+/[0-9a-f]+/index\.html' | sed 's#/index\.html##')"
+          BUNDLE_SHA="$(echo "$PREFIX" | cut -d/ -f2)"
+
+          # SHA pin: refuse if the branch moved since the bundle was made.
+          if [[ "$BUNDLE_SHA" != "$HEAD" ]]; then
+            echo "msg=Reviewed bundle was for \`${BUNDLE_SHA:0:12}\` but the branch is now \`${HEAD:0:12}\`. Push triggers a fresh review — re-review and approve that one." >> "$GITHUB_OUTPUT"
+            echo "ok=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          {
+            echo "ok=true"
+            echo "pr=$PR"
+            echo "branch=$BRANCH"
+            echo "prefix=$PREFIX"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Refuse with explanation
+        if: steps.ctx.outputs.ok == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X POST \
+            "repos/${{ github.repository }}/issues/${{ github.event.issue.number }}/comments" \
+            -f body="❌ ${{ steps.ctx.outputs.msg }}" >/dev/null
+
+      # Check out with a PAT (not GITHUB_TOKEN) so the baseline commit triggers a
+      # new CI run and the snapshot check can go green (GITHUB_TOKEN pushes do
+      # not trigger workflows).
+      - name: Checkout PR branch
+        if: steps.ctx.outputs.ok == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.ctx.outputs.branch }}
+          token: ${{ secrets.CI_APPROVE_TOKEN }}
+
+      - name: Pull reviewed baselines from object storage and commit
+        if: steps.ctx.outputs.ok == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CI_S3_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CI_S3_APP_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.CI_S3_REGION }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PREFIX="${{ steps.ctx.outputs.prefix }}"
+
+          # baseline/ mirrors the repo paths of the exact actual PNGs reviewed,
+          # so this lands them at e2e/baselines/<name>.png.
+          aws s3 cp \
+            --endpoint-url "${{ vars.CI_S3_ENDPOINT }}" \
+            "s3://${{ vars.CI_S3_BUCKET }}/${PREFIX}/baseline/" . \
+            --recursive --only-show-errors
+
+          git config user.name "mudpuppy-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add e2e/baselines
+          if git diff --cached --quiet; then
+            gh api -X POST \
+              "repos/${{ github.repository }}/issues/${{ steps.ctx.outputs.pr }}/comments" \
+              -f body="Baselines already match the reviewed bundle — nothing to commit." >/dev/null
+            exit 0
+          fi
+          git commit -m "test(e2e): approve snapshot baselines for PR #${{ steps.ctx.outputs.pr }}"
+          git push origin "HEAD:${{ steps.ctx.outputs.branch }}"
+
+          gh api -X POST \
+            "repos/${{ github.repository }}/issues/${{ steps.ctx.outputs.pr }}/comments" \
+            -f body="✅ Snapshot baselines updated from the reviewed bundle and pushed. CI will re-run." >/dev/null
