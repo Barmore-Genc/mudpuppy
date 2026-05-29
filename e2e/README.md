@@ -46,8 +46,8 @@ commit*:
    store under an unguessable capability path `<pr>/<sha>/<token>/`, and a single
    PR comment (marker `<!-- snapshot-review -->`) links to it.
 5. **Review** the bundle at that URL. If the new rendering is correct, a
-   maintainer comments exactly `approve baseline`;
-   [`approve-baseline.yml`](../.github/workflows/approve-baseline.yml) copies the
+   maintainer comments exactly `approve snapshots`;
+   [`approve-snapshots.yml`](../.github/workflows/approve-snapshots.yml) copies the
    **exact reviewed bytes** back from the bundle's `baseline/` (no re-render) and
    commits them to the PR branch. Otherwise it's a real regression — fix it.
 
@@ -65,7 +65,7 @@ Why no re-render on approve: the bundle's `baseline/` holds the exact `actual`
 PNGs the reviewer looked at, mirrored at their repo path. Approve does
 `aws s3 cp .../baseline/ . --recursive` → lands `e2e/baselines/<name>.png` → commit.
 The approve workflow also **SHA-pins**: it refuses if the branch moved since the
-bundle was made (a push triggers a fresh review). `approve-baseline.yml` runs
+bundle was made (a push triggers a fresh review). `approve-snapshots.yml` runs
 from the default branch, so a PR author can't edit the approval logic on their
 branch. Locally you can always bypass the whole dance with
 `./scripts/test-snapshots.sh --update` and commit `e2e/baselines/`.
@@ -118,7 +118,7 @@ Dev is arm64; baselines are canonical on **amd64** (CI's arch). Locally we build
 and render under the pinned `--platform=linux/amd64` image (qemu emulation), so
 locally-regenerated baselines should match CI's native amd64 — `resvg` is a pure
 CPU/IEEE-float rasterizer, which qemu emulates faithfully. If a first CI
-run ever disagrees by a pixel, re-bless on CI via `approve baseline` so the
+run ever disagrees by a pixel, re-bless on CI via `approve snapshots` so the
 baselines are blessed on the canonical arch.
 
 ## Files

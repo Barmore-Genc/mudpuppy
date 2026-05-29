@@ -2,7 +2,7 @@ name: Snapshot review
 description: >
   Run the containerized pixel oracle. On mismatch, publish a review bundle to an
   S3-compatible object store and post (or update) a single PR comment linking to
-  it, then fail the check so it stays red until `approve baseline`. All logic
+  it, then fail the check so it stays red until `approve snapshots`. All logic
   lives in scripts/ so the calling workflow stays tiny. Modeled on willet-cloud's
   snapshot-review action.
 
@@ -50,7 +50,7 @@ runs:
 
         **[→ Open snapshot review]($URL)**
 
-        If the new rendering is correct, comment \`approve baseline\` and the
+        If the new rendering is correct, comment \`approve snapshots\` and the
         baselines will be updated on this branch automatically."
 
         # Upsert: edit our previous comment if present, else create one.

@@ -1,0 +1,30 @@
+# Lint the GitHub Actions workflows themselves. Path-filtered so it only runs
+# when something under .github/ changes — actionlint has nothing to say about a
+# Rust-only PR. The pinned rhysd/actionlint image bundles shellcheck + pyflakes,
+# so the `run:` blocks in our workflows and composite action get linted too.
+name: actionlint
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - '.github/actions/**'
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run actionlint
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color

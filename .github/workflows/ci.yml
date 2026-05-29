@@ -115,23 +115,3 @@ jobs:
           s3-app-key: ${{ secrets.CI_S3_APP_KEY }}
           public-base: ${{ vars.CI_S3_PUBLIC_BASE }}
           github-token: ${{ github.token }}
-
-  # A single required check that's easy to mark as required in branch protection:
-  # it passes when every dependent job either succeeded or was correctly skipped.
-  ci-ok:
-    name: CI passed
-    needs: [fmt, clippy, test, docs, snapshots]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify no job failed
-        run: |
-          results='${{ needs.fmt.result }} ${{ needs.clippy.result }} ${{ needs.test.result }} ${{ needs.docs.result }} ${{ needs.snapshots.result }}'
-          echo "Job results: $results"
-          for r in $results; do
-            if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
-              echo "A required job did not pass."
-              exit 1
-            fi
-          done
-          echo "All required jobs passed or were skipped."

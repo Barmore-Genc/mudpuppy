@@ -49,18 +49,25 @@ if [[ ! -f "$STATUS" ]]; then
   exit 1
 fi
 
-# Mirror the exact `actual` bytes of every CHANGED scenario at their repo path
-# under baseline/, so `aws s3 cp .../baseline/ . --recursive` on approve lands
-# them at e2e/baselines/<name>.png. Unchanged scenarios are skipped (committing
-# identical bytes would be a no-op).
+# Mirror the exact `actual` bytes of every CHANGED scenario at their repo path,
+# so `aws s3 cp .../baseline/ . --recursive` on approve lands them at
+# e2e/baselines/<name>.png. Unchanged scenarios are skipped (committing identical
+# bytes would be a no-op).
+#
+# The mirror goes in a temp dir, NOT under $REVIEW: the pixel oracle runs in a
+# container as root and creates $REVIEW (root-owned), so the host runner can read
+# those files but cannot write into the directory. We upload the mirror to
+# <prefix>/baseline/ separately below.
+MIRROR="$(mktemp -d)"
+trap 'rm -rf "$MIRROR"' EXIT
 changed=0
 while IFS=$'\t' read -r name status; do
   [[ -n "$name" ]] || continue
   case "$status" in
     match) continue ;;
   esac
-  mkdir -p "$REVIEW/baseline/e2e/baselines"
-  cp "$REVIEW/actual/$name.png" "$REVIEW/baseline/e2e/baselines/$name.png"
+  mkdir -p "$MIRROR/e2e/baselines"
+  cp "$REVIEW/actual/$name.png" "$MIRROR/e2e/baselines/$name.png"
   changed=$((changed + 1))
 done < "$STATUS"
 
@@ -81,7 +88,11 @@ export AWS_DEFAULT_REGION="$CI_S3_REGION"
 S3=(aws s3 --endpoint-url "$CI_S3_ENDPOINT")
 
 echo "==> Uploading bundle to s3://$CI_S3_BUCKET/$PREFIX/" >&2
+# The expected | actual | diff PNGs the reviewer eyeballs.
 "${S3[@]}" cp "$REVIEW" "s3://$CI_S3_BUCKET/$PREFIX/" --recursive \
+  --exclude "*" --include "*.png" --content-type image/png --only-show-errors
+# The reviewed bytes the approve flow copies back into the tree.
+"${S3[@]}" cp "$MIRROR" "s3://$CI_S3_BUCKET/$PREFIX/baseline/" --recursive \
   --exclude "*" --include "*.png" --content-type image/png --only-show-errors
 "${S3[@]}" cp "$REVIEW/index.html" "s3://$CI_S3_BUCKET/$PREFIX/index.html" \
   --content-type "text/html; charset=utf-8" --only-show-errors
