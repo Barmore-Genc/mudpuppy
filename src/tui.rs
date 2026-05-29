@@ -859,7 +859,7 @@ rename to src/relocated.rs
             24,
             &[key(KeyCode::Char('j')), key(KeyCode::Char('l'))],
         );
-        let half = a.diff_height as usize / 2;
+        let half = a.diff_height / 2;
         a.handle_key(ctrl('d'));
         assert_eq!(a.scroll, half.min(a.max_scroll()));
         a.handle_key(ctrl('u'));
