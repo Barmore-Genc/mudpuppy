@@ -129,7 +129,7 @@ fn config_hot_reload_rebinds_keys_live() {
     // the config file's directory is what the binary watches for hot-reload.
     let data_dir = tempfile::tempdir().unwrap();
     let config_dir = tempfile::tempdir().unwrap();
-    let config = config_dir.path().join("mudpuppy.lua");
+    let config = config_dir.path().join("mudpuppy.luau");
 
     let mut session = Session::launch_with_env(
         repo.path(),

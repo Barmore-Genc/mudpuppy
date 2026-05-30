@@ -2,7 +2,7 @@
 //!
 //! The [`LuaEngine`] owns a sandboxed [`mlua::Lua`] and two registries — one
 //! mapping `(mode, chord)` to a key callback, one mapping an [`EventKind`] to its
-//! handlers. Every default binding lives in the embedded [`core.lua`]; a user
+//! handlers. Every default binding lives in the embedded [`core.luau`]; a user
 //! config (resolved by [`config_path`]) is loaded on top, last-binding-wins, so a
 //! user can rebind or extend without touching Rust. Rust keeps only a hardwired
 //! Ctrl-C quit (in `tui::run_loop`) as a safety net so a broken config can never
@@ -91,8 +91,8 @@ pub struct LuaEngine {
 
 impl LuaEngine {
     /// Build the engine, install the sandbox and the `mudpuppy` table, and load
-    /// `core.lua` plus the user config at `config_path` (if any). A failure in
-    /// `core.lua` is a hard error (an embed bug); a user-config failure is
+    /// `core.luau` plus the user config at `config_path` (if any). A failure in
+    /// `core.luau` is a hard error (an embed bug); a user-config failure is
     /// surfaced in the status bar and otherwise ignored.
     pub fn new(config_path: Option<PathBuf>) -> Result<LuaEngine> {
         // Minimal safe libraries only: no io/os/package, so a script has no file,
@@ -150,16 +150,16 @@ impl LuaEngine {
         Ok(engine)
     }
 
-    /// Load `core.lua` (hard error on failure) then the user config (soft error,
-    /// surfaced in the status bar). `core.lua` failing means the embedded default
+    /// Load `core.luau` (hard error on failure) then the user config (soft error,
+    /// surfaced in the status bar). `core.luau` failing means the embedded default
     /// keymap is broken — a build bug, not a user one.
     fn load_scripts(&self, core_hard: bool) -> Result<()> {
-        let core = self.lua.load(&*core_source()).set_name("core.lua").exec();
+        let core = self.lua.load(&*core_source()).set_name("core.luau").exec();
         if let Err(e) = core {
             if core_hard {
-                return Err(anyhow!("loading the embedded core.lua keymap: {e}"));
+                return Err(anyhow!("loading the embedded core.luau keymap: {e}"));
             }
-            self.set_status(format!("core.lua reload error: {e}"));
+            self.set_status(format!("core.luau reload error: {e}"));
         }
 
         if let Some(path) = &self.config_path {
@@ -183,9 +183,9 @@ impl LuaEngine {
         Ok(())
     }
 
-    /// Re-run the keymap scripts after a config (or dev `core.lua`) edit: drop the
+    /// Re-run the keymap scripts after a config (or dev `core.luau`) edit: drop the
     /// old registries, freeing the stored callbacks, and re-exec from scratch so
-    /// removed bindings actually disappear. A reload-time `core.lua` error is
+    /// removed bindings actually disappear. A reload-time `core.luau` error is
     /// soft (we keep running on whatever loaded) rather than killing a live TUI.
     pub fn reload_config(&self) -> Result<()> {
         self.bindings.borrow_mut().clear();
@@ -335,17 +335,17 @@ fn active_mode(app: &App) -> Mode {
 }
 
 /// The embedded default keymap source. In debug builds this prefers the on-disk
-/// `src/lua/core.lua` (so edits hot-reload in dev); release builds use the
+/// `src/lua/core.luau` (so edits hot-reload in dev); release builds use the
 /// `include_str!`-embedded copy.
 fn core_source() -> Cow<'static, str> {
     #[cfg(debug_assertions)]
     {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/lua/core.lua");
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/lua/core.luau");
         if let Ok(src) = std::fs::read_to_string(path) {
             return Cow::Owned(src);
         }
     }
-    Cow::Borrowed(include_str!("core.lua"))
+    Cow::Borrowed(include_str!("core.luau"))
 }
 
 /// Resolve the user config path with a hand-rolled XDG search (no `directories`
@@ -358,18 +358,22 @@ pub fn config_path() -> Option<PathBuf> {
         return Some(PathBuf::from(p));
     }
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(xdg).join("mudpuppy").join("mudpuppy.lua"));
+        return Some(PathBuf::from(xdg).join("mudpuppy").join("mudpuppy.luau"));
     }
     #[cfg(windows)]
     if let Some(appdata) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
-        return Some(PathBuf::from(appdata).join("mudpuppy").join("mudpuppy.lua"));
+        return Some(
+            PathBuf::from(appdata)
+                .join("mudpuppy")
+                .join("mudpuppy.luau"),
+        );
     }
     if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
         return Some(
             PathBuf::from(home)
                 .join(".config")
                 .join("mudpuppy")
-                .join("mudpuppy.lua"),
+                .join("mudpuppy.luau"),
         );
     }
     None
@@ -406,8 +410,8 @@ Config file
 -----------
 mudpuppy looks for your config at, in order:
   1. $MUDPUPPY_CONFIG                       (an explicit file path)
-  2. $XDG_CONFIG_HOME/mudpuppy/mudpuppy.lua
-  3. ~/.config/mudpuppy/mudpuppy.lua        (%APPDATA%\mudpuppy\mudpuppy.lua on Windows)
+  2. $XDG_CONFIG_HOME/mudpuppy/mudpuppy.luau
+  3. ~/.config/mudpuppy/mudpuppy.luau        (%APPDATA%\mudpuppy\mudpuppy.luau on Windows)
 
 "#;
 
@@ -569,7 +573,7 @@ index 333..444 100644
     /// path.
     fn config(src: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mudpuppy.lua");
+        let path = dir.path().join("mudpuppy.luau");
         std::fs::write(&path, src).unwrap();
         (dir, path)
     }
@@ -746,14 +750,14 @@ index 333..444 100644
             std::env::set_var("HOME", "/home/u");
             assert_eq!(
                 config_path(),
-                Some(PathBuf::from("/home/u/.config/mudpuppy/mudpuppy.lua"))
+                Some(PathBuf::from("/home/u/.config/mudpuppy/mudpuppy.luau"))
             );
         }
 
         std::env::set_var("XDG_CONFIG_HOME", "/xdg");
         assert_eq!(
             config_path(),
-            Some(PathBuf::from("/xdg/mudpuppy/mudpuppy.lua"))
+            Some(PathBuf::from("/xdg/mudpuppy/mudpuppy.luau"))
         );
 
         std::env::set_var(CONFIG_ENV, "/explicit/my.lua");

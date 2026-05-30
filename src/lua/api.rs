@@ -5,7 +5,7 @@
 //! * **Persistent** registration functions — [`build_table`] adds `map(mode,
 //!   key, fn)`, `unmap(mode, key)`, and `on(event, fn)`, which mutate the shared
 //!   binding/event registries. These live for the whole session and are what
-//!   `core.lua` and a user config call at load time.
+//!   `core.luau` and a user config call at load time.
 //! * **Scoped** action and reader functions — [`install_scoped`] adds the
 //!   mutating verbs (`scroll`, `select_file`, `quit`, …) and the readers
 //!   (`state`, `current_file`, …) for the duration of a single dispatch. They

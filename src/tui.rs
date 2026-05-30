@@ -103,7 +103,7 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
 
     // The scripting engine is a sibling of `App` (not owned by it), so it can read
     // `&App` while driving the app's `&mut` verbs through a per-dispatch borrow.
-    // A broken `core.lua` is a hard error here; a broken *user* config is not — it
+    // A broken `core.luau` is a hard error here; a broken *user* config is not — it
     // is surfaced in the status bar and the last good bindings stay in effect.
     let engine = LuaEngine::new(lua::config_path()).context("starting the scripting engine")?;
 
@@ -124,7 +124,7 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
             .and_then(|dir| watch_store_dir(dir, tx).ok());
 
         // Config hot-reload ticks on the same pattern: watch the config file's
-        // directory (and, in dev builds, the on-disk `core.lua`) and re-exec the
+        // directory (and, in dev builds, the on-disk `core.luau`) and re-exec the
         // keymap when an edit lands, so a rebind takes effect without a restart.
         let (cfg_tx, mut cfg_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let _config_watcher = watch_config(cfg_tx);
@@ -179,7 +179,7 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                     let after = Snapshot::of(app);
                     fire_changes(&engine, app, &before, &after)?;
                 }
-                // A config (or dev `core.lua`) edit landed: re-exec the keymap.
+                // A config (or dev `core.luau`) edit landed: re-exec the keymap.
                 // Errors are non-fatal and surface in the status bar.
                 Some(()) = cfg_rx.recv() => {
                     let _ = engine.reload_config();
@@ -241,7 +241,7 @@ fn fire_changes(
 }
 
 /// Watch the user config file's directory (and, in debug builds, the on-disk
-/// `core.lua`) for edits, ticking `tx` on any change. Best-effort: returns an
+/// `core.luau`) for edits, ticking `tx` on any change. Best-effort: returns an
 /// empty `Vec` of watchers if nothing can be watched, in which case hot-reload is
 /// simply unavailable and the loaded bindings stay in effect.
 fn watch_config(tx: UnboundedSender<()>) -> Vec<RecommendedWatcher> {
@@ -588,10 +588,10 @@ impl App {
     /// Test helper: route one key press through a fresh core-only [`LuaEngine`],
     /// exactly as `run_loop` does, and report whether it asked to quit. This is
     /// what lets the layer-1 snapshot/behaviour tests drive the real keymap (now
-    /// living in `core.lua`) rather than a hand-coded match. A fresh engine per
+    /// living in `core.luau`) rather than a hand-coded match. A fresh engine per
     /// call keeps each press independent and is cheap enough for these tests.
     fn handle_key(&mut self, ev: KeyEvent) -> bool {
-        let engine = LuaEngine::new(None).expect("core.lua loads");
+        let engine = LuaEngine::new(None).expect("core.luau loads");
         if let Some(chord) = KeyChord::from_event(&ev) {
             engine.dispatch(self, chord).expect("dispatch");
         }

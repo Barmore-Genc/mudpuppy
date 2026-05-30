@@ -34,7 +34,7 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 - `store.rs`: load / merge-by-id / atomic+locked save of the annotation store.
 - `session.rs`: repo + target resolution and store-path derivation (resume).
 - `tui.rs`: the ratatui app — file tree, diff pane, gutter marks, panels, turn release; key presses route through the Lua engine.
-- `lua/`: embedded Luau sandbox — the configurable keymap and event hooks. All default bindings live in `lua/core.lua`; the user config is `$MUDPUPPY_CONFIG`, else `$XDG_CONFIG_HOME`/`~/.config/mudpuppy/mudpuppy.lua` (`%APPDATA%` on Windows). Rust keeps only a hardwired Ctrl-C quit.
+- `lua/`: embedded Luau sandbox — the configurable keymap and event hooks. All default bindings live in `lua/core.luau`; the user config is `$MUDPUPPY_CONFIG`, else `$XDG_CONFIG_HOME`/`~/.config/mudpuppy/mudpuppy.luau` (`%APPDATA%` on Windows). Rust keeps only a hardwired Ctrl-C quit.
 - `domain/`: pure on-disk schema types (`Annotation`, `StateFile`, enums).
 - `snapshots/`: generated `insta` `.snap` baselines for the `tui` tests.
 

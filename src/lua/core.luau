@@ -2,7 +2,7 @@
 --
 -- This is the single source of truth for the built-in bindings: the Rust side
 -- ships no hard-coded keys except a Ctrl-C safety net (so a broken config can
--- never trap you). A user config (mudpuppy.lua) is loaded after this file and
+-- never trap you). A user config (mudpuppy.luau) is loaded after this file and
 -- can rebind anything here, last-binding-wins per (mode, key).
 --
 -- Bindings are functions (closures), not bare verb references: the action verbs

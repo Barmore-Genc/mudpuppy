@@ -16,7 +16,7 @@ use clap::{Args, Parser, Subcommand};
 /// of local changes. Agent-driven commands live under `mudpuppy agent`.
 ///
 /// Run `mudpuppy help config` for the configuration & scripting (Luau) reference
-/// — how to rebind keys and hook events in `~/.config/mudpuppy/mudpuppy.lua`.
+/// — how to rebind keys and hook events in `~/.config/mudpuppy/mudpuppy.luau`.
 #[derive(Debug, Parser)]
 #[command(name = "mudpuppy", version, about, long_about = None)]
 pub struct Cli {
