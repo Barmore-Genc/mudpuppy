@@ -19,6 +19,11 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
     will automatically trigger.
 - **Unsafe**: No unsafe Rust allowed. The only exception is libraries that
   use unsafe code internally, for FFI for example.
+- **Comments:**
+  - Keep comments brief. Do not explain what the code is doing, explain *why* it's doing it.
+    Do not explain things obvious from reading the code.
+  - When leaving comments, do not use `[...]` style comments unless actually
+    intending to create intra-doc links.
 
 ## Where the code lives
 
@@ -28,6 +33,7 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 - `lib.rs`: crate root and module map.
 - `cli.rs`: the clap command tree and top-level dispatch (`run`).
 - `agent.rs`: the `mudpuppy agent` subcommands (add/comment/wait/…) over the store.
+- `install/`: `mudpuppy install claude` — writes the two Claude Code skills (PR review, implementation review) at a chosen scope (project/local/user).
 - `source.rs`: diff-source providers — shells out to `git` (local) and `gh` (PR).
 - `diff.rs`: hand-rolled unified-diff parser, lazy hunks, line ↔ side anchoring.
 - `highlight.rs`: syntect syntax highlighting for the diff pane.

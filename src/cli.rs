@@ -42,6 +42,28 @@ pub enum Command {
         #[command(subcommand)]
         command: AgentCommand,
     },
+
+    /// Install editor/agent integrations (e.g. Claude Code skills).
+    Install {
+        #[command(subcommand)]
+        command: InstallCommand,
+    },
+}
+
+/// Integrations `mudpuppy install` can set up.
+#[derive(Debug, Subcommand)]
+pub enum InstallCommand {
+    /// Install two Claude Code skills that teach an agent the mudpuppy review
+    /// loop and make it aware mudpuppy is available.
+    Claude {
+        /// Where to install: `project` (committed), `local` (git-ignored), or
+        /// `user` (`~/.claude/skills/`). Prompts interactively if omitted.
+        #[arg(long, value_name = "WHERE")]
+        location: Option<crate::install::Location>,
+        /// Overwrite existing skill files without prompting.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// The agent's command surface over the shared annotation store.
@@ -187,6 +209,7 @@ fn wants_config_help(args: &[String]) -> bool {
 fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Some(Command::Agent { command }) => crate::agent::dispatch(command),
+        Some(Command::Install { command }) => crate::install::dispatch(command),
         None => crate::tui::launch(cli.pr, cli.base),
     }
 }
