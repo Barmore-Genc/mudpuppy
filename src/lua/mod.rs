@@ -2,7 +2,7 @@
 //!
 //! The [`LuaEngine`] owns a sandboxed [`mlua::Lua`] and two registries — one
 //! mapping `(mode, chord)` to a key callback, one mapping an [`EventKind`] to its
-//! handlers. Every default binding lives in the embedded [`core.luau`]; a user
+//! handlers. Every default binding lives in the embedded `core.luau`; a user
 //! config (resolved by [`config_path`]) is loaded on top, last-binding-wins, so a
 //! user can rebind or extend without touching Rust. Rust keeps only a hardwired
 //! Ctrl-C quit (in `tui::run_loop`) as a safety net so a broken config can never
@@ -12,8 +12,8 @@
 //! are loaded and [`Lua::sandbox`] freezes the globals, so there is no `io`,
 //! `os`, `package`, `require`, network, or subprocess. Scripts reach the diff,
 //! files, annotations, and what is on screen only through the read-only views in
-//! [`views`]; they mutate the app only through the scoped action verbs in
-//! [`api`]. See `src/lua/AGENTS.md`.
+//! `views`; they mutate the app only through the scoped action verbs in
+//! `api`. See `src/lua/AGENTS.md`.
 
 mod api;
 pub mod keys;
@@ -71,7 +71,7 @@ impl EventKind {
     }
 }
 
-/// The scripting engine: a sibling of [`App`] in the event loop. It holds `&App`
+/// The scripting engine: a sibling of `App` in the event loop. It holds `&App`
 /// (to read) while driving the app's `&mut` verbs through a per-dispatch
 /// `RefCell`, so it is deliberately *not* owned by `App`.
 pub struct LuaEngine {
