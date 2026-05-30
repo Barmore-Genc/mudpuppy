@@ -52,11 +52,12 @@ testable core) and a thin binary:
   (the `agent comment` lifecycle, `diff`, `reset`, and the `agent wait` turn
   rendezvous — it blocks on store-directory changes via `notify`, wakes when the
   human bumps `turn.seq`, and prints what they changed). The human's `r` release
-  bumps `seq`, hands ownership back, and doubles as first-contact approval. Still
-  to land (milestone 3): `notify`-based reload for the TUI (which still polls the
-  store's mtime), the live-session pidfile, authoring annotations from inside the
-  TUI, and staleness re-anchoring. Modules carry doc comments describing their
-  job and the milestone boundary (PLAN.md §10).
+  bumps `seq`, hands ownership back, and doubles as first-contact approval. The
+  TUI's live reload now rides the same `notify` bus — it watches the store
+  directory and refreshes in place when a write lands. Still to land (milestone
+  3): the live-session pidfile, authoring annotations from inside the TUI, and
+  staleness re-anchoring. Modules carry doc comments describing their job and the
+  milestone boundary (PLAN.md §10).
 - `Cargo.toml` — manifest. Dependencies are added per-milestone as they're first
   used, not all up front; see the note there and PLAN.md §2.
 - `.github/workflows/` — CI: formatting, lints, tests, docs, and a security

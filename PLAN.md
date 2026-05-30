@@ -238,19 +238,20 @@ store); only `wait` needs a live human to ever unblock.
    (atomic+locked merge-by-id writes), `session` store-path resolution, the
    `agent comment` lifecycle (add / list / edit / cancel / resolve / reopen /
    wontfix) + `diff` + `reset`, and TUI **display** (gutter markers, side panel,
-   status count) with mtime-poll live reload. Still to do: authoring annotations
-   from *inside* the TUI (needs a line cursor), and anchoring + staleness
-   handling. This is the proof-of-concept slice: the agent writes, the human's
-   TUI shows it live.
+   status count) with live reload (now `notify`-based — see milestone 3). Still
+   to do: authoring annotations from *inside* the TUI (needs a line cursor), and
+   anchoring + staleness handling. This is the proof-of-concept slice: the agent
+   writes, the human's TUI shows it live.
 3. **Turn protocol.** 🟡 In progress. Done: the `agent wait` rendezvous over
    `notify` — it records `turn.seq`, marks `agent_waiting`, blocks on
    store-directory changes, wakes when the human bumps `seq`, and prints the
    human's added/changed/removed annotations (honoring `--timeout` and Ctrl-C);
    and the TUI's `r` turn-release keybind, which bumps `seq`, hands ownership
    back to the agent, surfaces "agent is waiting" in the status bar, and doubles
-   as first-contact approval. Still to do: the live-session pidfile and switching
-   the TUI's live reload from the mtime poll to `notify`. Closes the end-to-end
-   turn-based loop.
+   as first-contact approval; and the TUI's live reload now watches the store
+   directory over the same `notify` bus (replacing the mtime poll), so an agent's
+   writes refresh the view in place. Still to do: the live-session pidfile.
+   Closes the end-to-end turn-based loop.
 
 ## 11. Testing
 
