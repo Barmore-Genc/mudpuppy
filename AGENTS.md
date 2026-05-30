@@ -19,6 +19,11 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
     will automatically trigger.
 - **Unsafe**: No unsafe Rust allowed. The only exception is libraries that
   use unsafe code internally, for FFI for example.
+- **Comments:**
+  - Keep comments brief. Do not explain what the code is doing, explain *why* it's doing it.
+    Do not explain things obvious from reading the code.
+  - When leaving comments, do not use `[...]` style comments unless actually
+    intending to create intra-doc links.
 
 ## Where the code lives
 
