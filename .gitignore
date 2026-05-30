@@ -13,6 +13,9 @@
 # e2e/baselines/*.png; the review/ dir is just the expected|actual|diff viewer.
 /e2e/review/
 
+# Local-only Claude Code instructions (personal, not shared with the team).
+CLAUDE.local.md
+
 # Editor / OS cruft
 .DS_Store
 *.swp
