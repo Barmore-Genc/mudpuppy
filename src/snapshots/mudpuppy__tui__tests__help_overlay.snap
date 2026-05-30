@@ -18,7 +18,7 @@ expression: screen(&term)
 "│                 │Annotations                                                   │                 │"
 "│                 │  a            toggle the annotations panel                   │                 │"
 "│                 │Turn                                                          │                 │"
-"│                 │  r            release the turn back to the agent             │                 │"
+"│                 │  r            release the turn; first release approves       │                 │"
 "│                 │Other                                                         │                 │"
 "│                 │  ?            toggle this help                               │                 │"
 "│                 │  q / Ctrl-c   quit                                           │                 │"
