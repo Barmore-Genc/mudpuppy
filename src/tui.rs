@@ -26,7 +26,7 @@
 //! annotation overlays. Authoring annotations from inside the TUI is still to
 //! come.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -45,6 +45,8 @@ use tokio_stream::StreamExt;
 use crate::diff::{parse_diff, DiffLine, FileDiff, FileStatus, LineKind};
 use crate::domain::{Annotation, Author, Severity, Side, StateFile, Status, Target, Turn};
 use crate::highlight::{Highlighter, HlLine};
+use crate::lua::keys::KeyChord;
+use crate::lua::{self, LuaEngine};
 use crate::session::Session;
 use crate::{source, store};
 
@@ -99,6 +101,12 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
         .build()
         .context("starting the TUI runtime")?;
 
+    // The scripting engine is a sibling of `App` (not owned by it), so it can read
+    // `&App` while driving the app's `&mut` verbs through a per-dispatch borrow.
+    // A broken `core.luau` is a hard error here; a broken *user* config is not — it
+    // is surfaced in the status bar and the last good bindings stay in effect.
+    let engine = LuaEngine::new(lua::config_path()).context("starting the scripting engine")?;
+
     runtime.block_on(async move {
         // Store-change ticks: the watcher fires these from notify's own thread;
         // the loop only cares that *something* changed and re-reads to decide.
@@ -115,9 +123,21 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
             .and_then(Path::parent)
             .and_then(|dir| watch_store_dir(dir, tx).ok());
 
+        // Config hot-reload ticks on the same pattern: watch the config file's
+        // directory (and, in dev builds, the on-disk `core.luau`) and re-exec the
+        // keymap when an edit lands, so a rebind takes effect without a restart.
+        let (cfg_tx, mut cfg_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let _config_watcher = watch_config(cfg_tx);
+
         let mut events = EventStream::new();
 
+        // Initial events: `startup` once, then `file_open` for the file the
+        // viewer opens on.
+        engine.fire_startup(app)?;
+        engine.fire_file_open(app)?;
+
         loop {
+            app.status_msg = engine.status_message();
             terminal.draw(|frame| render(frame, app))?;
             tokio::select! {
                 // Terminal input. `EventStream::next` is cancel-safe, so the
@@ -125,12 +145,24 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                 maybe_event = events.next() => match maybe_event {
                     // Only act on key *presses*; on Windows crossterm also emits
                     // release and repeat events that would double every keystroke.
-                    Some(Ok(Event::Key(key))) => {
-                        if key.kind == KeyEventKind::Press && app.handle_key(key) {
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        // Hardwired Ctrl-C safety net: checked before the engine and
+                        // independent of any Lua state, so a broken config can never
+                        // trap the user.
+                        if is_ctrl_c(&key) {
                             return Ok(());
                         }
+                        if let Some(chord) = KeyChord::from_event(&key) {
+                            let before = Snapshot::of(app);
+                            engine.dispatch(app, chord)?;
+                            if app.should_quit {
+                                return Ok(());
+                            }
+                            let after = Snapshot::of(app);
+                            fire_changes(&engine, app, &before, &after)?;
+                        }
                     }
-                    // Resize and other terminal events just need the redraw above.
+                    // Non-press key events and resize/other events just redraw.
                     Some(Ok(_)) => {}
                     Some(Err(e)) => return Err(e).context("reading terminal input"),
                     // The input stream ended (terminal closed): nothing to wait on.
@@ -140,10 +172,104 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                 // `None` means the watcher was dropped/never attached; keep going
                 // on input alone rather than spinning, since `recv` then stays
                 // pending.
-                Some(()) = rx.recv() => app.reload(),
+                Some(()) = rx.recv() => {
+                    let before = Snapshot::of(app);
+                    app.reload();
+                    engine.fire_reload(app)?;
+                    let after = Snapshot::of(app);
+                    fire_changes(&engine, app, &before, &after)?;
+                }
+                // A config (or dev `core.luau`) edit landed: re-exec the keymap.
+                // Errors are non-fatal and surface in the status bar.
+                Some(()) = cfg_rx.recv() => {
+                    let _ = engine.reload_config();
+                }
             }
         }
     })
+}
+
+/// Whether a key press is the hardwired Ctrl-C quit.
+fn is_ctrl_c(key: &KeyEvent) -> bool {
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// A snapshot of the state the event hooks key off, taken before and after a
+/// mutating step so [`fire_changes`] can diff it.
+struct Snapshot {
+    selected: usize,
+    ann_ids: HashSet<String>,
+    turn_seq: u64,
+    turn_owner: Author,
+}
+
+impl Snapshot {
+    fn of(app: &App) -> Snapshot {
+        Snapshot {
+            selected: app.selected,
+            ann_ids: app.annotations.iter().map(|a| a.id.clone()).collect(),
+            turn_seq: app.turn.seq,
+            turn_owner: app.turn.owner,
+        }
+    }
+}
+
+/// Fire the events implied by the difference between two snapshots: a changed
+/// selection fires `file_open`, each newly-seen annotation fires
+/// `annotation_added`, and a changed turn `seq`/`owner` fires `turn_change`.
+/// Each event runs in its own scope inside the engine, so a handler can call
+/// action verbs without colliding with a held borrow.
+fn fire_changes(
+    engine: &LuaEngine,
+    app: &mut App,
+    before: &Snapshot,
+    after: &Snapshot,
+) -> Result<()> {
+    if before.selected != after.selected {
+        engine.fire_file_open(app)?;
+    }
+    let new_ids: Vec<String> = after.ann_ids.difference(&before.ann_ids).cloned().collect();
+    for id in new_ids {
+        if let Some(annotation) = app.annotations.iter().find(|a| a.id == id).cloned() {
+            engine.fire_annotation_added(app, &annotation)?;
+        }
+    }
+    if before.turn_seq != after.turn_seq || before.turn_owner != after.turn_owner {
+        engine.fire_turn_change(app)?;
+    }
+    Ok(())
+}
+
+/// Watch the user config file's directory (and, in debug builds, the on-disk
+/// `core.luau`) for edits, ticking `tx` on any change. Best-effort: returns an
+/// empty `Vec` of watchers if nothing can be watched, in which case hot-reload is
+/// simply unavailable and the loaded bindings stay in effect.
+fn watch_config(tx: UnboundedSender<()>) -> Vec<RecommendedWatcher> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(parent) = lua::config_path().as_deref().and_then(Path::parent) {
+        dirs.push(parent.to_path_buf());
+    }
+    #[cfg(debug_assertions)]
+    {
+        let core = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lua");
+        dirs.push(core);
+    }
+
+    let mut watchers = Vec::new();
+    for dir in dirs {
+        let tx = tx.clone();
+        let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if res.is_ok() {
+                let _ = tx.send(());
+            }
+        });
+        if let Ok(mut w) = watcher {
+            if w.watch(&dir, RecursiveMode::NonRecursive).is_ok() {
+                watchers.push(w);
+            }
+        }
+    }
+    watchers
 }
 
 /// Start watching `dir` for changes, forwarding a `()` tick on every filesystem
@@ -170,13 +296,13 @@ fn watch_store_dir(dir: &Path, tx: UnboundedSender<()>) -> Result<RecommendedWat
 
 /// Which pane has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Focus {
+pub(crate) enum Focus {
     Tree,
     Diff,
 }
 
 /// A single rendered row of the diff pane.
-enum Row {
+pub(crate) enum Row {
     /// A `@@ … @@` hunk header.
     Hunk(String),
     /// A content line (context / addition / deletion), with its syntax-highlight
@@ -189,8 +315,8 @@ enum Row {
 
 /// The rows for one opened file, plus the row indices where hunks begin (for
 /// `}`/`{` hunk navigation). Built lazily and cached per selected file.
-struct FileView {
-    rows: Vec<Row>,
+pub(crate) struct FileView {
+    pub(crate) rows: Vec<Row>,
     hunk_starts: Vec<usize>,
 }
 
@@ -247,36 +373,41 @@ impl FileView {
 }
 
 /// The whole viewer's state.
-struct App {
-    files: Vec<FileDiff>,
+pub(crate) struct App {
+    pub(crate) files: Vec<FileDiff>,
     target: Target,
     /// Index into `files` of the file currently shown in the diff pane.
-    selected: usize,
-    focus: Focus,
+    pub(crate) selected: usize,
+    pub(crate) focus: Focus,
     /// Cached rows for the selected file.
-    view: FileView,
+    pub(crate) view: FileView,
     /// Top visible row of the diff pane.
-    scroll: usize,
+    pub(crate) scroll: usize,
     /// Top visible file row of the tree, so the selection stays on screen.
     tree_scroll: usize,
-    show_help: bool,
+    pub(crate) show_help: bool,
     /// Whether the annotations side panel is shown.
-    show_panel: bool,
+    pub(crate) show_panel: bool,
     /// Annotations loaded from the store (both authors, every status).
-    annotations: Vec<Annotation>,
+    pub(crate) annotations: Vec<Annotation>,
     /// The turn-protocol block from the store, kept in sync on reload so the
     /// status bar can surface "agent is waiting" and `r` can release correctly.
-    turn: Turn,
+    pub(crate) turn: Turn,
     /// Path to the annotation store, when one was resolved; drives live reload.
     store_path: Option<PathBuf>,
     /// Diff-pane inner height from the last render, used for paging/clamping.
-    diff_height: usize,
+    pub(crate) diff_height: usize,
     /// File-tree inner height from the last render, used to keep selection visible.
     tree_height: usize,
+    /// Set by the Lua `quit` verb; checked by `run_loop` after each dispatch.
+    pub(crate) should_quit: bool,
+    /// Latest message from the scripting engine (a `print` or a config error),
+    /// mirrored here each frame so the status bar can surface it.
+    status_msg: Option<String>,
 }
 
 impl App {
-    fn new(files: Vec<FileDiff>, target: Target) -> App {
+    pub(crate) fn new(files: Vec<FileDiff>, target: Target) -> App {
         let view = FileView::build(&files[0]);
         App {
             files,
@@ -293,6 +424,8 @@ impl App {
             store_path: None,
             diff_height: 1,
             tree_height: 1,
+            should_quit: false,
+            status_msg: None,
         }
     }
 
@@ -323,7 +456,7 @@ impl App {
     /// ownership, clear the waiting flag, and record approval (the human's first
     /// release doubles as first-contact approval). The atomic store write is what
     /// wakes an agent blocked in `agent wait`. A no-op when no store is attached.
-    fn release_turn(&mut self) {
+    pub(crate) fn release_turn(&mut self) {
         let Some(path) = self.store_path.clone() else {
             return;
         };
@@ -364,7 +497,7 @@ impl App {
     }
 
     /// Open file `idx`, rebuilding the cached view and resetting the scroll.
-    fn select(&mut self, idx: usize) {
+    pub(crate) fn select(&mut self, idx: usize) {
         let idx = idx.min(self.files.len() - 1);
         if idx != self.selected {
             self.selected = idx;
@@ -373,22 +506,60 @@ impl App {
         }
     }
 
+    /// Open a file by its 1-based index (the numbering Lua sees). Values below 1
+    /// clamp to the first file; `select` clamps the upper end.
+    pub(crate) fn select_file(&mut self, index: i64) {
+        let idx = if index < 1 { 0 } else { (index - 1) as usize };
+        self.select(idx);
+    }
+
     fn max_scroll(&self) -> usize {
         self.view.rows.len().saturating_sub(self.diff_height)
     }
 
-    fn scroll_by(&mut self, delta: isize) {
+    pub(crate) fn scroll_by(&mut self, delta: isize) {
         let next = self.scroll as isize + delta;
         self.scroll = next.clamp(0, self.max_scroll() as isize) as usize;
     }
 
-    fn next_hunk(&mut self) {
+    /// Set the diff scroll to an absolute row, clamped to `[0, max_scroll]`. A
+    /// large value (used by `G`) lands exactly on the bottom.
+    pub(crate) fn set_scroll(&mut self, n: i64) {
+        let max = self.max_scroll() as i64;
+        self.scroll = n.clamp(0, max) as usize;
+    }
+
+    /// Request quit; `run_loop` honours it after the dispatch returns.
+    pub(crate) fn quit(&mut self) {
+        self.should_quit = true;
+    }
+
+    /// Focus a pane by name (`"tree"`/`"diff"`); an unknown name is ignored.
+    pub(crate) fn set_focus(&mut self, pane: &str) {
+        match pane {
+            "tree" => self.focus = Focus::Tree,
+            "diff" => self.focus = Focus::Diff,
+            _ => {}
+        }
+    }
+
+    /// Toggle the help overlay.
+    pub(crate) fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+    }
+
+    /// Toggle the annotations side panel.
+    pub(crate) fn toggle_panel(&mut self) {
+        self.show_panel = !self.show_panel;
+    }
+
+    pub(crate) fn next_hunk(&mut self) {
         if let Some(&s) = self.view.hunk_starts.iter().find(|&&s| s > self.scroll) {
             self.scroll = s.min(self.max_scroll());
         }
     }
 
-    fn prev_hunk(&mut self) {
+    pub(crate) fn prev_hunk(&mut self) {
         if let Some(&s) = self
             .view
             .hunk_starts
@@ -400,80 +571,31 @@ impl App {
         }
     }
 
-    /// Handle one key press. Returns `true` when the app should quit.
-    fn handle_key(&mut self, key: KeyEvent) -> bool {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-
-        // Help overlay swallows everything except its own dismissal.
-        if self.show_help {
-            match key.code {
-                KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => self.show_help = false,
-                _ => {}
-            }
-            return false;
-        }
-
-        match key.code {
-            // Global.
-            KeyCode::Char('q') => return true,
-            KeyCode::Char('c') if ctrl => return true,
-            KeyCode::Char('?') => self.show_help = true,
-            KeyCode::Char('a') => self.show_panel = !self.show_panel,
-            KeyCode::Char('r') => self.release_turn(),
-            KeyCode::Tab | KeyCode::BackTab => self.toggle_focus(),
-
-            // Half / full page, regardless of focus, scroll the diff.
-            KeyCode::Char('d') if ctrl => self.scroll_by(self.diff_height as isize / 2),
-            KeyCode::Char('u') if ctrl => self.scroll_by(-(self.diff_height as isize / 2)),
-            KeyCode::Char('f') if ctrl => self.scroll_by(self.diff_height as isize),
-            KeyCode::Char('b') if ctrl => self.scroll_by(-(self.diff_height as isize)),
-            KeyCode::PageDown => self.scroll_by(self.diff_height as isize),
-            KeyCode::PageUp => self.scroll_by(-(self.diff_height as isize)),
-
-            _ => match self.focus {
-                Focus::Tree => self.handle_tree_key(key),
-                Focus::Diff => self.handle_diff_key(key),
-            },
-        }
-        false
-    }
-
-    fn handle_tree_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => self.select(self.selected + 1),
-            KeyCode::Char('k') | KeyCode::Up => self.select(self.selected.saturating_sub(1)),
-            KeyCode::Char('g') | KeyCode::Home => self.select(0),
-            KeyCode::Char('G') | KeyCode::End => self.select(self.files.len() - 1),
-            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => self.focus = Focus::Diff,
-            _ => {}
-        }
-    }
-
-    fn handle_diff_key(&mut self, key: KeyEvent) {
-        match key.code {
-            KeyCode::Char('j') | KeyCode::Down => self.scroll_by(1),
-            KeyCode::Char('k') | KeyCode::Up => self.scroll_by(-1),
-            KeyCode::Char('g') | KeyCode::Home => self.scroll = 0,
-            KeyCode::Char('G') | KeyCode::End => self.scroll = self.max_scroll(),
-            KeyCode::Char('}') | KeyCode::Char('n') => self.next_hunk(),
-            KeyCode::Char('{') | KeyCode::Char('N') => self.prev_hunk(),
-            // Jump between files without leaving the diff pane.
-            KeyCode::Char('J') => self.select(self.selected + 1),
-            KeyCode::Char('K') => self.select(self.selected.saturating_sub(1)),
-            KeyCode::Char('h') | KeyCode::Left => self.focus = Focus::Tree,
-            _ => {}
-        }
-    }
-
-    fn toggle_focus(&mut self) {
+    pub(crate) fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::Tree => Focus::Diff,
             Focus::Diff => Focus::Tree,
         };
     }
 
-    fn current(&self) -> &FileDiff {
+    pub(crate) fn current(&self) -> &FileDiff {
         &self.files[self.selected]
+    }
+}
+
+#[cfg(test)]
+impl App {
+    /// Test helper: route one key press through a fresh core-only [`LuaEngine`],
+    /// exactly as `run_loop` does, and report whether it asked to quit. This is
+    /// what lets the layer-1 snapshot/behaviour tests drive the real keymap (now
+    /// living in `core.luau`) rather than a hand-coded match. A fresh engine per
+    /// call keeps each press independent and is cheap enough for these tests.
+    fn handle_key(&mut self, ev: KeyEvent) -> bool {
+        let engine = LuaEngine::new(None).expect("core.luau loads");
+        if let Some(chord) = KeyChord::from_event(&ev) {
+            engine.dispatch(self, chord).expect("dispatch");
+        }
+        self.should_quit
     }
 }
 
@@ -722,6 +844,16 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::styled("r", Style::default().fg(Color::Yellow)));
         spans.push(Span::raw(" release  "));
     } else {
+        spans.push(Span::raw("  "));
+    }
+    // A scripting message (a Lua `print` or a config error) surfaces here; the
+    // alternate screen has no usable stdout. Absent by default, so an
+    // unconfigured session reads exactly as before.
+    if let Some(msg) = &app.status_msg {
+        spans.push(Span::styled(
+            format!(" {msg} "),
+            Style::default().fg(Color::Black).bg(Color::Cyan),
+        ));
         spans.push(Span::raw("  "));
     }
     spans.extend([

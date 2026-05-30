@@ -23,6 +23,15 @@ use jiff::Timestamp;
 use nanoid::nanoid;
 use notify::{RecursiveMode, Watcher};
 
+/// Alphanumeric id alphabet. We avoid nanoid's default `-`/`_` so an id can
+/// never start with `-` and be mistaken for a CLI flag (e.g. `--id -X…`).
+const ID_ALPHABET: [char; 62] = [
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
+    'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l',
+    'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3', '4',
+    '5', '6', '7', '8', '9',
+];
+
 use crate::cli::{AddArgs, AgentCommand, CommentCommand};
 use crate::domain::{Annotation, Author, Severity, Side, StateFile, Status, Tag};
 use crate::session::Session;
@@ -116,7 +125,7 @@ fn add(args: AddArgs) -> Result<()> {
     let session = session()?;
     let now = Timestamp::now();
     let annotation = Annotation {
-        id: nanoid!(8),
+        id: nanoid!(8, &ID_ALPHABET),
         author: Author::Agent,
         file: args.file,
         line: args.line,

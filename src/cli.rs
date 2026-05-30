@@ -14,6 +14,9 @@ use clap::{Args, Parser, Subcommand};
 /// With no subcommand, opens the TUI on the current repository. Pass a PR
 /// reference (`owner/repo#123` or a full URL) to review a pull request instead
 /// of local changes. Agent-driven commands live under `mudpuppy agent`.
+///
+/// Run `mudpuppy help config` for the configuration & scripting (Luau) reference
+/// — how to rebind keys and hook events in `~/.config/mudpuppy/mudpuppy.luau`.
 #[derive(Debug, Parser)]
 #[command(name = "mudpuppy", version, about, long_about = None)]
 pub struct Cli {
@@ -163,11 +166,22 @@ pub struct AddArgs {
 }
 
 /// Parse the process arguments and dispatch.
-///
-/// During bootstrap the handlers are not wired up yet; this resolves the
-/// command tree and reports what isn't implemented rather than doing work.
 pub fn run() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    // `mudpuppy help config` is our own documentation topic, not a clap
+    // subcommand — intercept it before clap, which would reject `config` as an
+    // unknown command. Everything else (including clap's own `help` and
+    // `help agent`) falls through to the normal command tree.
+    if wants_config_help(&args) {
+        print!("{}", crate::lua::config_help());
+        return Ok(());
+    }
     dispatch(Cli::parse())
+}
+
+/// Whether the invocation is `mudpuppy help config` (the scripting reference).
+fn wants_config_help(args: &[String]) -> bool {
+    args.len() == 3 && args[1] == "help" && args[2] == "config"
 }
 
 fn dispatch(cli: Cli) -> Result<()> {
@@ -230,5 +244,31 @@ mod tests {
     fn accepts_pr_positional() {
         let cli = Cli::try_parse_from(["mudpuppy", "owner/repo#123"]).unwrap();
         assert_eq!(cli.pr.as_deref(), Some("owner/repo#123"));
+    }
+
+    #[test]
+    fn recognizes_the_config_help_topic() {
+        let yes = ["mudpuppy", "help", "config"].map(String::from);
+        assert!(wants_config_help(&yes));
+        // Adjacent invocations are *not* the config topic and must reach clap.
+        for args in [
+            vec!["mudpuppy", "help"],
+            vec!["mudpuppy", "help", "agent"],
+            vec!["mudpuppy", "config"],
+            vec!["mudpuppy", "help", "config", "extra"],
+        ] {
+            let owned: Vec<String> = args.into_iter().map(String::from).collect();
+            assert!(!wants_config_help(&owned), "should not match {owned:?}");
+        }
+    }
+
+    #[test]
+    fn config_help_documents_the_api() {
+        let help = crate::lua::config_help();
+        // It names the language, the registration verbs, and a worked example.
+        assert!(help.contains("Luau"));
+        assert!(help.contains("mudpuppy.map"));
+        assert!(help.contains("mudpuppy.unmap"));
+        assert!(help.contains("mudpuppy.on"));
     }
 }
