@@ -88,6 +88,31 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --no-deps --all-features
 
+  # Source-based coverage via cargo-llvm-cov. The e2e suite drives the compiled
+  # binary through a PTY, but the harness inherits our environment, so the
+  # LLVM_PROFILE_FILE cargo-llvm-cov sets flows into that subprocess too — the
+  # PTY tests count toward coverage. lcov is uploaded to Codecov, which posts the
+  # project/diff numbers as a PR comment (see codecov.yml).
+  coverage:
+    name: coverage
+    needs: detect
+    if: needs.detect.outputs.has_cargo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+      # Tokenless upload, to see whether Codecov picks the repo up on its own. If
+      # uploads don't land, add a CODECOV_TOKEN secret and pass it as `token:`.
+      - uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          fail_ci_if_error: true
+
   # Exact-match pixel oracle (TESTING.md Layer 2 / e2e/README.md): render the
   # real binary and pixel-diff against the committed baselines. PRs only — the
   # review bundle + comment need PR context. Runs natively (no container): the
