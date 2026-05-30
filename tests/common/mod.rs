@@ -135,6 +135,29 @@ impl Session {
         }
     }
 
+    /// Poll the screen until `needle` *disappears* or `timeout` elapses. The
+    /// mirror of [`wait_for_screen`](Self::wait_for_screen).
+    pub fn wait_until_absent(&self, needle: &str, timeout: Duration) -> bool {
+        let start = Instant::now();
+        loop {
+            if !self.screen().contains(needle) {
+                return true;
+            }
+            if start.elapsed() >= timeout {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(40));
+        }
+    }
+
+    /// Let the screen settle for `dwell`, then assert `needle` is *not* present.
+    /// Used to check a key had no effect: there is no event to wait on, so we
+    /// give any (erroneous) render time to land before looking.
+    pub fn absent_after(&self, needle: &str, dwell: Duration) -> bool {
+        thread::sleep(dwell);
+        !self.screen().contains(needle)
+    }
+
     /// Type raw bytes into the PTY (delivered to the app as real tty input).
     pub fn feed(&mut self, bytes: &[u8]) {
         self.writer.write_all(bytes).expect("write to pty");

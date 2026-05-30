@@ -10,6 +10,11 @@ readme = "README.md"
 keywords = ["tui", "code-review", "diff", "git", "agent"]
 categories = ["command-line-utilities", "development-tools"]
 
+# No unsafe Rust in our own source (AGENTS.md). Scopes to this package only,
+# not dependencies; `forbid` can't be overridden by a local `#[allow]`.
+[lints.rust]
+unsafe_code = "forbid"
+
 # The crate is split into a library (the testable core: domain schema, store,
 # diff parser, session/source resolution) and a thin binary that wires the clap
 # command surface to it. Keeping the core in a lib is what lets the heavily
@@ -77,6 +82,13 @@ tokio-stream = "0.1"
 # we highlight only the opened file's visible hunks. The bundle pulls the default
 # syntaxes + themes we load at runtime.
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+
+# Embedded scripting/config layer (the Lua keymap + event hooks). Luau is mlua's
+# first-class, sandbox-oriented backend; `vendored` builds the interpreter from
+# source so there's no system Lua dependency, keeping the toolchain-light, fully
+# local build. All default keybindings live in `src/lua/core.lua`; user config is
+# loaded on top. The interpreter is sandboxed: no io/os/network/subprocess.
+mlua = { version = "0.10", features = ["luau", "vendored"] }
 
 [dev-dependencies]
 serde_json = "1"
