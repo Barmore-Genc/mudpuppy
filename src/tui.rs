@@ -10,7 +10,9 @@
 //! As of milestone 2 the viewer also **reads** the annotation store: it draws
 //! severity-coloured gutter markers on annotated lines, lists annotations in a
 //! toggleable side panel, and live-reloads when the store changes on disk so an
-//! agent's comments appear while the TUI is open.
+//! agent's comments appear while the TUI is open. That reload rides the same
+//! `notify` coordination bus `agent wait` uses (PLAN.md §9): the event loop
+//! watches the store directory and refreshes in place when a write lands.
 //!
 //! Milestone 3 adds the human's half of the turn protocol (PLAN.md §6): when an
 //! agent is blocked in `agent wait`, the store's `turn.agent_waiting` flag is
@@ -21,26 +23,25 @@
 //! still to come.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use anyhow::{Context, Result};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use ratatui::crossterm::event::{
+    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio_stream::StreamExt;
 
 use crate::diff::{parse_diff, DiffLine, FileDiff, FileStatus, LineKind};
 use crate::domain::{Annotation, Author, Severity, Side, StateFile, Status, Target, Turn};
 use crate::session::Session;
 use crate::{source, store};
-
-/// How often the event loop wakes to check the store's mtime for live reload.
-/// A coarse poll (rather than `notify`) is enough for the proof of concept; the
-/// filesystem-watch bus arrives with the turn protocol in milestone 3.
-const POLL_INTERVAL: Duration = Duration::from_millis(400);
 
 /// The glyph drawn in the annotation gutter column on an annotated line.
 const MARK: &str = "●";
@@ -78,26 +79,88 @@ pub fn launch(pr: Option<String>, base: Option<String>) -> Result<()> {
     result
 }
 
-/// The draw → read-event → handle loop. Returns when the user quits.
+/// The draw → await-event → handle loop. Returns when the user quits.
 ///
-/// Reads are polled with a timeout so an idle UI still wakes periodically to
-/// pick up store changes another process (the agent) wrote — the proof-of-concept
-/// stand-in for `notify`-based live reload.
+/// Runs on a small current-thread Tokio runtime — the same async foundation
+/// `agent wait` uses (agent.rs) — so the two halves of the `notify` coordination
+/// bus share one model. A `tokio::select!` multiplexes the two wake sources with
+/// no busy poll: crossterm's async [`EventStream`] for terminal input, and a
+/// channel the store-directory watcher ticks on every write. A store tick reloads
+/// in place — the live-reload half of the bus that wakes the agent (PLAN.md
+/// §6, §9).
 fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
-    loop {
-        terminal.draw(|frame| render(frame, app))?;
-        if event::poll(POLL_INTERVAL)? {
-            // Only act on key *presses*; on Windows crossterm also emits release
-            // and repeat events that would otherwise double every keystroke.
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press && app.handle_key(key) {
-                    return Ok(());
-                }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("starting the TUI runtime")?;
+
+    runtime.block_on(async move {
+        // Store-change ticks: the watcher fires these from notify's own thread;
+        // the loop only cares that *something* changed and re-reads to decide.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+        // Watch the store directory if one was resolved. The watcher must outlive
+        // the loop, so it's bound here; dropping it would stop delivery. Live
+        // reload is best-effort: if the watch can't be set up we still browse the
+        // diff, just without picking up the agent's writes (mirrors the store-less
+        // degrade in `launch`).
+        let _watcher = app
+            .store_path
+            .as_deref()
+            .and_then(Path::parent)
+            .and_then(|dir| watch_store_dir(dir, tx).ok());
+
+        let mut events = EventStream::new();
+
+        loop {
+            terminal.draw(|frame| render(frame, app))?;
+            tokio::select! {
+                // Terminal input. `EventStream::next` is cancel-safe, so the
+                // dropped future on a store tick loses nothing.
+                maybe_event = events.next() => match maybe_event {
+                    // Only act on key *presses*; on Windows crossterm also emits
+                    // release and repeat events that would double every keystroke.
+                    Some(Ok(Event::Key(key))) => {
+                        if key.kind == KeyEventKind::Press && app.handle_key(key) {
+                            return Ok(());
+                        }
+                    }
+                    // Resize and other terminal events just need the redraw above.
+                    Some(Ok(_)) => {}
+                    Some(Err(e)) => return Err(e).context("reading terminal input"),
+                    // The input stream ended (terminal closed): nothing to wait on.
+                    None => return Ok(()),
+                },
+                // A store write landed (the agent's comments, or our own release).
+                // `None` means the watcher was dropped/never attached; keep going
+                // on input alone rather than spinning, since `recv` then stays
+                // pending.
+                Some(()) = rx.recv() => app.reload(),
             }
-        } else {
-            app.reload_if_changed();
         }
-    }
+    })
+}
+
+/// Start watching `dir` for changes, forwarding a `()` tick on every filesystem
+/// event. The returned watcher must be kept alive for as long as ticks are
+/// wanted. Mirrors `agent wait`'s watch (non-recursive on the store directory,
+/// since atomic writes land as a temp file + rename within it).
+///
+/// The store directory may not exist yet when the human opens the TUI before any
+/// annotation is written, so it's created first — both so the watch can attach
+/// and so it's already in place to catch the agent's very first write.
+fn watch_store_dir(dir: &Path, tx: UnboundedSender<()>) -> Result<RecommendedWatcher> {
+    std::fs::create_dir_all(dir)
+        .with_context(|| format!("creating the store directory {} to watch", dir.display()))?;
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        // We don't care which event fired, only that something changed; the loop
+        // re-reads the store to decide. Drop the tick if the receiver is gone.
+        if res.is_ok() {
+            let _ = tx.send(());
+        }
+    })?;
+    watcher.watch(dir, RecursiveMode::NonRecursive)?;
+    Ok(watcher)
 }
 
 /// Which pane has keyboard focus.
@@ -186,8 +249,6 @@ struct App {
     turn: Turn,
     /// Path to the annotation store, when one was resolved; drives live reload.
     store_path: Option<PathBuf>,
-    /// Last-seen store mtime, compared on each poll to detect external writes.
-    store_mtime: Option<SystemTime>,
     /// Diff-pane inner height from the last render, used for paging/clamping.
     diff_height: usize,
     /// File-tree inner height from the last render, used to keep selection visible.
@@ -210,17 +271,15 @@ impl App {
             annotations: Vec::new(),
             turn: Turn::default(),
             store_path: None,
-            store_mtime: None,
             diff_height: 1,
             tree_height: 1,
         }
     }
 
-    /// Attach a resolved store path and its current state (annotations + turn),
-    /// recording the store's mtime so [`App::reload_if_changed`] can detect later
-    /// writes. An absent state leaves the empty defaults in place.
+    /// Attach a resolved store path and its current state (annotations + turn).
+    /// An absent state leaves the empty defaults in place. The store directory is
+    /// watched separately in [`run_loop`], which calls [`App::reload`] on a write.
     fn attach_store(&mut self, path: PathBuf, state: Option<StateFile>) {
-        self.store_mtime = mtime(&path);
         self.store_path = Some(path);
         if let Some(state) = state {
             self.annotations = state.annotations;
@@ -228,16 +287,12 @@ impl App {
         }
     }
 
-    /// Reload annotations and turn state if the store file changed on disk since
-    /// the last check. Cheap (one `stat`) on the common no-change path; silent on
-    /// errors so a transient read race never disturbs browsing.
-    fn reload_if_changed(&mut self) {
+    /// Reload annotations and turn state from the store, picking up another
+    /// process's writes (the agent's comments, or our own turn release). Silent on
+    /// errors so a transient read race never disturbs browsing; a no-op without a
+    /// store. Triggered by a store-watch tick in [`run_loop`].
+    fn reload(&mut self) {
         let Some(path) = &self.store_path else { return };
-        let current = mtime(path);
-        if current == self.store_mtime {
-            return;
-        }
-        self.store_mtime = current;
         if let Ok(Some(state)) = store::load(path) {
             self.annotations = state.annotations;
             self.turn = state.turn;
@@ -261,10 +316,10 @@ impl App {
         });
         if let Ok(turn) = updated {
             self.turn = turn;
-            // We just wrote the store; advance our mtime baseline so the next
-            // poll doesn't treat our own write as an external change.
-            self.store_mtime = mtime(&path);
         }
+        // The watch will also tick on our own write and trigger a harmless
+        // reload of what we just stored; the in-memory update above keeps the
+        // status bar correct in the meantime.
     }
 
     /// Annotations anchored to the file currently open in the diff pane.
@@ -850,11 +905,6 @@ fn tag_symbol(tag: crate::domain::Tag) -> &'static str {
         Tag::Concern => "!",
         Tag::Direction => ">",
     }
-}
-
-/// The store file's modification time, or `None` if it can't be read.
-fn mtime(path: &std::path::Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
 /// Short description of what's under review, for the status bar.
@@ -1486,5 +1536,53 @@ rename to src/relocated.rs
             "status bar should advertise the waiting agent:\n{}",
             screen(&term)
         );
+    }
+
+    // ---- live reload: the data path a notify tick drives (PLAN.md §9) -------
+
+    #[test]
+    fn reload_picks_up_another_processs_writes() {
+        // The notify watch only decides *when* to reload; `reload` does the work
+        // of re-reading the store, so drive it directly to prove a TUI started on
+        // an empty store sees an agent's later annotation and turn change.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("annotations.json");
+        let target = Target::Local {
+            base: "main".to_string(),
+            head_sha: "abc".to_string(),
+        };
+
+        let mut a = App::new(parse_diff(FIXTURE), target.clone());
+        a.attach_store(path.clone(), store::load(&path).unwrap());
+        assert!(a.annotations.is_empty(), "starts with an empty store");
+
+        // Another process (the agent) writes a comment and takes the turn.
+        store::update(&path, &target, |s| {
+            s.annotations.push(note(
+                "agent001",
+                Author::Agent,
+                "src/alpha.rs",
+                Side::Right,
+                2,
+                Severity::Warning,
+            ));
+            s.turn.agent_waiting = true;
+        })
+        .unwrap();
+
+        a.reload();
+        assert_eq!(a.annotations.len(), 1, "reload picks up the new annotation");
+        assert_eq!(a.annotations[0].id, "agent001");
+        assert!(a.turn.agent_waiting, "and the refreshed turn state");
+    }
+
+    #[test]
+    fn reload_without_a_store_is_a_harmless_noop() {
+        // Store-less view (resolution failed): reload must not panic and leaves
+        // the empty defaults in place.
+        let mut a = app();
+        a.reload();
+        assert!(a.annotations.is_empty());
+        assert_eq!(a.turn, Turn::default());
     }
 }
