@@ -19,6 +19,7 @@
 //!   contract; the most heavily tested module.
 //! - [`source`] — diff-source providers (local `git`, PR `gh`).
 //! - [`diff`] — hand-rolled unified-diff parser + anchoring/staleness.
+//! - [`highlight`] — syntect syntax highlighting for the diff pane.
 //! - [`store`] — load / merge-by-id / atomic+locked save; the turn protocol.
 //! - [`session`] — repo + target resolution, store-path derivation, resume.
 //! - [`tui`] — the ratatui application.
@@ -29,6 +30,7 @@ pub mod agent;
 pub mod cli;
 pub mod diff;
 pub mod domain;
+pub mod highlight;
 pub mod session;
 pub mod source;
 pub mod store;

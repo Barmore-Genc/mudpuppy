@@ -19,8 +19,12 @@
 //! set and the status bar surfaces it; pressing `r` **releases the turn** —
 //! bumping `turn.seq`, handing ownership back to the agent, and (on first
 //! contact) recording approval. That store write is what wakes the waiting
-//! agent. Authoring annotations from inside the TUI and syntax highlighting are
-//! still to come.
+//! agent.
+//!
+//! The diff pane is **syntax-highlighted** via [`crate::highlight`] (syntect):
+//! each opened file's hunks are coloured in place, under the gutter and
+//! annotation overlays. Authoring annotations from inside the TUI is still to
+//! come.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -40,6 +44,7 @@ use tokio_stream::StreamExt;
 
 use crate::diff::{parse_diff, DiffLine, FileDiff, FileStatus, LineKind};
 use crate::domain::{Annotation, Author, Severity, Side, StateFile, Status, Target, Turn};
+use crate::highlight::{Highlighter, HlLine};
 use crate::session::Session;
 use crate::{source, store};
 
@@ -174,8 +179,10 @@ enum Focus {
 enum Row {
     /// A `@@ … @@` hunk header.
     Hunk(String),
-    /// A content line (context / addition / deletion).
-    Line(DiffLine),
+    /// A content line (context / addition / deletion), with its syntax-highlight
+    /// colour runs when the file's language is recognised (`None` otherwise —
+    /// the row then renders in the plain per-kind colour).
+    Line(DiffLine, Option<HlLine>),
     /// An informational placeholder (binary file, empty diff).
     Notice(String),
 }
@@ -198,6 +205,12 @@ impl FileView {
             return FileView { rows, hunk_starts };
         }
 
+        // Resolve the language once for the whole file; `None` (unknown
+        // extension) means every line falls back to plain per-kind colouring.
+        // Highlighting happens here, when a file is *opened*, so the cost tracks
+        // the opened file rather than the whole 1000-file diff.
+        let highlighter = Highlighter::for_path(file.display_path());
+
         for hunk in file.hunks() {
             hunk_starts.push(rows.len());
             rows.push(Row::Hunk(format!(
@@ -212,8 +225,15 @@ impl FileView {
                     format!(" {}", hunk.section)
                 }
             )));
-            for line in hunk.lines {
-                rows.push(Row::Line(line));
+            // Highlight the hunk's bodies in one pass (parse state is per-hunk;
+            // see the `highlight` module), then pair each line with its runs.
+            let highlights = highlighter.as_ref().map(|hl| {
+                let texts: Vec<&str> = hunk.lines.iter().map(|l| l.content.as_str()).collect();
+                hl.hunk(&texts)
+            });
+            for (i, line) in hunk.lines.into_iter().enumerate() {
+                let hl = highlights.as_ref().map(|h| h[i].clone());
+                rows.push(Row::Line(line, hl));
             }
         }
 
@@ -782,14 +802,18 @@ fn row_to_line(row: &Row, gutter: bool, marks: &HashMap<(Side, u32), Severity>) 
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
         )),
-        Row::Line(line) => diff_line(line, gutter, marks),
+        Row::Line(line, hl) => diff_line(line, hl.as_ref(), gutter, marks),
     }
 }
 
 /// Format a content line: an optional annotation mark, an `old new` gutter, a
-/// `+`/`-`/space marker, then the text, coloured by kind.
+/// `+`/`-`/space marker, then the text. The `+`/`-` marker keeps its kind colour
+/// (green/red) so additions and deletions stay scannable at a glance; the text
+/// itself is syntax-coloured when `hl` is present, falling back to the plain
+/// per-kind colour otherwise.
 fn diff_line(
     line: &DiffLine,
+    hl: Option<&HlLine>,
     gutter: bool,
     marks: &HashMap<(Side, u32), Severity>,
 ) -> Line<'static> {
@@ -802,14 +826,6 @@ fn diff_line(
     let old = line.old_lineno.map(|n| n.to_string()).unwrap_or_default();
     let new = line.new_lineno.map(|n| n.to_string()).unwrap_or_default();
     let numbers = format!("{old:>5} {new:>5} ");
-
-    // Tabs render unpredictably across terminals; expand to a 4-space stop.
-    let content = line.content.replace('\t', "    ");
-
-    let text_style = match line.kind {
-        LineKind::Context => Style::default(),
-        _ => Style::default().fg(color),
-    };
 
     let mut spans = Vec::with_capacity(4);
     if gutter {
@@ -832,7 +848,27 @@ fn diff_line(
         format!("{marker} "),
         Style::default().fg(color),
     ));
-    spans.push(Span::styled(content, text_style));
+
+    // Tabs render unpredictably across terminals; expand to a 4-space stop.
+    // Expanding per highlight run is equivalent to expanding the whole line, so
+    // the rendered characters match the plain path exactly.
+    match hl {
+        Some(runs) => {
+            for (run_color, text) in runs {
+                spans.push(Span::styled(
+                    text.replace('\t', "    "),
+                    Style::default().fg(*run_color),
+                ));
+            }
+        }
+        None => {
+            let text_style = match line.kind {
+                LineKind::Context => Style::default(),
+                _ => Style::default().fg(color),
+            };
+            spans.push(Span::styled(line.content.replace('\t', "    "), text_style));
+        }
+    }
     Line::from(spans)
 }
 
@@ -1346,6 +1382,25 @@ rename to src/relocated.rs
         // the addition/deletion lines rather than the header digits.
         assert_eq!(style_of(&term, "+", 40).fg, Some(Color::Green));
         assert_eq!(style_of(&term, "-", 40).fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn diff_content_is_syntax_highlighted() {
+        // alpha.rs (Rust) is open at launch. The diff body otherwise only ever
+        // uses *named* colours (cyan header, green/red markers, dark-gray line
+        // numbers), so a truecolor `Rgb` foreground anywhere in the body can
+        // only have come from syntect — proof the highlighter is wired through
+        // rendering, not just unit-tested in isolation.
+        let term = drive(&mut app(), 100, 24, &[]);
+        let buf = term.backend().buffer();
+        // Body rows only: 0 is the pane title, the last row is the status bar.
+        let highlighted = (1..23).any(|y| {
+            (29..buf.area.width).any(|x| {
+                buf.cell((x, y))
+                    .is_some_and(|c| matches!(c.style().fg, Some(Color::Rgb(..))))
+            })
+        });
+        assert!(highlighted, "expected syntect truecolor in the diff body");
     }
 
     #[test]

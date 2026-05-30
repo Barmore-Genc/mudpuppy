@@ -45,10 +45,13 @@ testable core) and a thin binary:
   the command tree and dispatches into it.
 - `src/` modules: `domain` (schema types — implemented and tested), `cli` (clap
   command surface — implemented), `source` (local-`git` / PR-`gh` diff
-  providers), `diff` (hand-rolled unified-diff parser + anchoring), `store`
+  providers), `diff` (hand-rolled unified-diff parser + anchoring), `highlight`
+  (syntect syntax highlighting for the diff pane — per-file/per-hunk, with a
+  plain fallback for unknown languages), `store`
   (load / merge-by-id / atomic+locked save), `session` (repo/target resolution +
-  store-path derivation), `tui` (ratatui app — read-only diff browsing plus
-  annotation display + live reload + the `r` turn-release keybind), and `agent`
+  store-path derivation), `tui` (ratatui app — read-only diff browsing with
+  syntax-highlighted hunks, plus annotation display + live reload + the `r`
+  turn-release keybind), and `agent`
   (the `agent comment` lifecycle, `diff`, `reset`, and the `agent wait` turn
   rendezvous — it blocks on store-directory changes via `notify`, wakes when the
   human bumps `turn.seq`, and prints what they changed). The human's `r` release
@@ -90,7 +93,14 @@ warnings.
   library and command paths; reserve panics for genuine invariants.
 - **Tests:** colocate unit tests with modules; put end-to-end CLI behavior under
   `tests/`. The annotation schema and any handoff/merge logic deserve tests
-  since they're the cross-process contract.
+  since they're the cross-process contract. Two TUI-snapshot gotchas
+  (see TESTING.md for the full rationale):
+  - The Layer-1 `insta` `.snap` files capture only the **character grid**, not
+    colors — a style-only change (fg/bg/modifier) won't update any `.snap`.
+    Assert colors with the dedicated buffer helpers in the `tui` tests instead.
+  - The Layer-2 pixel-oracle baselines (`e2e/baselines/`) *do* change on any
+    color or layout change. **Don't regenerate them yourself** — re-blessing is
+    the reviewing developer's call on the PR, not part of the code change.
 - **Dependencies:** keep them lean and justified — this is a local tool. Vet new
   crates against the "entirely local, no AI" rules above.
 

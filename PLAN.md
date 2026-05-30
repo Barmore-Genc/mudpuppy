@@ -232,8 +232,11 @@ store); only `wait` needs a live human to ever unblock.
 
 1. **Read-only viewer.** ✅ Done. Cargo project + module skeleton; the
    diff-source abstraction (local `git` + PR `gh`); hand-rolled parser; ratatui
-   browsing (file tree / diff pane / status bar) with virtualized rendering. (Syntect
-   highlighting deferred.) Proved the hard rendering/scale problem early.
+   browsing (file tree / diff pane / status bar) with virtualized rendering.
+   `syntect` syntax highlighting (deferred from the initial slice) now colours
+   the diff pane: the opened file's hunks are highlighted in place under the
+   gutter/annotation overlays, language resolved per file with a plain fallback.
+   Proved the hard rendering/scale problem early.
 2. **Annotations in the store + TUI.** 🟡 In progress. Done: the `store`
    (atomic+locked merge-by-id writes), `session` store-path resolution, the
    `agent comment` lifecycle (add / list / edit / cancel / resolve / reopen /
