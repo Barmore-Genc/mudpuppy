@@ -1,0 +1,24 @@
+# Codecov configuration. Coverage is reported, not enforced: both status checks
+# are informational so a dip never blocks a merge — the signal lives in the PR
+# comment, which we leave to the reviewer's judgment.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+
+# One comment per PR, kept in place rather than reposted on every push.
+comment:
+  layout: "reach, diff, files"
+  behavior: default
+  require_changes: false
+
+# The binary is a thin shell over the library (see Cargo.toml); the testable
+# core lives in the lib. Test code itself shouldn't count toward coverage.
+ignore:
+  - "src/main.rs"
+  - "tests/"
+  - "e2e/"
