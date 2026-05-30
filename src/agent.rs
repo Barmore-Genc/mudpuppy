@@ -314,9 +314,11 @@ enum WaitOutcome {
 /// The flow is serverless, entirely over the store directory: record the current
 /// `turn.seq`, hand the turn to the human (`owner = human`, `agent_waiting =
 /// true`), and snapshot the annotations. Then block on `notify` until the store
-/// shows a higher `seq`. While we're blocked only the human writes, so any
-/// difference from the snapshot is precisely their work. On any exit path we
-/// clear `agent_waiting` so a stale flag never lingers.
+/// shows a higher `seq` *and* the human has approved (first contact gates here
+/// until they opt in; once approved a session stays approved). While we're
+/// blocked only the human writes, so any difference from the snapshot is
+/// precisely their work. On any exit path we clear `agent_waiting` so a stale
+/// flag never lingers.
 fn wait(timeout: Option<u64>) -> Result<()> {
     let session = session()?;
     let (recorded_seq, snapshot) = begin_wait(&session)?;
@@ -437,11 +439,14 @@ fn watch_for_release(
     })
 }
 
-/// Whether the store now records a turn past `recorded_seq` — i.e. the human
-/// released. A missing store (shouldn't happen after `begin_wait`) reads as "not
-/// yet".
+/// Whether the store now records a turn the agent may take: a `seq` past
+/// `recorded_seq` (the human released) *and* `approved` set. The approval gate
+/// holds the agent at first contact until the human has opted in — the human's
+/// first turn-release sets both at once, so an established session (already
+/// approved) is unaffected. A missing store (shouldn't happen after
+/// `begin_wait`) reads as "not yet".
 fn turn_released(store_path: &Path, recorded_seq: u64) -> Result<bool> {
-    Ok(store::load(store_path)?.is_some_and(|s| s.turn.seq > recorded_seq))
+    Ok(store::load(store_path)?.is_some_and(|s| s.turn.approved && s.turn.seq > recorded_seq))
 }
 
 /// Render what the human changed during their turn, by diffing the released
@@ -675,6 +680,34 @@ index 3..4 100644
         assert_eq!(
             render_changes(&snapshot, &state),
             "(turn released with no changes)\n"
+        );
+    }
+
+    #[test]
+    fn turn_released_gates_first_contact_on_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("annotations.json");
+        let mut s = state_with(vec![]);
+
+        // First contact: the human bumped `seq` but has not approved yet — the
+        // agent must stay blocked.
+        s.turn.seq = 1;
+        s.turn.approved = false;
+        store::save(&path, &s).unwrap();
+        assert!(
+            !turn_released(&path, 0).unwrap(),
+            "an unapproved release does not unblock the agent"
+        );
+
+        // Approval flips it (the human's first release sets both at once).
+        s.turn.approved = true;
+        store::save(&path, &s).unwrap();
+        assert!(turn_released(&path, 0).unwrap(), "approved + advanced = go");
+
+        // Approved but no advance past the recorded seq: still waiting.
+        assert!(
+            !turn_released(&path, 1).unwrap(),
+            "approval alone, without a fresh release, is not a turn"
         );
     }
 }

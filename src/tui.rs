@@ -19,7 +19,9 @@
 //! set and the status bar surfaces it; pressing `r` **releases the turn** —
 //! bumping `turn.seq`, handing ownership back to the agent, and (on first
 //! contact) recording approval. That store write is what wakes the waiting
-//! agent.
+//! agent. On an agent's **first contact** — before the human has approved — a
+//! top banner asks the human to approve, and that first `r` release doubles as
+//! approval (the same write `agent wait` gates on).
 //!
 //! The diff pane is **syntax-highlighted** via [`crate::highlight`] (syntect):
 //! each opened file's hunks are coloured in place, under the gutter and
@@ -475,6 +477,16 @@ impl App {
         // status bar correct in the meantime.
     }
 
+    /// Whether an agent is making first contact: it is blocked in `agent wait`
+    /// (so it has written to this session and is expecting a turn) but the human
+    /// has not yet approved. While this holds the TUI surfaces an approval prompt,
+    /// and the human's first turn-release (`r`) doubles as approval (PLAN.md §6).
+    /// Once approved a session stays approved, so this is only ever true at the
+    /// very start.
+    fn awaiting_approval(&self) -> bool {
+        self.turn.agent_waiting && !self.turn.approved
+    }
+
     /// Annotations anchored to the file currently open in the diff pane.
     fn current_file_annotations(&self) -> Vec<&Annotation> {
         let path = self.current().display_path();
@@ -602,8 +614,19 @@ impl App {
 /// Draw the whole UI for one frame and record viewport heights for the next
 /// key-handling pass.
 fn render(frame: &mut Frame, app: &mut App) {
-    let [main, status] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
+    // On first contact an approval banner claims the top row. It only appears
+    // until the human approves, so an established session lays out exactly as
+    // before and its snapshots are unchanged.
+    let body = if app.awaiting_approval() {
+        let [banner, body] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(frame.area());
+        render_approval_banner(frame, banner);
+        body
+    } else {
+        frame.area()
+    };
+
+    let [main, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(body);
 
     // The annotations panel claims a right-hand column when toggled on.
     let (tree, diff, panel) = if app.show_panel {
@@ -789,6 +812,22 @@ fn render_panel(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// The first-contact approval banner (PLAN.md §6): a full-width highlighted row
+/// telling the human an agent wants to collaborate and that releasing the turn
+/// (`r`) approves it. Shown only while [`App::awaiting_approval`] holds.
+fn render_approval_banner(frame: &mut Frame, area: Rect) {
+    let text = " An agent wants to collaborate on this review — press r to approve and hand it the first turn ";
+    let banner = Paragraph::new(Line::from(Span::styled(
+        text,
+        Style::default()
+            .bg(Color::Green)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD),
+    )))
+    .style(Style::default().bg(Color::Green));
+    frame.render_widget(banner, area);
+}
+
 /// The bottom status bar: target, position, counts, focus, and the help hint.
 fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     let file = app.current();
@@ -830,7 +869,8 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut spans = vec![Span::raw(left)];
     // When an agent is blocked in `agent wait`, make it impossible to miss and
-    // advertise the release key (PLAN.md §6).
+    // advertise the release key (PLAN.md §6). Before first-contact approval the
+    // same `r` press approves, so the hint says so (the banner spells it out).
     if app.turn.agent_waiting {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
@@ -842,7 +882,12 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         ));
         spans.push(Span::raw("  "));
         spans.push(Span::styled("r", Style::default().fg(Color::Yellow)));
-        spans.push(Span::raw(" release  "));
+        let action = if app.turn.approved {
+            " release  "
+        } else {
+            " approve  "
+        };
+        spans.push(Span::raw(action));
     } else {
         spans.push(Span::raw("  "));
     }
@@ -895,7 +940,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         section("Annotations"),
         Line::raw("  a            toggle the annotations panel"),
         section("Turn"),
-        Line::raw("  r            release the turn back to the agent"),
+        Line::raw("  r            release the turn; first release approves"),
         section("Other"),
         Line::raw("  ?            toggle this help"),
         Line::raw("  q / Ctrl-c   quit"),
@@ -1722,6 +1767,63 @@ rename to src/relocated.rs
             screen(&term).contains("agent waiting"),
             "status bar should advertise the waiting agent:\n{}",
             screen(&term)
+        );
+    }
+
+    #[test]
+    fn awaiting_approval_only_while_unapproved_and_waiting() {
+        let mut a = app();
+        assert!(!a.awaiting_approval(), "idle session: nothing to approve");
+        a.turn.agent_waiting = true;
+        assert!(
+            a.awaiting_approval(),
+            "first contact: waiting, not approved"
+        );
+        a.turn.approved = true;
+        assert!(
+            !a.awaiting_approval(),
+            "once approved, a still-waiting agent is no longer first contact"
+        );
+    }
+
+    #[test]
+    fn first_contact_shows_approval_banner_and_approve_hint() {
+        // Unapproved agent blocked in `agent wait`: the top banner asks for
+        // approval and the status hint reads "approve", not "release".
+        let mut a = app();
+        a.turn.agent_waiting = true;
+        let term = drive(&mut a, 100, 24, &[]);
+        let text = screen(&term);
+        assert!(
+            text.contains("wants to collaborate"),
+            "approval banner should appear on first contact:\n{text}"
+        );
+        assert!(
+            text.contains("r approve"),
+            "hint should offer approval:\n{text}"
+        );
+        assert!(
+            !text.contains("r release"),
+            "release is for approved sessions"
+        );
+    }
+
+    #[test]
+    fn approved_waiting_agent_offers_release_without_the_banner() {
+        // An established (approved) session with the agent waiting: no approval
+        // banner, and the hint goes back to "release".
+        let mut a = app();
+        a.turn.agent_waiting = true;
+        a.turn.approved = true;
+        let term = drive(&mut a, 100, 24, &[]);
+        let text = screen(&term);
+        assert!(
+            !text.contains("wants to collaborate"),
+            "no approval banner once approved:\n{text}"
+        );
+        assert!(
+            text.contains("r release"),
+            "hint should offer release:\n{text}"
         );
     }
 
