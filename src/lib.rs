@@ -25,6 +25,7 @@
 //! - [`session`] — repo + target resolution, store-path derivation, resume.
 //! - [`tui`] — the ratatui application.
 //! - [`agent`] — implementation of the `agent` subcommands.
+//! - [`install`] — `install claude`: writes Claude Code skills to disk.
 //! - [`cli`] — the clap command tree and top-level dispatch.
 
 pub mod agent;
@@ -32,6 +33,7 @@ pub mod cli;
 pub mod diff;
 pub mod domain;
 pub mod highlight;
+pub mod install;
 pub mod lua;
 pub mod session;
 pub mod source;
