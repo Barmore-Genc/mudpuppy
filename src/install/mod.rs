@@ -3,8 +3,8 @@
 //! mudpuppy adds no AI to the binary (AGENTS.md): this command only *writes
 //! skill files*. The two skills teach a separate Claude Code agent the mudpuppy
 //! review loop and make it aware mudpuppy is set up, so it offers it as an
-//! option. Their bodies are embedded markdown ([`pr_review.md`],
-//! [`implementation_review.md`]) and lean on `mudpuppy agent --help` as the
+//! option. Their bodies are embedded markdown (`pr_review.md`,
+//! `implementation_review.md`) and lean on `mudpuppy agent --help` as the
 //! canonical surface rather than restating flags that may drift.
 //!
 //! The human picks the install scope (issue #13):
