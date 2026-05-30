@@ -45,6 +45,13 @@ impl Session {
     /// git-config isolation — e.g. `MUDPUPPY_DATA_DIR` so the TUI shares a store
     /// with a headless `agent` process in the same test.
     pub fn launch_with_env(repo: &Path, extra_env: &[(&str, &Path)]) -> Session {
+        Session::launch_args(repo, &[], extra_env)
+    }
+
+    /// Launch with explicit CLI `args` (e.g. `["install", "claude"]`) under a
+    /// real PTY, so commands that gate on `stdin().is_terminal()` — like the
+    /// interactive `install` prompts — take their terminal path.
+    pub fn launch_args(repo: &Path, args: &[&str], extra_env: &[(&str, &Path)]) -> Session {
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
@@ -56,6 +63,7 @@ impl Session {
             .expect("open pty");
 
         let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_mudpuppy"));
+        cmd.args(args);
         cmd.cwd(repo);
         // A real-ish terminal, and config isolation so the host's git config
         // can't change the diff (line endings, default branch, etc.).
