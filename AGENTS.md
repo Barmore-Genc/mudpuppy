@@ -1,123 +1,81 @@
-# AGENTS.md
+mudpuppy is a Rust TUI for collaborative, turn-based code review between
+a human and an AI agent. Both human user and AI agent can leave comments attached
+to lines of code, then hand over to the other once they are done.
+The rich interface can display uncommitted work, any diff, or Github pull requests.
 
-Guidance for humans and AI agents working **on** the mudpuppy codebase. (For how
-an agent uses mudpuppy as a *tool* to review a diff, see the command surface in
-[README.md](./README.md), and [PLAN.md](./PLAN.md) for the implementation plan.)
-
-## What this project is
-
-mudpuppy is a Rust terminal UI for collaborative, turn-based code review between
-a human and an AI agent. The diff under review can be **local changes** (a
-feature branch or uncommitted work, via `git`) or a **GitHub pull request** (via
-`gh`, fetch-only). Read [README.md](./README.md) first for the product shape and
-[PLAN.md](./PLAN.md) for the design. Both are sketches — treat specifics (flags,
-schema fields, module layout) as provisional and confirm before hard-coding
-assumptions.
-
-## Ground rules
-
-These mirror the product's hard requirements and apply to the code itself:
-
-- **Entirely local.** Local diffs use `git` and make no network calls at all.
-  Reviewing a PR uses the `gh` CLI (which carries the user's auth) **only to
-  fetch** the diff — never to write. Don't add direct HTTP clients to GitHub's
-  API, don't post reviews/comments, and don't add telemetry, crash reporters, or
-  update checks.
-- **No AI in the binary.** mudpuppy never calls an LLM. It reads and writes the
-  annotation file; the agent is a separate process. Don't add LLM SDKs.
-- **Performance is a feature.** Target diffs of 1000+ files and 50k+ lines.
-  Prefer lazy loading and virtualized rendering; avoid reading or rendering the
-  whole diff eagerly.
-- **Keyboard-first.** Every action needs a keyboard path; mouse is optional.
-- **The annotation file is the source of truth.** It's a shared contract between
-  the TUI and external agents, and the coordination bus for the turn-based loop
-  (`agent wait` blocks on filesystem changes to it). Keep it stable, versioned,
-  forward-compatible, and record authorship + timestamps so a merge is always
-  possible. Writes are atomic (temp + rename) and file-locked, since two
-  processes may write concurrently.
-
-## Repository layout
-
-Bootstrapped (see PLAN.md for detail). The crate is split into a library (the
-testable core) and a thin binary:
-
-- `src/lib.rs` + `src/main.rs` — library root and the thin binary that parses
-  the command tree and dispatches into it.
-- `src/` modules: `domain` (schema types — implemented and tested), `cli` (clap
-  command surface — implemented), `source` (local-`git` / PR-`gh` diff
-  providers), `diff` (hand-rolled unified-diff parser + anchoring), `highlight`
-  (syntect syntax highlighting for the diff pane — per-file/per-hunk, with a
-  plain fallback for unknown languages), `store`
-  (load / merge-by-id / atomic+locked save), `session` (repo/target resolution +
-  store-path derivation), `tui` (ratatui app — read-only diff browsing with
-  syntax-highlighted hunks, plus annotation display + live reload + the `r`
-  turn-release keybind), and `agent`
-  (the `agent comment` lifecycle, `diff`, `reset`, and the `agent wait` turn
-  rendezvous — it blocks on store-directory changes via `notify`, wakes when the
-  human bumps `turn.seq`, and prints what they changed). The human's `r` release
-  bumps `seq`, hands ownership back, and doubles as first-contact approval. The
-  TUI's live reload now rides the same `notify` bus — it watches the store
-  directory and refreshes in place when a write lands. Still to land (milestone
-  3): the live-session pidfile, authoring annotations from inside the TUI, and
-  staleness re-anchoring. Modules carry doc comments describing their job and the
-  milestone boundary (PLAN.md §10).
-- `Cargo.toml` — manifest. Dependencies are added per-milestone as they're first
-  used, not all up front; see the note there and PLAN.md §2.
-- `.github/workflows/` — CI: formatting, lints, tests, docs, and a security
-  audit. The cargo jobs activate automatically now that `Cargo.toml` exists.
-
-When you add source, keep modules focused. Update this file, the README, and
-PLAN.md if you make a structural decision worth knowing.
-
-## Local development
-
-Once a Cargo project exists:
-
-```sh
-cargo fmt --all                      # format
-cargo clippy --all-targets --all-features -- -D warnings   # lint
-cargo test --all-features            # tests
-cargo build                          # build
-```
-
-Before pushing, run fmt, clippy, and tests — CI runs the same and will reject
-warnings.
+- mudpuppy is local, working on the same machine as the AI agent, on the machine where the code is checked out.
+- AI is not integrated into mudpuppy, instead it is a tool that both a human and an AI agent interact with.
 
 ## Conventions
 
-- **Formatting:** `rustfmt` defaults; CI enforces `cargo fmt --check`.
-- **Lints:** clippy must be clean; warnings are denied in CI.
-- **Toolchain:** use the latest stable Rust available on your system; we don't
-  pin via `rust-toolchain.toml`. CI tracks `stable`.
-- **Errors:** prefer real error types (`thiserror`/`anyhow`-style) over panics in
-  library and command paths; reserve panics for genuine invariants.
+- **Errors:** prefer real error types (`thiserror`/`anyhow`-style), avoid panics.
 - **Tests:** colocate unit tests with modules; put end-to-end CLI behavior under
-  `tests/`. The annotation schema and any handoff/merge logic deserve tests
-  since they're the cross-process contract. Two TUI-snapshot gotchas
-  (see TESTING.md for the full rationale):
-  - The Layer-1 `insta` `.snap` files capture only the **character grid**, not
-    colors — a style-only change (fg/bg/modifier) won't update any `.snap`.
-    Assert colors with the dedicated buffer helpers in the `tui` tests instead.
-  - The Layer-2 pixel-oracle baselines (`e2e/baselines/`) *do* change on any
-    color or layout change. **Don't regenerate them yourself** — re-blessing is
-    the reviewing developer's call on the PR, not part of the code change.
-- **Dependencies:** keep them lean and justified — this is a local tool. Vet new
-  crates against the "entirely local, no AI" rules above.
+  `tests/`. There are two levels of tests:
+  - The Layer-1 `insta` `.snap` file tests capture only the character grid, not
+    color. Assert colors with buffer helpers in the `tui` tests.
+  - The Layer-2 pixel-oracle baselines (`e2e/baselines/`) render the actual terminal
+    as an image, including all colors and styles. Do not try to regenerate these
+    baselines yourself, there is an approval workflow once a PR is created that
+    will automatically trigger.
 
-## Commits & PRs
+## Where the code lives
 
-- Small, focused commits with clear messages.
-- A PR should pass fmt, clippy, and tests locally before review.
-- Note any change to the annotation schema or CLI surface prominently in the PR
-  description — those are user- and agent-facing contracts.
+`src/` (the binary is a thin shell; all logic is in the `mudpuppy` library):
 
-## Tooling notes
+- `main.rs`: binary entry point; parses the CLI and dispatches into the library.
+- `lib.rs`: crate root and module map.
+- `cli.rs`: the clap command tree and top-level dispatch (`run`).
+- `agent.rs`: the `mudpuppy agent` subcommands (add/comment/wait/…) over the store.
+- `source.rs`: diff-source providers — shells out to `git` (local) and `gh` (PR).
+- `diff.rs`: hand-rolled unified-diff parser, lazy hunks, line ↔ side anchoring.
+- `highlight.rs`: syntect syntax highlighting for the diff pane.
+- `store.rs`: load / merge-by-id / atomic+locked save of the annotation store.
+- `session.rs`: repo + target resolution and store-path derivation (resume).
+- `tui.rs`: the ratatui app — file tree, diff pane, gutter marks, panels, turn release.
+- `domain/`: pure on-disk schema types (`Annotation`, `StateFile`, enums).
+- `snapshots/`: generated `insta` `.snap` baselines for the `tui` tests.
 
-- `git` is a hard runtime dependency (local diffs). `gh` is required only for the
-  PR diff source. For each, fail with a clear, actionable message when it's
-  missing or (for `gh`) unauthenticated — and only require `gh` when a PR is
-  actually requested.
-- Don't shell out to `git`/`gh` in ways that assume a specific locale or
-  interactive TTY; commands must work headlessly for the agent flows.
-- `gh` is read-only here: `gh pr diff` / `gh pr view`. Never call any `gh`
-  subcommand that writes to GitHub (`gh pr review`, `gh pr comment`, etc.).
+`tests/` (end-to-end over the real compiled binary):
+
+- `agent.rs`: e2e tests of the `agent` command surface (captured stdout, throwaway repo).
+- `e2e.rs`: PTY smoke tests over a real fixture repo (Layer 2, coarse grid assertions).
+- `image_diff.rs`: emits truecolor SVGs for the pixel-oracle baselines (gated on `MUDPUPPY_SVG_DIR`).
+- `common/mod.rs`: shared PTY harness used by both e2e suites.
+
+## Keeping AGENTS.md files updated
+
+Each `src/` subfolder has an `AGENTS.md` (mirrored by a `CLAUDE.md` containing only `@AGENTS.md`) mapping its files to one-line descriptions, so a reader can find code by topic without grepping. `src/` and `tests/` themselves are covered by the "Where the code lives" section above, not their own files.
+
+When you add, remove, or repurpose a file or folder, update the matching `AGENTS.md` entry in the same change. Keep each entry to 10–20 words: say where to find what, not how it works. New `src/` subfolder → add both `AGENTS.md` and `CLAUDE.md` (`@AGENTS.md`).
+
+## PR Descriptions
+
+Write complete but concise PR descriptions.
+Describe the work from the point of view of someone who may not have context on what
+work you were doing. What did you implement, and why? Don't just repeat the code or
+explain things that are obvious from the code.
+
+<examples>
+
+Bad: (obvious, routine process, already enforced via CI)
+
+    Per our workflow, re-blessing baselines is the reviewer's call, not part of this change. 
+
+Bad: (already enforced via CI)
+
+    cargo fmt --check, cargo clippy --all-targets --all-features -D warnings, and the full cargo test suite are green. 
+
+Good:
+
+    Closes #12. Adds syntax highlighting using syntect.
+
+Bad: (the fact it was review discussion is irrelevant, only final state is) 
+
+    Per review discussion, we changed ... 
+
+Good:
+
+    Replaces the TUI's mtime-poll live-reload stand-in with a notify watch on the store directory.
+
+</examples>
+
