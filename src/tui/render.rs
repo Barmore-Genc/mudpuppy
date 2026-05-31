@@ -18,6 +18,7 @@ use super::app::{App, Focus, Row};
 use crate::diff::{DiffLine, FileStatus, LineKind};
 use crate::domain::{Author, Severity, Side, Status, Target};
 use crate::highlight::HlLine;
+use crate::picker::{fuzzy_match, Picker};
 
 /// The glyph drawn in the annotation gutter column on an annotated line.
 pub(crate) const MARK: &str = "●";
@@ -69,6 +70,10 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
 
     if app.show_help {
         render_help(frame, frame.area());
+    }
+    if let Some(picker) = app.picker.as_ref() {
+        let area = frame.area();
+        render_picker(frame, area, picker);
     }
 }
 
@@ -325,6 +330,72 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     );
 }
 
+/// Modal overlay for the "add any file" picker: a query input line atop a
+/// scrollable, fuzzy-ranked result list. Matched characters and the cursor row
+/// are highlighted; the list scrolls to keep the selection visible.
+fn render_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
+    let area = centered_rect(70, (area.height * 7 / 10).max(6), area);
+    let block = bordered(" Add file ", true);
+    let inner = block.inner(area);
+    // The first inner row is the query input; the rest is the result list.
+    let list_height = inner.height.saturating_sub(1) as usize;
+    // Scroll so the selected row stays visible at the bottom edge.
+    let offset = picker
+        .selected
+        .saturating_sub(list_height.saturating_sub(1));
+
+    let mut lines: Vec<Line> = Vec::with_capacity(inner.height as usize);
+    lines.push(Line::from(vec![
+        Span::styled("> ", Style::default().fg(Color::Yellow)),
+        Span::raw(picker.query.clone()),
+    ]));
+    for (row, &cand) in picker
+        .filtered
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(list_height)
+    {
+        let path = &picker.all[cand];
+        let positions = fuzzy_match(&picker.query, path)
+            .map(|m| m.positions)
+            .unwrap_or_default();
+        lines.push(picker_row(path, &positions, row == picker.selected));
+    }
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// One picker result row: bold the fuzzy-matched characters; highlight the whole
+/// row when it is the cursor row.
+fn picker_row(path: &str, positions: &[usize], selected: bool) -> Line<'static> {
+    let base = if selected {
+        Style::default().fg(Color::Black).bg(Color::Cyan)
+    } else {
+        Style::default()
+    };
+    let matched = base
+        .fg(if selected {
+            Color::Black
+        } else {
+            Color::Yellow
+        })
+        .add_modifier(Modifier::BOLD);
+    let spans = path
+        .char_indices()
+        .map(|(byte, ch)| {
+            let style = if positions.contains(&byte) {
+                matched
+            } else {
+                base
+            };
+            Span::styled(ch.to_string(), style)
+        })
+        .collect::<Vec<_>>();
+    Line::from(spans)
+}
+
 /// The centered help overlay listing every keybinding.
 ///
 /// Kept compact (cyan section headers, no blank separators) so the whole list —
@@ -352,6 +423,8 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::raw("  a            toggle the annotations panel"),
         section("Turn"),
         Line::raw("  r            release the turn; first release approves"),
+        section("Files"),
+        Line::raw("  Ctrl-p       add any file (fuzzy picker)"),
         section("Other"),
         Line::raw("  ?            toggle this help"),
         Line::raw("  q / Ctrl-c   quit"),
@@ -391,6 +464,26 @@ fn row_to_line(row: &Row, gutter: bool, marks: &HashMap<(Side, u32), Severity>) 
                 .add_modifier(Modifier::ITALIC),
         )),
         Row::Line(line, hl) => diff_line(line, hl.as_ref(), gutter, marks),
+        Row::Expander {
+            new,
+            can_up,
+            can_down,
+            ..
+        } => {
+            let arrows = match (can_up, can_down) {
+                (true, true) => "↕",
+                (true, false) => "↑",
+                (false, true) => "↓",
+                (false, false) => "⋯",
+            };
+            let hidden = new.end - new.start;
+            Line::from(Span::styled(
+                format!("{pad}  {arrows} {hidden} hidden lines — show more"),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ))
+        }
     }
 }
 
@@ -480,6 +573,7 @@ fn status_marker(status: &FileStatus) -> (char, Color) {
         FileStatus::Deleted => ('D', Color::Red),
         FileStatus::Modified => ('M', Color::Yellow),
         FileStatus::Renamed => ('R', Color::Cyan),
+        FileStatus::Unchanged => ('·', Color::DarkGray),
     }
 }
 
@@ -490,6 +584,7 @@ fn status_word(status: &FileStatus) -> &'static str {
         FileStatus::Deleted => "deleted",
         FileStatus::Modified => "modified",
         FileStatus::Renamed => "renamed",
+        FileStatus::Unchanged => "unchanged",
     }
 }
 

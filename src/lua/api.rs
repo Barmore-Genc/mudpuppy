@@ -162,6 +162,34 @@ pub fn install_scoped<'scope>(
             Ok(())
         })?,
     )?;
+    table.set(
+        "expand_down",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().expand_down();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "expand_up",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().expand_up();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "expand_all",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().expand_all();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "open_picker",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().open_picker();
+            Ok(())
+        })?,
+    )?;
 
     // --- read-only views ----------------------------------------------------
 

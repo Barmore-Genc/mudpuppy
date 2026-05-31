@@ -19,6 +19,9 @@
 # Local-only Claude Code instructions (personal, not shared with the team).
 CLAUDE.local.md
 
+# Claude Code local working dir (agent worktrees, local settings) — not shared.
+.claude/
+
 # Editor / OS cruft
 .DS_Store
 *.swp

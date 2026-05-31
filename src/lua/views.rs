@@ -103,6 +103,12 @@ pub fn screen(lua: &Lua, app: &App) -> Result<Table> {
                     r.set("new_lineno", n)?;
                 }
             }
+            Row::Expander { old, new, .. } => {
+                r.set("kind", "expander")?;
+                r.set("text", format!("{} hidden lines", new.end - new.start))?;
+                r.set("old_lineno", old.start)?;
+                r.set("new_lineno", new.start)?;
+            }
         }
         arr.set(i + 1, r)?;
     }
@@ -189,6 +195,7 @@ fn file_status_name(status: FileStatus) -> &'static str {
         FileStatus::Deleted => "deleted",
         FileStatus::Modified => "modified",
         FileStatus::Renamed => "renamed",
+        FileStatus::Unchanged => "unchanged",
     }
 }
 

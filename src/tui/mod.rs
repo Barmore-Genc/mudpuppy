@@ -82,6 +82,7 @@ pub fn launch(pr: Option<String>, base: Option<String>) -> Result<()> {
     let mut app = App::new(files, loaded.target.clone());
     if let Ok(session) = Session::resolve(loaded.target) {
         let state = store::load(&session.store_path)?;
+        app.set_repo_root(session.repo_root);
         app.attach_store(session.store_path, state);
     }
 
@@ -158,6 +159,11 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                         // trap the user.
                         if is_ctrl_c(&key) {
                             return Ok(());
+                        }
+                        // The picker overlay captures all keys before they reach
+                        // Lua (same precedent as the hardwired Ctrl-C above).
+                        if app.handle_picker_key(key) {
+                            continue;
                         }
                         if let Some(chord) = KeyChord::from_event(&key) {
                             let before = Snapshot::of(app);

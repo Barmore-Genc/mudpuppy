@@ -70,6 +70,8 @@ pub enum FileStatus {
     Modified,
     /// File moved; `old_path` and `new_path` differ.
     Renamed,
+    /// Not part of the diff; shown for its full (unchanged) content.
+    Unchanged,
 }
 
 /// A single file's portion of the diff.
@@ -93,9 +95,28 @@ pub struct FileDiff {
     /// Raw text of this file's section, from just after the `diff --git` line
     /// through the line before the next file. Hunks are parsed from here.
     body: String,
+    /// Whether this is a synthetic entry (no diff; shown as all-context, e.g. a
+    /// comment-only file pulled into the tree).
+    pub synthetic: bool,
 }
 
 impl FileDiff {
+    /// Builds a synthetic entry for `path`: no diff, rendered as all-context from
+    /// the file's current content. Used for files outside the diff (e.g. ones that
+    /// only carry comments) so they can still appear in the tree.
+    pub fn synthetic(path: &str) -> FileDiff {
+        FileDiff {
+            old_path: None,
+            new_path: Some(path.to_string()),
+            status: FileStatus::Unchanged,
+            is_binary: false,
+            additions: 0,
+            deletions: 0,
+            body: String::new(),
+            synthetic: true,
+        }
+    }
+
     /// The path to show for this file: the new path, except for a deletion,
     /// where only the old path exists.
     pub fn display_path(&self) -> &str {
@@ -220,6 +241,7 @@ fn build_file(header: &str, body: String) -> FileDiff {
         additions,
         deletions,
         body,
+        synthetic: false,
     }
 }
 
@@ -344,6 +366,89 @@ fn parse_range(part: &str) -> Option<(u32, u32)> {
         Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
         None => Some((part.parse().ok()?, 1)),
     }
+}
+
+/// Where a run of hidden context lines sits relative to a file's hunks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GapPos {
+    /// Before the first hunk (the top of the file).
+    BeforeFirst,
+    /// Between two consecutive hunks.
+    Between,
+    /// After the last hunk (the bottom of the file).
+    AfterLast,
+}
+
+/// A run of unchanged lines hidden between (or around) diff hunks.
+///
+/// Ranges are half-open and 1-based, matching the `old_lineno`/`new_lineno`
+/// numbering [`DiffLine`] carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gap {
+    /// Hidden old-side line range, `[start, end)`.
+    pub old: std::ops::Range<u32>,
+    /// Hidden new-side line range, `[start, end)`.
+    pub new: std::ops::Range<u32>,
+    /// Where this gap sits relative to the hunks.
+    pub position: GapPos,
+}
+
+/// Compute the runs of hidden context around and between `hunks`.
+///
+/// `new_total` is the new-side total line count of the file; without it the
+/// trailing (after-last) gap is omitted, since its end is unknown. Hunks are
+/// assumed to be in ascending line order; empty gaps (adjacent hunks, or a hunk
+/// starting at line 1) are skipped.
+pub fn gaps(hunks: &[Hunk], new_total: Option<u32>) -> Vec<Gap> {
+    let mut gaps = Vec::new();
+    let Some(first) = hunks.first() else {
+        return gaps;
+    };
+
+    // Before the first hunk: lines 1..first_start on each side.
+    if first.new_start > 1 {
+        gaps.push(Gap {
+            old: 1..first.old_start,
+            new: 1..first.new_start,
+            position: GapPos::BeforeFirst,
+        });
+    }
+
+    // Between consecutive hunks.
+    for pair in hunks.windows(2) {
+        let (prev, next) = (&pair[0], &pair[1]);
+        let new_end = prev.new_start + prev.new_count;
+        if next.new_start > new_end {
+            let old_end = prev.old_start + prev.old_count;
+            gaps.push(Gap {
+                old: old_end..next.old_start,
+                new: new_end..next.new_start,
+                position: GapPos::Between,
+            });
+        }
+    }
+
+    // After the last hunk, only when the file's total length is known.
+    if let Some(total) = new_total {
+        let last = &hunks[hunks.len() - 1];
+        let new_end = last.new_start + last.new_count;
+        let old_end = last.old_start + last.old_count;
+        // The trailing gap spans new lines [new_end, total]; the half-open stop
+        // for the last line `total` is `total + 1`. Old and new advance in
+        // lockstep through unchanged context.
+        if total >= new_end {
+            let span = total + 1 - new_end;
+            if span > 0 {
+                gaps.push(Gap {
+                    old: old_end..old_end + span,
+                    new: new_end..new_end + span,
+                    position: GapPos::AfterLast,
+                });
+            }
+        }
+    }
+
+    gaps
 }
 
 #[cfg(test)]

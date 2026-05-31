@@ -24,7 +24,7 @@ mod common;
 
 use std::time::Duration;
 
-use common::{repo_clean, repo_with_changes, Session, ENTER_ALT_SCREEN, LEAVE_ALT_SCREEN};
+use common::{repo_clean, repo_with_changes, write, Session, ENTER_ALT_SCREEN, LEAVE_ALT_SCREEN};
 
 /// Tier 1 #1 — cold launch on a local diff: binary starts, the `git` subprocess
 /// runs, the diff is parsed, and the first paint shows it in a real emulator.
@@ -213,4 +213,46 @@ fn no_changes_prints_notice_without_entering_tui() {
         !raw.contains(ENTER_ALT_SCREEN),
         "should not have entered the alternate screen with nothing to show"
     );
+}
+
+/// Tier 2 — the "add any file" picker: Ctrl-P reaches a file git never put in the
+/// diff (an untracked file), and selecting it shows the file's real content.
+#[test]
+fn picker_pulls_in_an_untracked_file() {
+    let repo = repo_with_changes();
+    // Untracked (never `git add`ed), so it is absent from the diff and the tree
+    // and can only be reached through the picker.
+    write(
+        repo.path(),
+        "scratch_pad.txt",
+        "PICKED_MARKER_LINE\nsecond line\n",
+    );
+
+    let mut session = Session::launch(repo.path());
+    assert!(session.wait_for_screen("file 1/2", Duration::from_secs(10)));
+    assert!(
+        !session.screen().contains("scratch_pad.txt"),
+        "untracked file should not be in the initial tree; screen:\n{}",
+        session.screen()
+    );
+
+    // Ctrl-P opens the picker; filter to the untracked file, then select it.
+    session.feed(b"\x10");
+    session.feed(b"scratch");
+    assert!(
+        session.wait_for_screen("scratch_pad.txt", Duration::from_secs(10)),
+        "picker did not list the untracked file; screen:\n{}",
+        session.screen()
+    );
+    session.feed(b"\r");
+
+    assert!(
+        session.wait_for_screen("PICKED_MARKER_LINE", Duration::from_secs(10)),
+        "picked file's content never showed; screen:\n{}",
+        session.screen()
+    );
+
+    session.feed(b"q");
+    let status = session.wait(Duration::from_secs(10)).expect("clean exit");
+    assert!(status.success(), "expected exit 0, got {status:?}");
 }

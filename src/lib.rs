@@ -18,6 +18,7 @@
 //!   [`StateFile`](domain::StateFile), and friends). The cross-process
 //!   contract; the most heavily tested module.
 //! - [`source`] — diff-source providers (local `git`, PR `gh`).
+//! - [`blob`] — full file-content provider (working tree / `git show` / `gh api`).
 //! - [`diff`] — hand-rolled unified-diff parser + anchoring/staleness.
 //! - [`highlight`] — syntect syntax highlighting for the diff pane.
 //! - [`lua`] — embedded Luau sandbox: the configurable keymap and event hooks.
@@ -29,12 +30,14 @@
 //! - [`cli`] — the clap command tree and top-level dispatch.
 
 pub mod agent;
+pub mod blob;
 pub mod cli;
 pub mod diff;
 pub mod domain;
 pub mod highlight;
 pub mod install;
 pub mod lua;
+mod picker;
 pub mod session;
 pub mod source;
 pub mod store;
