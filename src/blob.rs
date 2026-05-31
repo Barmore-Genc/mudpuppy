@@ -5,7 +5,7 @@
 //! needs the *whole* file at the target's revision. This module fetches that:
 //! from the working tree for a local Head, via `git show` for the local Base,
 //! and via `gh api` for a PR Head. Every source funnels through one pure
-//! decoder ([`decode_blob`]) so the binary / size / newline rules are uniform
+//! decoder (`decode_blob`) so the binary / size / newline rules are uniform
 //! and unit-testable.
 //!
 //! Lookups are *tolerant*: an absent, binary, oversize, or otherwise
