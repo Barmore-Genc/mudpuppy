@@ -39,6 +39,9 @@ m.map("global", "r", function() m.release_turn() end)
 m.map("global", "tab", function() m.toggle_focus() end)
 m.map("global", "backtab", function() m.toggle_focus() end)
 
+-- Open the fuzzy file picker to pull any working-tree file into the review.
+m.map("global", "ctrl-p", function() m.open_picker() end)
+
 -- Half / full page scroll the diff from either pane.
 m.map("global", "ctrl-d", function() m.scroll(math.floor(page() / 2)) end)
 m.map("global", "ctrl-u", function() m.scroll(-math.floor(page() / 2)) end)
@@ -75,6 +78,9 @@ m.map("diff", "}", function() m.next_hunk() end)
 m.map("diff", "n", function() m.next_hunk() end)
 m.map("diff", "{", function() m.prev_hunk() end)
 m.map("diff", "N", function() m.prev_hunk() end)
+m.map("diff", "ctrl-e", function() m.expand_down() end)
+m.map("diff", "ctrl-y", function() m.expand_up() end)
+m.map("diff", "+", function() m.expand_all() end)
 m.map("diff", "J", function() m.select_file(selected() + 1) end)
 m.map("diff", "K", function() m.select_file(selected() - 1) end)
 m.map("diff", "h", function() m.set_focus("tree") end)

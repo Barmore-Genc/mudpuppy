@@ -14,6 +14,7 @@
 //! own. `git`/`gh` failures surface as clear, actionable errors.
 
 use std::io::ErrorKind;
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::{bail, Context, Result};
@@ -122,12 +123,32 @@ fn raw_diff(target: &Target) -> Result<String> {
 /// (a bare number or a full URL, both of which `gh` accepts as-is) passes
 /// through unchanged.
 fn gh_pr_selector(pr: &str) -> Vec<String> {
-    if let Some((repo, number)) = pr.split_once('#') {
-        if repo.contains('/') && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) {
-            return vec![number.to_string(), "--repo".to_string(), repo.to_string()];
-        }
+    if let Some((owner, repo)) = pr_owner_repo(pr) {
+        // Safe to unwrap: `pr_owner_repo` only matches when a `#<number>` is present.
+        let number = pr.split_once('#').map(|(_, n)| n).unwrap_or(pr);
+        return vec![
+            number.to_string(),
+            "--repo".to_string(),
+            format!("{owner}/{repo}"),
+        ];
     }
     vec![pr.to_string()]
+}
+
+/// Parse the `owner/repo` out of an `owner/repo#123` PR selector.
+///
+/// A bare `#123`, a plain number, or a URL has no embedded owner/repo and yields
+/// `None`, leaving the caller to resolve the repository another way.
+pub(crate) fn pr_owner_repo(pr: &str) -> Option<(String, String)> {
+    let (repo, number) = pr.split_once('#')?;
+    if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) {
+        if let Some((owner, name)) = repo.split_once('/') {
+            if !owner.is_empty() && !name.is_empty() && !name.contains('/') {
+                return Some((owner.to_string(), name.to_string()));
+            }
+        }
+    }
+    None
 }
 
 /// Determine the repository's default branch as a ref usable for `git diff`.
@@ -186,6 +207,53 @@ fn run(program: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Every path in the working tree: tracked, plus untracked files that aren't
+/// gitignored. Sorted and deduped. Tolerates failure by returning an empty list
+/// so the picker degrades gracefully outside a git repo.
+pub fn list_files(repo_root: &Path) -> Vec<String> {
+    let out = run_optional(
+        "git",
+        &[
+            "-C",
+            &repo_root.to_string_lossy(),
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+    );
+    let Ok(Some(out)) = out else {
+        return Vec::new();
+    };
+    let mut paths: Vec<String> = out.lines().map(str::to_owned).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    paths
+}
+
+/// Run a subprocess like [`run`], but treat a non-zero exit as a *soft* miss.
+///
+/// Returns `Ok(Some(stdout))` on success, `Ok(None)` when the process ran but
+/// exited non-zero (e.g. a `git show` of a path that doesn't exist at that
+/// revision, or a `gh api` 404), and `Err` only when the process could not be
+/// spawned (missing binary included). Lets content lookups degrade to "absent"
+/// instead of surfacing an error for every expected miss.
+pub(crate) fn run_optional(program: &str, args: &[&str]) -> Result<Option<String>> {
+    let output = Command::new(program).args(args).output().map_err(|e| {
+        if e.kind() == ErrorKind::NotFound {
+            install_hint(program)
+        } else {
+            anyhow::Error::new(e).context(format!("failed to run `{program}`"))
+        }
+    })?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
+}
+
 /// A clear "install this" error for a missing required binary.
 fn install_hint(program: &str) -> anyhow::Error {
     match program {
@@ -225,5 +293,24 @@ mod tests {
         // A branch ref like `feature#foo` isn't `owner/repo#<n>`; leave it alone
         // and let `gh` decide what to do with it.
         assert_eq!(gh_pr_selector("feature#foo"), vec!["feature#foo"]);
+    }
+
+    #[test]
+    fn pr_owner_repo_parses_owner_repo_number() {
+        assert_eq!(
+            pr_owner_repo("octocat/hello#123"),
+            Some(("octocat".to_string(), "hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn pr_owner_repo_rejects_bare_number_and_url() {
+        assert_eq!(pr_owner_repo("123"), None);
+        assert_eq!(pr_owner_repo("#123"), None);
+        assert_eq!(
+            pr_owner_repo("https://github.com/octocat/hello/pull/7"),
+            None
+        );
+        assert_eq!(pr_owner_repo("octocat/hello#foo"), None);
     }
 }
