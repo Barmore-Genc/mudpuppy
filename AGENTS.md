@@ -22,8 +22,13 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 - **Comments:**
   - Keep comments brief. Do not explain what the code is doing, explain *why* it's doing it.
     Do not explain things obvious from reading the code.
-  - When leaving comments, do not use `[...]` style comments unless actually
-    intending to create intra-doc links.
+  - **Doc-comment links.** In Rust doc comments (`///`, `//!`) the syntax
+    `` [`name`] `` is an *intra-doc link*, not emphasis or highlighting, and CI
+    builds docs with `-D warnings` so a link to a private or unresolved item is a
+    hard build failure. Mention items with a plain code span (`` `run_loop` ``);
+    only use the bracket form when the target is public and you want a real
+    clickable link (`` [`crate::highlight`] ``).
+- **File size:** Avoid code files of length 1000+ lines. If a file gets too long, try to split it logically into multiple files, creating additional folders if needed.
 
 ## Where the code lives
 
@@ -39,10 +44,9 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 - `highlight.rs`: syntect syntax highlighting for the diff pane.
 - `store.rs`: load / merge-by-id / atomic+locked save of the annotation store.
 - `session.rs`: repo + target resolution and store-path derivation (resume).
-- `tui.rs`: the ratatui app — file tree, diff pane, gutter marks, panels, turn release; key presses route through the Lua engine.
+- `tui/`: the ratatui app — file tree, diff pane, gutter marks, panels, turn release; key presses route through the Lua engine.
 - `lua/`: embedded Luau sandbox — the configurable keymap and event hooks. All default bindings live in `lua/core.luau`; the user config is `$MUDPUPPY_CONFIG`, else `$XDG_CONFIG_HOME`/`~/.config/mudpuppy/mudpuppy.luau` (`%APPDATA%` on Windows). Rust keeps only a hardwired Ctrl-C quit.
 - `domain/`: pure on-disk schema types (`Annotation`, `StateFile`, enums).
-- `snapshots/`: generated `insta` `.snap` baselines for the `tui` tests.
 
 `tests/` (end-to-end over the real compiled binary):
 
