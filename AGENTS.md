@@ -22,8 +22,12 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 - **Comments:**
   - Keep comments brief. Do not explain what the code is doing, explain *why* it's doing it.
     Do not explain things obvious from reading the code.
-  - When leaving comments, do not use `[...]` style comments unless actually
-    intending to create intra-doc links.
+  - **Doc-comment links.** In Rust doc comments (`///`, `//!`) the syntax
+    `` [`name`] `` is an *intra-doc link*, not emphasis or highlighting, and CI
+    builds docs with `-D warnings` so a link to a private or unresolved item is a
+    hard build failure. Mention items with a plain code span (`` `run_loop` ``);
+    only use the bracket form when the target is public and you want a real
+    clickable link (`` [`crate::highlight`] ``).
 - **File size:** Avoid code files of length 1000+ lines. If a file gets too long, try to split it logically into multiple files, creating additional folders if needed.
 
 ## Where the code lives

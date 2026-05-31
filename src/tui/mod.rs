@@ -29,9 +29,9 @@
 //! come.
 //!
 //! This module is the event-loop shell: [`launch`] resolves the diff source and
-//! store and enters [`run_loop`], which multiplexes terminal input, store
+//! store and enters `run_loop`, which multiplexes terminal input, store
 //! reloads, and config hot-reloads. The viewer's state and verbs live in
-//! [`app`], its drawing in [`render`].
+//! `app`, its drawing in `render`.
 
 mod app;
 mod render;
