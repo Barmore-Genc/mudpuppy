@@ -1,0 +1,343 @@
+//! The human's annotation mutations, authored from inside the viewer.
+//!
+//! Each verb maps the cursor (or the visual selection) to an anchor, then writes
+//! through [`store::update`] — the only safe path, since it reloads inside the
+//! lock and merges by id (PLAN.md §4) — and calls [`App::reload`] to refresh in
+//! place. Authoring mirrors the agent's semantics in `agent.rs`, but stamps
+//! [`Author::Human`]. The composer (`composer.rs`) drives the create/edit verbs;
+//! delete and status changes act on the annotation anchored to the cursor line.
+
+use anyhow::{bail, Context, Result};
+use jiff::Timestamp;
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
+use super::app::{App, Row};
+use crate::diff::LineKind;
+use crate::domain::{AnchorScope, Annotation, Author, Severity, Side, StateFile, Status, Tag};
+use crate::store;
+
+/// Whether annotation `a`'s line anchor covers a cursor row with old/new line
+/// numbers `old`/`new` — exact line, or within a `line..=end_line` region.
+fn anchor_covers(a: &Annotation, old: Option<u32>, new: Option<u32>) -> bool {
+    let target = match a.side {
+        Side::Right => new,
+        Side::Left => old,
+    };
+    let Some(target) = target else {
+        return false;
+    };
+    let end = a.end_line.unwrap_or(a.line);
+    a.line.min(end) <= target && target <= a.line.max(end)
+}
+
+impl App {
+    /// The cursor row's `(old_lineno, new_lineno)`, or `None` on a non-line row.
+    fn cursor_line_numbers(&self) -> Option<(Option<u32>, Option<u32>)> {
+        match self.view.rows.get(self.cursor)? {
+            Row::Line(l, _) => Some((l.old_lineno, l.new_lineno)),
+            _ => None,
+        }
+    }
+
+    /// Map row `idx` to its `(side, line)` anchor: an addition/context anchors on
+    /// the new (Right) side, a deletion on the old (Left) side. `None` for a
+    /// non-line row.
+    fn row_line_anchor(&self, idx: usize) -> Option<(Side, u32)> {
+        match self.view.rows.get(idx)? {
+            Row::Line(l, _) => match l.kind {
+                LineKind::Addition | LineKind::Context => l.new_lineno.map(|n| (Side::Right, n)),
+                LineKind::Deletion => l.old_lineno.map(|n| (Side::Left, n)),
+            },
+            _ => None,
+        }
+    }
+
+    /// The line number row `idx` carries on `side`, if it is a line row present
+    /// on that side.
+    fn row_lineno_on_side(&self, idx: usize, side: Side) -> Option<u32> {
+        match self.view.rows.get(idx)? {
+            Row::Line(l, _) => match side {
+                Side::Right => l.new_lineno,
+                Side::Left => l.old_lineno,
+            },
+            _ => None,
+        }
+    }
+
+    /// Resolve the anchor for a new comment: a single `(side, line)` from the
+    /// cursor, or a whole-line `(side, start, end)` region from the visual
+    /// selection. `None` when no diff line is in range (cursor on a hunk header,
+    /// expander, or notice).
+    pub(crate) fn anchor_for_comment(&self) -> Option<(Side, u32, Option<u32>)> {
+        match self.selection_span() {
+            Some((lo, hi)) => {
+                // Side comes from the first line row in the span; the extent is
+                // the min/max line number on that side across the selection.
+                let (side, _) = (lo..=hi).find_map(|i| self.row_line_anchor(i))?;
+                let nums: Vec<u32> = (lo..=hi)
+                    .filter_map(|i| self.row_lineno_on_side(i, side))
+                    .collect();
+                let start = *nums.iter().min()?;
+                let end = *nums.iter().max()?;
+                let end_line = (end > start).then_some(end);
+                Some((side, start, end_line))
+            }
+            None => {
+                let (side, line) = self.row_line_anchor(self.cursor)?;
+                Some((side, line, None))
+            }
+        }
+    }
+
+    /// The id of the first annotation (store order) anchored to the cursor line —
+    /// the target of reply/edit/delete/status. Multiple-per-line cycling is
+    /// future polish.
+    pub(crate) fn annotation_id_at_cursor(&self) -> Option<String> {
+        let path = self.current().display_path().to_string();
+        let (old, new) = self.cursor_line_numbers()?;
+        self.annotations
+            .iter()
+            .find(|a| a.file == path && a.scope == AnchorScope::Line && anchor_covers(a, old, new))
+            .map(|a| a.id.clone())
+    }
+
+    /// Run `f` against the store under the lock, then reload in place. Surfaces a
+    /// store-less view or any write error as a transient status-bar notice rather
+    /// than failing — authoring must never crash the viewer.
+    fn mutate_store<T>(&mut self, f: impl FnOnce(&mut StateFile) -> Result<T>) -> Option<T> {
+        let Some(path) = self.store_path.clone() else {
+            self.notice = Some("no annotation store for this review".to_string());
+            return None;
+        };
+        match store::update(&path, &self.target, f) {
+            Ok(Ok(value)) => {
+                self.reload();
+                Some(value)
+            }
+            Ok(Err(e)) => {
+                self.notice = Some(e.to_string());
+                None
+            }
+            Err(e) => {
+                self.notice = Some(e.to_string());
+                None
+            }
+        }
+    }
+
+    /// Create a line or region annotation authored by the human.
+    pub(crate) fn add_annotation(
+        &mut self,
+        side: Side,
+        line: u32,
+        end_line: Option<u32>,
+        severity: Severity,
+        tag: Option<Tag>,
+        body: String,
+    ) {
+        let file = self.current().display_path().to_string();
+        let now = Timestamp::now();
+        let annotation = Annotation {
+            id: Annotation::new_id(),
+            author: Author::Human,
+            file,
+            line,
+            end_line,
+            side,
+            scope: AnchorScope::Line,
+            severity,
+            tag,
+            status: Status::Open,
+            body,
+            reply_to: None,
+            created_at: now,
+            updated_at: now,
+        };
+        self.mutate_store(move |s| {
+            s.upsert(annotation);
+            Ok(())
+        });
+    }
+
+    /// Create a whole-file annotation (`scope = File`); its line/side are not
+    /// meaningful, so they are left at neutral defaults.
+    pub(crate) fn write_file_comment(
+        &mut self,
+        severity: Severity,
+        tag: Option<Tag>,
+        body: String,
+    ) {
+        let file = self.current().display_path().to_string();
+        let now = Timestamp::now();
+        let annotation = Annotation {
+            id: Annotation::new_id(),
+            author: Author::Human,
+            file,
+            line: 0,
+            end_line: None,
+            side: Side::Right,
+            scope: AnchorScope::File,
+            severity,
+            tag,
+            status: Status::Open,
+            body,
+            reply_to: None,
+            created_at: now,
+            updated_at: now,
+        };
+        self.mutate_store(move |s| {
+            s.upsert(annotation);
+            Ok(())
+        });
+    }
+
+    /// Thread a reply under `parent`, inheriting its anchor so the reply shows on
+    /// the same line.
+    pub(crate) fn write_reply(
+        &mut self,
+        parent: String,
+        severity: Severity,
+        tag: Option<Tag>,
+        body: String,
+    ) {
+        let now = Timestamp::now();
+        self.mutate_store(move |s| {
+            let p = s
+                .get(&parent)
+                .with_context(|| format!("reply target `{parent}` not found"))?;
+            let annotation = Annotation {
+                id: Annotation::new_id(),
+                author: Author::Human,
+                file: p.file.clone(),
+                line: p.line,
+                end_line: p.end_line,
+                side: p.side,
+                scope: p.scope,
+                severity,
+                tag,
+                status: Status::Open,
+                body,
+                reply_to: Some(parent.clone()),
+                created_at: now,
+                updated_at: now,
+            };
+            s.upsert(annotation);
+            Ok(())
+        });
+    }
+
+    /// Revise the human's own annotation in place. Guards against editing the
+    /// agent's annotations.
+    pub(crate) fn edit_annotation(
+        &mut self,
+        id: String,
+        body: String,
+        severity: Severity,
+        tag: Option<Tag>,
+    ) {
+        let now = Timestamp::now();
+        self.mutate_store(move |s| {
+            let a = s
+                .get_mut(&id)
+                .with_context(|| format!("no annotation with id `{id}`"))?;
+            if a.author != Author::Human {
+                bail!("`{id}` is the agent's annotation; you can only edit your own");
+            }
+            a.body = body;
+            a.severity = severity;
+            a.tag = tag;
+            a.updated_at = now;
+            Ok(())
+        });
+    }
+
+    /// Delete the human's own annotation: hard-delete when nothing replies to it,
+    /// else soft-retract to `withdrawn` so a thread the agent replied to stays
+    /// coherent (the same rule as `agent comment cancel`).
+    pub(crate) fn delete_annotation(&mut self, id: String) {
+        let now = Timestamp::now();
+        self.mutate_store(move |s| {
+            match s.get(&id) {
+                None => bail!("no annotation with id `{id}`"),
+                Some(a) if a.author != Author::Human => {
+                    bail!("`{id}` is the agent's annotation; you can only delete your own")
+                }
+                Some(_) => {}
+            }
+            if s.has_replies(&id) {
+                let a = s.get_mut(&id).expect("just checked it exists");
+                a.status = Status::Withdrawn;
+                a.updated_at = now;
+            } else {
+                s.remove(&id);
+            }
+            Ok(())
+        });
+    }
+
+    /// Set an annotation's status (any author may resolve/reopen, matching the
+    /// agent's `set_status`).
+    pub(crate) fn set_annotation_status(&mut self, id: String, status: Status) {
+        let now = Timestamp::now();
+        self.mutate_store(move |s| {
+            let a = s
+                .get_mut(&id)
+                .with_context(|| format!("no annotation with id `{id}`"))?;
+            a.status = status;
+            a.updated_at = now;
+            Ok(())
+        });
+    }
+
+    // --- cursor-targeted verbs the keymap drives ---------------------------
+
+    /// Arm a delete confirmation for the annotation on the cursor line (resolved
+    /// on a `y` press by the event loop). A no-op with a hint when there is none.
+    pub(crate) fn request_delete(&mut self) {
+        match self.annotation_id_at_cursor() {
+            Some(id) => self.pending_delete = Some(id),
+            None => self.notice = Some("no annotation on this line to delete".to_string()),
+        }
+    }
+
+    /// Confirm the armed delete, if any.
+    pub(crate) fn confirm_pending_delete(&mut self) {
+        if let Some(id) = self.pending_delete.take() {
+            self.delete_annotation(id);
+        }
+    }
+
+    /// While a delete is armed, capture the confirm keys before Lua sees them
+    /// (same precedence as the picker and composer): `y` deletes, anything else
+    /// cancels. Returns `true` if a confirmation was pending.
+    pub(crate) fn handle_pending_delete_key(&mut self, ev: KeyEvent) -> bool {
+        if self.pending_delete.is_none() {
+            return false;
+        }
+        match ev.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_pending_delete(),
+            _ => self.pending_delete = None,
+        }
+        true
+    }
+
+    /// Cycle the status of the annotation on the cursor line: open → resolved →
+    /// wontfix → open. A no-op with a hint when there is none.
+    pub(crate) fn cycle_annotation_status(&mut self) {
+        let Some(id) = self.annotation_id_at_cursor() else {
+            self.notice = Some("no annotation on this line to update".to_string());
+            return;
+        };
+        let next = match self
+            .annotations
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.status)
+        {
+            Some(Status::Open) => Status::Resolved,
+            Some(Status::Resolved) => Status::Wontfix,
+            _ => Status::Open,
+        };
+        self.set_annotation_status(id, next);
+    }
+}

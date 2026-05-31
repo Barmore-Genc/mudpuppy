@@ -1,0 +1,28 @@
+---
+source: src/tui/tests.rs
+expression: screen(&term)
+---
+"┌ Files (7) ───────────────┐┌ src/alpha.rs [modified] 1/7 ─────────────────────────────────────────┐"
+"│M src/alpha.rs  +┌ Help ────────────────────────────────────────────────────────┐                 │"
+"│M src/long.rs  +4│mudpuppy — diff viewer                                        │                 │"
+"│M README.md  +1 -│Navigation                                                    │                 │"
+"│A src/new_module.│  j / k        move cursor (diff) / selection (tree)          │                 │"
+"│D old.txt  +0 -2 │  Ctrl-d/u/f/b half / full page down / up                     │                 │"
+"│A assets/logo.png│  g / G        top / bottom (cursor in diff, first/last file) │                 │"
+"│R src/relocated.r│  } / {        next / prev hunk   (also n / N)                │                 │"
+"│                 │  J / K        next / prev file (from the diff pane)          │                 │"
+"│                 │Focus                                                         │                 │"
+"│                 │  Tab / l / h  toggle · tree → diff · diff → tree             │                 │"
+"│                 │Annotations                                                   │                 │"
+"│                 │  a            toggle the annotations panel                   │                 │"
+"│                 │  v / V  Esc   whole-line selection (diff) · clear            │                 │"
+"│                 │  c / F        comment line/selection · whole file            │                 │"
+"│                 │  R / e / D    reply · edit · delete (D confirms with y)      │                 │"
+"│                 │  s            cycle status (open → resolved → wontfix)       │                 │"
+"│                 │More                                                          │                 │"
+"│                 │  r            release the turn; first release approves       │                 │"
+"│                 │  Ctrl-p       add any file (fuzzy picker)                    │                 │"
+"│                 │  ? q Ctrl-c   help · quit                                    │                 │"
+"│                 │press ?, q, or Esc to close                                   │                 │"
+"└─────────────────└──────────────────────────────────────────────────────────────┘─────────────────┘"
+" local vs main  ·  file 1/7  ·  +3 -2  ·  [tree] ALL  ? help  q quit                                "

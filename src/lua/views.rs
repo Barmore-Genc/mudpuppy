@@ -11,7 +11,7 @@
 use mlua::{Lua, Result, Table};
 
 use crate::diff::{DiffLine, FileDiff, FileStatus, LineKind};
-use crate::domain::{Annotation, Author, Severity, Side, Status, Tag, Turn};
+use crate::domain::{AnchorScope, Annotation, Author, Severity, Side, Status, Tag, Turn};
 use crate::tui::{App, Focus, Row};
 
 /// `mudpuppy.state()` — focus, selection, scroll, overlay flags, the turn block,
@@ -21,6 +21,13 @@ pub fn state(lua: &Lua, app: &App) -> Result<Table> {
     t.set("focus", focus_name(app.focus))?;
     t.set("selected", app.selected + 1)?;
     t.set("scroll", app.scroll)?;
+    t.set("cursor", app.cursor)?;
+    if let Some((lo, hi)) = app.selection_span() {
+        let sel = lua.create_table()?;
+        sel.set("lo", lo)?;
+        sel.set("hi", hi)?;
+        t.set("selection", sel)?;
+    }
     t.set("show_help", app.show_help)?;
     t.set("show_panel", app.show_panel)?;
     t.set("turn", turn_table(lua, &app.turn)?)?;
@@ -123,7 +130,11 @@ pub fn annotation_table(lua: &Lua, a: &Annotation) -> Result<Table> {
     t.set("author", author_name(a.author))?;
     t.set("file", a.file.as_str())?;
     t.set("line", a.line)?;
+    if let Some(end) = a.end_line {
+        t.set("end_line", end)?;
+    }
     t.set("side", side_name(a.side))?;
+    t.set("scope", scope_name(a.scope))?;
     t.set("severity", severity_name(a.severity))?;
     if let Some(tag) = a.tag {
         t.set("tag", tag_name(tag))?;
@@ -228,6 +239,13 @@ fn status_name(status: Status) -> &'static str {
         Status::Resolved => "resolved",
         Status::Wontfix => "wontfix",
         Status::Withdrawn => "withdrawn",
+    }
+}
+
+fn scope_name(scope: AnchorScope) -> &'static str {
+    match scope {
+        AnchorScope::Line => "line",
+        AnchorScope::File => "file",
     }
 }
 

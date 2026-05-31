@@ -1,0 +1,28 @@
+---
+source: src/tui/tests.rs
+expression: s
+---
+"┌ Files (7) ───────────────┐┌ src/alpha.rs [modified] 1/7 ─────────────────────────────────────────┐"
+"│M src/alpha.rs  +3 -2     ││@@ -1,4 +1,5 @@ fn alpha() {                                          │"
+"│M src/long.rs  +4 -2      ││    1     1   use std::io;                                            │"
+"│M README.md  +1 -1        ││    2       - let x = 1;                                              │"
+"│A src/new_module.rs  +3 -0││          2 + let x = 2;                                              │"
+"│D old.txt  +0┌ Comment ─────────────────────────────────────────────────────────────┐             │"
+"│A assets/logo│on src/alpha.rs  L1                                                   │             │"
+"│R src/relocat│ suggestion   no tag                                                  │             │"
+"│             │                                                                      │             │"
+"│             │needs a guard here█                                                   │             │"
+"│             │                                                                      │             │"
+"│             │Ctrl-S save  ·  Esc cancel  ·  Ctrl-E severity  ·  Ctrl-T tag  ·      │             │"
+"│             │Enter newline                                                         │             │"
+"│             │                                                                      │             │"
+"│             │                                                                      │             │"
+"│             │                                                                      │             │"
+"│             │                                                                      │             │"
+"│             │                                                                      │             │"
+"│             └──────────────────────────────────────────────────────────────────────┘             │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"└──────────────────────────┘└──────────────────────────────────────────────────────────────────────┘"
+" local vs main  ·  file 1/7  ·  +3 -2  ·  [diff] ALL  ? help  q quit                                "

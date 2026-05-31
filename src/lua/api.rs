@@ -191,6 +191,93 @@ pub fn install_scoped<'scope>(
         })?,
     )?;
 
+    // --- cursor, visual selection, and authoring ----------------------------
+
+    table.set(
+        "move_cursor",
+        scope.create_function(move |_, delta: i64| {
+            cell.borrow_mut().move_cursor(delta);
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "set_cursor",
+        scope.create_function(move |_, n: i64| {
+            cell.borrow_mut().set_cursor(n);
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "cursor_to_top",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().cursor_to_top();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "cursor_to_bottom",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().cursor_to_bottom();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "toggle_visual",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().toggle_visual();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "clear_selection",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().clear_selection();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "add_comment",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().add_comment();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "comment_file",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().comment_file();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "reply",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().reply();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "edit_comment",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().edit_comment();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "delete_comment",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().request_delete();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "cycle_status",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().cycle_annotation_status();
+            Ok(())
+        })?,
+    )?;
+
     // --- read-only views ----------------------------------------------------
 
     table.set(

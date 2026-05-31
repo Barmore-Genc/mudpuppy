@@ -20,20 +20,10 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use jiff::Timestamp;
-use nanoid::nanoid;
 use notify::{RecursiveMode, Watcher};
 
-/// Alphanumeric id alphabet. We avoid nanoid's default `-`/`_` so an id can
-/// never start with `-` and be mistaken for a CLI flag (e.g. `--id -X…`).
-const ID_ALPHABET: [char; 62] = [
-    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
-    'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l',
-    'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3', '4',
-    '5', '6', '7', '8', '9',
-];
-
 use crate::cli::{AddArgs, AgentCommand, CommentCommand};
-use crate::domain::{Annotation, Author, Severity, Side, StateFile, Status, Tag};
+use crate::domain::{AnchorScope, Annotation, Author, Severity, Side, StateFile, Status, Tag};
 use crate::session::Session;
 use crate::{source, store};
 
@@ -124,12 +114,19 @@ fn add(args: AddArgs) -> Result<()> {
 
     let session = session()?;
     let now = Timestamp::now();
+    let scope = if args.whole_file {
+        AnchorScope::File
+    } else {
+        AnchorScope::Line
+    };
     let annotation = Annotation {
-        id: nanoid!(8, &ID_ALPHABET),
+        id: Annotation::new_id(),
         author: Author::Agent,
         file: args.file,
         line: args.line,
+        end_line: args.end_line,
         side,
+        scope,
         severity,
         tag,
         status: Status::Open,
@@ -502,20 +499,14 @@ fn render(a: &Annotation) -> String {
         .tag
         .map(|t| format!(" {}", tag_symbol(t)))
         .unwrap_or_default();
-    let side = match a.side {
-        Side::Right => "right",
-        Side::Left => "left",
-    };
     let mut out = format!(
-        "[{}] {} {}{} {}  {}:{} ({})\n",
+        "[{}] {} {}{} {}  {}\n",
         a.id,
         author_word(a.author),
         severity_word(a.severity),
         tag,
         status_word(a.status),
-        a.file,
-        a.line,
-        side,
+        anchor_desc(a),
     );
     if let Some(parent) = &a.reply_to {
         out.push_str(&format!("  reply to {parent}\n"));
@@ -526,6 +517,23 @@ fn render(a: &Annotation) -> String {
         out.push('\n');
     }
     out
+}
+
+/// The anchor portion of a rendered annotation: `file (whole file)` for a
+/// file-scoped note, `file:42–50 (side)` for a region, `file:42 (side)` for a
+/// single line.
+fn anchor_desc(a: &Annotation) -> String {
+    if a.scope == AnchorScope::File {
+        return format!("{} (whole file)", a.file);
+    }
+    let side = match a.side {
+        Side::Right => "right",
+        Side::Left => "left",
+    };
+    match a.end_line {
+        Some(end) if end != a.line => format!("{}:{}–{} ({side})", a.file, a.line, end),
+        _ => format!("{}:{} ({side})", a.file, a.line),
+    }
 }
 
 fn author_word(a: Author) -> &'static str {
@@ -602,7 +610,9 @@ index 3..4 100644
             author: Author::Agent,
             file: "src/lib.rs".to_string(),
             line: 42,
+            end_line: None,
             side: Side::Right,
+            scope: AnchorScope::Line,
             severity: Severity::Warning,
             tag: Some(Tag::Concern),
             status: Status::Open,
@@ -616,13 +626,35 @@ index 3..4 100644
         assert!(text.contains("\n  line one\n  line two\n"));
     }
 
+    #[test]
+    fn render_shows_region_and_whole_file_anchors() {
+        let base = ann("rgn00001", Author::Human, "spans lines");
+        let mut region = base.clone();
+        region.end_line = Some(50);
+        assert!(
+            render(&region).contains("src/lib.rs:1–50 (right)"),
+            "{}",
+            render(&region)
+        );
+
+        let mut whole = base;
+        whole.scope = AnchorScope::File;
+        assert!(
+            render(&whole).contains("src/lib.rs (whole file)"),
+            "{}",
+            render(&whole)
+        );
+    }
+
     fn ann(id: &str, author: Author, body: &str) -> Annotation {
         Annotation {
             id: id.to_string(),
             author,
             file: "src/lib.rs".to_string(),
             line: 1,
+            end_line: None,
             side: Side::Right,
+            scope: AnchorScope::Line,
             severity: Severity::Suggestion,
             tag: None,
             status: Status::Open,

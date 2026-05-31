@@ -450,15 +450,29 @@ Actions (call these from inside a binding or hook):
   mudpuppy.scroll(delta)         scroll the diff by delta rows (negative = up)
   mudpuppy.next_hunk()
   mudpuppy.prev_hunk()
+  mudpuppy.move_cursor(delta)    move the diff line cursor (negative = up)
+  mudpuppy.set_cursor(n)         move the cursor to absolute row n (clamped)
+  mudpuppy.cursor_to_top()
+  mudpuppy.cursor_to_bottom()
+  mudpuppy.toggle_visual()       start/stop a whole-line region selection
+  mudpuppy.clear_selection()     leave visual mode (and cancel a delete prompt)
+  mudpuppy.add_comment()         comment the cursor line (or the selection)
+  mudpuppy.comment_file()        comment the whole file
+  mudpuppy.reply()               reply to the annotation on the cursor line
+  mudpuppy.edit_comment()        edit your annotation on the cursor line
+  mudpuppy.delete_comment()      delete your annotation (confirm with y)
+  mudpuppy.cycle_status()        open → resolved → wontfix for the cursor line
 
 Readers (return tables describing the current state):
-  mudpuppy.state()        { focus, selected, scroll, show_help, show_panel,
+  mudpuppy.state()        { focus, selected, scroll, cursor, show_help,
+                            show_panel, selection = { lo, hi } | nil,
                             turn = { owner, seq, agent_waiting, approved },
                             viewport = { height, total, top } }
   mudpuppy.files()        array of { path, status, additions, deletions, binary }
   mudpuppy.current_file() the open file, plus { hunks = { { ..., lines } } }
-  mudpuppy.annotations()  array of { id, author, file, line, side, severity,
-                            tag, status, body, reply_to, created_at, updated_at }
+  mudpuppy.annotations()  array of { id, author, file, line, end_line, side,
+                            scope, severity, tag, status, body, reply_to,
+                            created_at, updated_at }
   mudpuppy.screen()       the diff rows currently visible on screen
 
 `selected` and `select_file(i)` are 1-based.
@@ -535,7 +549,7 @@ is a working example of everything above.
 mod tests {
     use super::*;
     use crate::diff::parse_diff;
-    use crate::domain::{Annotation, Author, Severity, Side, Status, Target};
+    use crate::domain::{AnchorScope, Annotation, Author, Severity, Side, Status, Target};
     use crate::tui::App;
     use keys::KeyChord;
 
@@ -584,7 +598,9 @@ index 333..444 100644
             author: Author::Agent,
             file: "a.rs".to_string(),
             line: 2,
+            end_line: None,
             side: Side::Right,
+            scope: AnchorScope::Line,
             severity: Severity::Warning,
             tag: None,
             status: Status::Open,

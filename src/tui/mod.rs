@@ -33,7 +33,9 @@
 //! reloads, and config hot-reloads. The viewer's state and verbs live in
 //! `app`, its drawing in `render`.
 
+mod annotate;
 mod app;
+mod composer;
 mod render;
 #[cfg(test)]
 mod tests;
@@ -160,13 +162,28 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                         if is_ctrl_c(&key) {
                             return Ok(());
                         }
-                        // The picker overlay captures all keys before they reach
-                        // Lua (same precedent as the hardwired Ctrl-C above).
+                        // The composer and a pending delete-confirm capture keys
+                        // before Lua, the same precedence as the picker overlay
+                        // and the hardwired Ctrl-C above. A capture can still
+                        // create/remove annotations (composer save, delete), so
+                        // diff snapshots around it and fire the change events.
+                        if app.composer.is_some() || app.pending_delete.is_some() {
+                            let before = Snapshot::of(app);
+                            app.notice = None;
+                            let _ = app.handle_composer_key(key)
+                                || app.handle_pending_delete_key(key);
+                            let after = Snapshot::of(app);
+                            fire_changes(&engine, app, &before, &after)?;
+                            continue;
+                        }
                         if app.handle_picker_key(key) {
                             continue;
                         }
                         if let Some(chord) = KeyChord::from_event(&key) {
                             let before = Snapshot::of(app);
+                            // Clear the prior transient hint on each fresh key so
+                            // a "can't comment here" notice doesn't linger.
+                            app.notice = None;
                             engine.dispatch(app, chord)?;
                             if app.should_quit {
                                 return Ok(());

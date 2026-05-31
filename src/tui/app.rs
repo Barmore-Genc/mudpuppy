@@ -16,9 +16,10 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::blob::{self, BlobSide};
 use crate::diff::{DiffLine, FileDiff, GapPos, LineKind};
-use crate::domain::{Annotation, Author, Severity, Side, StateFile, Target, Turn};
+use crate::domain::{AnchorScope, Annotation, Author, Severity, Side, StateFile, Target, Turn};
 use crate::highlight::{Highlighter, HlLine};
 use crate::picker::Picker;
+use crate::tui::composer::Composer;
 use crate::{source, store};
 
 /// Which pane has keyboard focus.
@@ -66,7 +67,7 @@ pub(crate) struct ViewPlan {
 /// `}`/`{` hunk navigation). Built lazily and cached per selected file.
 pub(crate) struct FileView {
     pub(crate) rows: Vec<Row>,
-    hunk_starts: Vec<usize>,
+    pub(crate) hunk_starts: Vec<usize>,
 }
 
 impl FileView {
@@ -245,6 +246,16 @@ pub(crate) struct App {
     pub(crate) view: FileView,
     /// Top visible row of the diff pane.
     pub(crate) scroll: usize,
+    /// Focused row index into `view.rows` — the line the human's comment/visual
+    /// verbs act on (GitHub-style cursor). Kept visible via [`App::follow_cursor`].
+    pub(crate) cursor: usize,
+    /// `Some` while in visual mode: the inclusive selection spans the rows
+    /// between this anchor and `cursor`.
+    pub(crate) selection_anchor: Option<usize>,
+    /// Annotation id awaiting a `y`/`n` delete confirmation, set by `delete`.
+    pub(crate) pending_delete: Option<String>,
+    /// The modal comment composer; `Some` while open, capturing key input.
+    pub(crate) composer: Option<Composer>,
     /// Top visible file row of the tree, so the selection stays on screen.
     pub(crate) tree_scroll: usize,
     pub(crate) show_help: bool,
@@ -266,6 +277,10 @@ pub(crate) struct App {
     /// Latest message from the scripting engine (a `print` or a config error),
     /// mirrored here each frame so the status bar can surface it.
     pub(crate) status_msg: Option<String>,
+    /// A transient hint from an authoring verb (e.g. "can't comment here"),
+    /// shown in the status bar and cleared on the next key press. Distinct from
+    /// `status_msg`, which the loop reclaims from the Lua engine each frame.
+    pub(crate) notice: Option<String>,
     /// Per-file context-reveal state, indexed parallel to `files`. Survives
     /// reloads so expanded regions stay open while the agent writes.
     plans: Vec<ViewPlan>,
@@ -299,6 +314,10 @@ impl App {
             focus: Focus::Tree,
             view,
             scroll: 0,
+            cursor: 0,
+            selection_anchor: None,
+            pending_delete: None,
+            composer: None,
             tree_scroll: 0,
             show_help: false,
             show_panel: false,
@@ -309,6 +328,7 @@ impl App {
             tree_height: 1,
             should_quit: false,
             status_msg: None,
+            notice: None,
             plans,
             blob_cache: HashMap::new(),
             repo_root: None,
@@ -434,21 +454,43 @@ impl App {
     pub(crate) fn line_marks(&self) -> HashMap<(Side, u32), Severity> {
         let path = self.current().display_path();
         let mut marks: HashMap<(Side, u32), Severity> = HashMap::new();
-        for a in self.annotations.iter().filter(|a| a.file == path) {
-            marks
-                .entry((a.side, a.line))
-                .and_modify(|s| *s = (*s).max(a.severity))
-                .or_insert(a.severity);
+        // File-scoped notes have no gutter line; line/region notes mark every
+        // line they span.
+        for a in self
+            .annotations
+            .iter()
+            .filter(|a| a.file == path && a.scope == AnchorScope::Line)
+        {
+            let end = a.end_line.unwrap_or(a.line);
+            for line in a.line.min(end)..=a.line.max(end) {
+                marks
+                    .entry((a.side, line))
+                    .and_modify(|s| *s = (*s).max(a.severity))
+                    .or_insert(a.severity);
+            }
         }
         marks
     }
 
-    /// Open file `idx`, rebuilding the cached view and resetting the scroll.
+    /// File-scoped annotations on the current file (those with no gutter line,
+    /// surfaced as a header row at the top of the diff pane).
+    pub(crate) fn file_level_annotations(&self) -> Vec<&Annotation> {
+        let path = self.current().display_path();
+        self.annotations
+            .iter()
+            .filter(|a| a.file == path && a.scope == AnchorScope::File)
+            .collect()
+    }
+
+    /// Open file `idx`, rebuilding the cached view and resetting the scroll,
+    /// cursor, and any visual selection.
     pub(crate) fn select(&mut self, idx: usize) {
         let idx = idx.min(self.files.len() - 1);
         if idx != self.selected {
             self.selected = idx;
             self.scroll = 0;
+            self.cursor = 0;
+            self.selection_anchor = None;
             // Rebuild from the file's plan so any context revealed earlier in
             // this session is restored when returning to the file.
             self.rebuild_view();
@@ -466,16 +508,97 @@ impl App {
         self.view.rows.len().saturating_sub(self.diff_height)
     }
 
+    /// Highest valid cursor row index for the current view.
+    fn last_row(&self) -> usize {
+        self.view.rows.len().saturating_sub(1)
+    }
+
+    /// Scroll the diff by `delta`, carrying the cursor by the same amount so
+    /// paging (ctrl-d/-u/-f/-b) keeps it in view. Both are clamped to their
+    /// ranges independently.
     pub(crate) fn scroll_by(&mut self, delta: isize) {
         let next = self.scroll as isize + delta;
         self.scroll = next.clamp(0, self.max_scroll() as isize) as usize;
+        let cur = self.cursor as isize + delta;
+        self.cursor = cur.clamp(0, self.last_row() as isize) as usize;
     }
 
-    /// Set the diff scroll to an absolute row, clamped to `[0, max_scroll]`. A
-    /// large value (used by `G`) lands exactly on the bottom.
+    /// Set the diff scroll to an absolute row, clamped to `[0, max_scroll]`,
+    /// carrying the cursor by the same delta. A large value lands exactly on the
+    /// bottom (this is what preserves the `BOT` status indicator).
     pub(crate) fn set_scroll(&mut self, n: i64) {
         let max = self.max_scroll() as i64;
+        let old = self.scroll as i64;
         self.scroll = n.clamp(0, max) as usize;
+        let delta = self.scroll as i64 - old;
+        let cur = self.cursor as i64 + delta;
+        self.cursor = cur.clamp(0, self.last_row() as i64) as usize;
+    }
+
+    /// Move the cursor by `delta` rows (clamped), nudging the viewport to keep
+    /// it visible.
+    pub(crate) fn move_cursor(&mut self, delta: i64) {
+        let next = self.cursor as i64 + delta;
+        self.cursor = next.clamp(0, self.last_row() as i64) as usize;
+        self.follow_cursor();
+    }
+
+    /// Move the cursor to an absolute row (clamped), keeping it visible.
+    pub(crate) fn set_cursor(&mut self, n: i64) {
+        self.cursor = n.clamp(0, self.last_row() as i64) as usize;
+        self.follow_cursor();
+    }
+
+    /// Move the cursor to the first row.
+    pub(crate) fn cursor_to_top(&mut self) {
+        self.cursor = 0;
+        self.set_scroll(0);
+    }
+
+    /// Move the cursor to the last row. Drives `scroll` to its max so the status
+    /// bar reads `BOT`.
+    pub(crate) fn cursor_to_bottom(&mut self) {
+        self.cursor = self.last_row();
+        self.set_scroll(self.view.rows.len() as i64);
+    }
+
+    /// Toggle visual mode: drop an anchor at the cursor, or clear it if already
+    /// selecting.
+    pub(crate) fn toggle_visual(&mut self) {
+        self.selection_anchor = match self.selection_anchor {
+            Some(_) => None,
+            None => Some(self.cursor),
+        };
+    }
+
+    /// Leave visual mode without acting (also clears a pending delete confirm).
+    pub(crate) fn clear_selection(&mut self) {
+        self.selection_anchor = None;
+        self.pending_delete = None;
+    }
+
+    /// The inclusive `[lo, hi]` row span of the active visual selection, if any.
+    pub(crate) fn selection_span(&self) -> Option<(usize, usize)> {
+        self.selection_anchor
+            .map(|a| (a.min(self.cursor), a.max(self.cursor)))
+    }
+
+    /// Nudge `scroll` so the cursor stays within the diff viewport (mirrors the
+    /// tree-scroll logic in `render_tree`).
+    fn follow_cursor(&mut self) {
+        let height = self.diff_height.max(1);
+        if self.cursor < self.scroll {
+            self.scroll = self.cursor;
+        } else if self.cursor >= self.scroll + height {
+            self.scroll = self.cursor + 1 - height;
+        }
+        self.scroll = self.scroll.min(self.max_scroll());
+    }
+
+    /// Clamp the cursor into the current view; called after a rebuild/reload may
+    /// have shortened the row list.
+    pub(crate) fn clamp_cursor(&mut self) {
+        self.cursor = self.cursor.min(self.last_row());
     }
 
     /// Request quit; `run_loop` honours it after the dispatch returns.
@@ -503,8 +626,8 @@ impl App {
     }
 
     pub(crate) fn next_hunk(&mut self) {
-        if let Some(&s) = self.view.hunk_starts.iter().find(|&&s| s > self.scroll) {
-            self.scroll = s.min(self.max_scroll());
+        if let Some(&s) = self.view.hunk_starts.iter().find(|&&s| s > self.cursor) {
+            self.set_cursor(s as i64);
         }
     }
 
@@ -514,9 +637,9 @@ impl App {
             .hunk_starts
             .iter()
             .rev()
-            .find(|&&s| s < self.scroll)
+            .find(|&&s| s < self.cursor)
         {
-            self.scroll = s;
+            self.set_cursor(s as i64);
         }
     }
 
@@ -626,6 +749,7 @@ impl App {
         if let Some(file) = self.files.get(self.selected) {
             self.view = FileView::build(file, blob.as_deref(), &plan);
         }
+        self.clamp_cursor();
     }
 
     /// New-side total line count for the current file, if its Head blob is
@@ -745,10 +869,16 @@ impl App {
     /// living in `core.luau`) rather than a hand-coded match. A fresh engine per
     /// call keeps each press independent and is cheap enough for these tests.
     pub(crate) fn handle_key(&mut self, ev: KeyEvent) -> bool {
-        // Mirror `run_loop`: the picker captures keys before they reach Lua.
+        // Mirror `run_loop`: the composer, a pending delete-confirm, and the
+        // picker each capture keys before they reach Lua.
+        if self.composer.is_some() || self.pending_delete.is_some() {
+            let _ = self.handle_composer_key(ev) || self.handle_pending_delete_key(ev);
+            return self.should_quit;
+        }
         if self.handle_picker_key(ev) {
             return self.should_quit;
         }
+        self.notice = None;
         let engine = LuaEngine::new(None).expect("core.luau loads");
         if let Some(chord) = KeyChord::from_event(&ev) {
             engine.dispatch(self, chord).expect("dispatch");

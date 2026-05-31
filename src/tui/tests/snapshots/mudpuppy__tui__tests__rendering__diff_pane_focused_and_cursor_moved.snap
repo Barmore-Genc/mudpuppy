@@ -1,15 +1,18 @@
 ---
-source: src/tui.rs
+source: src/tui/tests.rs
 expression: screen(&term)
 ---
 "┌ Files (7) ───────────────┐┌ src/long.rs [modified] 2/7 ──────────────────────────────────────────┐"
-"│M src/alpha.rs  +3 -2     ││    3     3   line 03                                                 │"
-"│M src/long.rs  +4 -2      ││    4     4   line 04                                                 │"
-"│M README.md  +1 -1        ││    5     5   line 05                                                 │"
-"│A src/new_module.rs  +3 -0││    6     6   line 06                                                 │"
-"│D old.txt  +0 -2          ││    7     7   line 07                                                 │"
-"│A assets/logo.png  +0 -0  ││    8     8   line 08                                                 │"
-"│R src/relocated.rs  +0 -0 ││    9       - line 09 old                                             │"
+"│M src/alpha.rs  +3 -2     ││@@ -1,19 +1,20 @@ impl Long {                                         │"
+"│M src/long.rs  +4 -2      ││    1     1   line 01                                                 │"
+"│M README.md  +1 -1        ││    2     2   line 02                                                 │"
+"│A src/new_module.rs  +3 -0││    3     3   line 03                                                 │"
+"│D old.txt  +0 -2          ││    4     4   line 04                                                 │"
+"│A assets/logo.png  +0 -0  ││    5     5   line 05                                                 │"
+"│R src/relocated.rs  +0 -0 ││    6     6   line 06                                                 │"
+"│                          ││    7     7   line 07                                                 │"
+"│                          ││    8     8   line 08                                                 │"
+"│                          ││    9       - line 09 old                                             │"
 "│                          ││          9 + line 09 new                                             │"
 "│                          ││   10    10   line 10                                                 │"
 "│                          ││   11    11   line 11                                                 │"
@@ -21,8 +24,5 @@ expression: screen(&term)
 "│                          ││   17    17   line 17                                                 │"
 "│                          ││   18    18   line 18                                                 │"
 "│                          ││         19 + line 19 added                                           │"
-"│                          ││   19    20   line 20                                                 │"
-"│                          ││  ↕ 20 hidden lines — show more                                       │"
-"│                          ││@@ -40,2 +41,3 @@ fn far() {                                          │"
 "└──────────────────────────┘└──────────────────────────────────────────────────────────────────────┘"
-" local vs main  ·  file 2/7  ·  +4 -2  ·  [diff] 42%  ? help  q quit                                "
+" local vs main  ·  file 2/7  ·  +4 -2  ·  [diff] TOP  ? help  q quit                                "
