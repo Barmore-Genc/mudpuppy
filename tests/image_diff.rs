@@ -44,7 +44,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "help_overlay",
         keys: b"?",
-        settle_marker: "toggle this help",
+        settle_marker: "mudpuppy — diff viewer",
     },
 ];
 
