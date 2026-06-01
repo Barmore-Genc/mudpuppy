@@ -16,6 +16,7 @@ use ratatui::Frame;
 
 use super::app::{App, Focus, Row};
 use super::composer::Composer;
+use crate::command::CommandPalette;
 use crate::diff::{DiffLine, FileStatus, LineKind};
 use crate::domain::{Author, Severity, Side, Status, Tag, Target};
 use crate::highlight::HlLine;
@@ -75,6 +76,10 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     if let Some(picker) = app.picker.as_ref() {
         let area = frame.area();
         render_picker(frame, area, picker);
+    }
+    if let Some(palette) = app.palette.as_ref() {
+        let area = frame.area();
+        render_palette(frame, area, palette);
     }
     if let Some(composer) = app.composer.as_ref() {
         let area = frame.area();
@@ -327,6 +332,19 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut spans = vec![Span::raw(left)];
 
+    // A pending count and/or partial key sequence (`5`, `g`, `Space c`), so the
+    // human sees a multi-key binding building up the way vim's command line does.
+    if let Some(hint) = pending_hint(app) {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!(" {hint} "),
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     // Visual-mode selection size and a pending delete confirmation, so the human
     // always sees the mode they're in and what a `y` will remove.
     if let Some((lo, hi)) = app.selection_span() {
@@ -470,6 +488,42 @@ fn picker_row(path: &str, positions: &[usize], selected: bool) -> Line<'static> 
     Line::from(spans)
 }
 
+/// Modal overlay for the `:command` palette: a `:`-prefixed query line atop a
+/// fuzzy-ranked list of command names. Mirrors [`render_picker`]; matched
+/// characters and the cursor row are highlighted, and the list scrolls to keep
+/// the selection visible.
+fn render_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) {
+    let area = centered_rect(60, (area.height * 6 / 10).max(6), area);
+    let block = bordered(" Command ", true);
+    let inner = block.inner(area);
+    let list_height = inner.height.saturating_sub(1) as usize;
+    let offset = palette
+        .selected
+        .saturating_sub(list_height.saturating_sub(1));
+
+    let mut lines: Vec<Line> = Vec::with_capacity(inner.height as usize);
+    lines.push(Line::from(vec![
+        Span::styled(":", Style::default().fg(Color::Yellow)),
+        Span::raw(palette.query.clone()),
+    ]));
+    for (row, &cand) in palette
+        .filtered
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(list_height)
+    {
+        let name = &palette.all[cand];
+        let positions = fuzzy_match(&palette.query, name)
+            .map(|m| m.positions)
+            .unwrap_or_default();
+        lines.push(picker_row(name, &positions, row == palette.selected));
+    }
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 /// The modal comment composer: the target anchor, severity + tag chips, the
 /// body with a visible caret, and a key-hint footer.
 fn render_composer(frame: &mut Frame, area: Rect, composer: &Composer) {
@@ -546,23 +600,24 @@ fn render_help(frame: &mut Frame, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )),
         section("Navigation"),
-        Line::raw("  j / k        move cursor (diff) / selection (tree)"),
-        Line::raw("  Ctrl-d/u/f/b half / full page down / up"),
-        Line::raw("  g / G        top / bottom (cursor in diff, first/last file)"),
-        Line::raw("  } / {        next / prev hunk   (also n / N)"),
-        Line::raw("  J / K        next / prev file (from the diff pane)"),
+        Line::raw("  j / k         move cursor (diff) / selection (tree)"),
+        Line::raw("  d/u  f/b      half / full page down / up"),
+        Line::raw("  g g / G       top / bottom (cursor in diff, first/last file)"),
+        Line::raw("  } / { (n/N)   next / prev hunk"),
+        Line::raw("  J / K         next / prev file (from the diff pane)"),
+        Line::raw("  5j  100G      a number prefixes a count"),
         section("Focus"),
-        Line::raw("  Tab / l / h  toggle · tree → diff · diff → tree"),
-        section("Annotations"),
-        Line::raw("  a            toggle the annotations panel"),
-        Line::raw("  v / V  Esc   whole-line selection (diff) · clear"),
-        Line::raw("  c / F        comment line/selection · whole file"),
-        Line::raw("  R / e / D    reply · edit · delete (D confirms with y)"),
-        Line::raw("  s            cycle status (open → resolved → wontfix)"),
+        Line::raw("  Tab / l / h   toggle · tree → diff · diff → tree"),
+        section("Annotations  (Space is the leader)"),
+        Line::raw("  Space a       toggle the annotations panel"),
+        Line::raw("  v / V  Esc    whole-line selection (diff) · clear"),
+        Line::raw("  Space c c/f/r comment line/selection · file · reply"),
+        Line::raw("  Space c e/d/s edit · delete (confirm y) · cycle status"),
         section("More"),
-        Line::raw("  r            release the turn; first release approves"),
-        Line::raw("  Ctrl-p       add any file (fuzzy picker)"),
-        Line::raw("  ? q Ctrl-c   help · quit"),
+        Line::raw("  Space t r     release the turn; first release approves"),
+        Line::raw("  Space f       add any file · Space e/y · + expand context"),
+        Line::raw("  :             command palette"),
+        Line::raw("  ? q Ctrl-c    help · quit"),
         Line::from(Span::styled(
             "press ?, q, or Esc to close",
             Style::default().fg(Color::DarkGray),
@@ -780,6 +835,29 @@ fn tag_symbol(tag: Tag) -> &'static str {
         Tag::Concern => "!",
         Tag::Direction => ">",
     }
+}
+
+/// The pending count + partial key sequence as a compact string (`5`, `g`,
+/// `5 g g`, `Space c`), or `None` when nothing is in flight.
+fn pending_hint(app: &App) -> Option<String> {
+    if app.pending_count.is_none() && app.pending_seq.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(n) = app.pending_count {
+        parts.push(n.to_string());
+    }
+    // KeyChord's Display spells space as "space"; capitalize it so the leader
+    // reads as "Space" in the status line.
+    parts.extend(app.pending_seq.iter().map(|c| {
+        let s = c.to_string();
+        if s == "space" {
+            "Space".to_string()
+        } else {
+            s
+        }
+    }));
+    Some(parts.join(" "))
 }
 
 /// Short description of what's under review, for the status bar.

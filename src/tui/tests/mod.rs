@@ -165,6 +165,16 @@ fn ctrl(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
 }
 
+/// Drive a leader sequence: the Space leader followed by each character in
+/// `rest` (e.g. `leader(&mut a, "cc")` presses `Space c c`). Each char is a
+/// separate key press, exactly as the dispatch state machine sees them.
+fn leader(a: &mut App, rest: &str) {
+    a.handle_key(key(KeyCode::Char(' ')));
+    for ch in rest.chars() {
+        a.handle_key(key(KeyCode::Char(ch)));
+    }
+}
+
 /// Render `app` into a fresh `TestBackend`, mirroring the real loop: draw
 /// once (which records the viewport heights `handle_key` relies on for
 /// paging/clamping), then for each key apply the transition and redraw.

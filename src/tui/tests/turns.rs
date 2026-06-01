@@ -25,7 +25,7 @@ fn r_releases_the_turn_back_to_the_agent() {
     a.attach_store(path.clone(), store::load(&path).unwrap());
     assert!(a.turn.agent_waiting, "attach loads the turn block");
 
-    a.handle_key(key(KeyCode::Char('r')));
+    leader(&mut a, "tr");
 
     // In memory: ownership handed back, waiting cleared.
     assert_eq!(a.turn.owner, Author::Agent);
@@ -44,7 +44,7 @@ fn r_without_a_store_is_a_harmless_noop() {
     // No store attached (resolution failed / store-less view): `r` must not
     // panic and leaves the default turn untouched.
     let mut a = app();
-    a.handle_key(key(KeyCode::Char('r')));
+    leader(&mut a, "tr");
     assert_eq!(a.turn, Turn::default());
 }
 

@@ -57,12 +57,14 @@ fn g_and_capital_g_jump_top_and_bottom() {
     );
     a.handle_key(key(KeyCode::Char('G')));
     assert_eq!(a.scroll, a.max_scroll());
+    // `g g` (a two-key sequence) jumps to the top.
+    a.handle_key(key(KeyCode::Char('g')));
     a.handle_key(key(KeyCode::Char('g')));
     assert_eq!(a.scroll, 0);
 }
 
 #[test]
-fn ctrl_d_and_u_half_page() {
+fn d_and_u_half_page() {
     let mut a = app();
     drive(
         &mut a,
@@ -71,10 +73,30 @@ fn ctrl_d_and_u_half_page() {
         &[key(KeyCode::Char('j')), key(KeyCode::Char('l'))],
     );
     let half = a.diff_height / 2;
-    a.handle_key(ctrl('d'));
+    a.handle_key(key(KeyCode::Char('d')));
     assert_eq!(a.scroll, half.min(a.max_scroll()));
-    a.handle_key(ctrl('u'));
+    a.handle_key(key(KeyCode::Char('u')));
     assert_eq!(a.scroll, 0);
+}
+
+#[test]
+fn count_prefix_scales_a_motion() {
+    let mut a = app();
+    drive(
+        &mut a,
+        100,
+        24,
+        &[key(KeyCode::Char('j')), key(KeyCode::Char('l'))],
+    );
+    // `5j` moves the cursor five rows in one shot, then clears the count.
+    a.handle_key(key(KeyCode::Char('5')));
+    assert_eq!(a.pending_count, Some(5), "the digit accumulates a count");
+    a.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(a.cursor, 5);
+    assert_eq!(a.pending_count, None, "the count clears once consumed");
+    // A bare motion after that moves by one again.
+    a.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(a.cursor, 6);
 }
 
 #[test]

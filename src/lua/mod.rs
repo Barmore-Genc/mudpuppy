@@ -1,8 +1,11 @@
 //! Embedded Luau scripting: the configurable keymap and event hooks.
 //!
-//! The [`LuaEngine`] owns a sandboxed [`mlua::Lua`] and two registries — one
-//! mapping `(mode, chord)` to a key callback, one mapping an [`EventKind`] to its
-//! handlers. Every default binding lives in the embedded `core.luau`; a user
+//! The [`LuaEngine`] owns a sandboxed [`mlua::Lua`] and a few registries: one
+//! mapping `(mode, key-sequence)` to a key callback, one mapping an
+//! [`EventKind`] to its handlers, and one mapping a `:command` name to its
+//! callback. Multi-key bindings, a configurable leader, and a pending count are
+//! resolved by the sequence state machine in `dispatch`. Every default binding
+//! lives in the embedded `core.luau`; a user
 //! config (resolved by [`config_path`]) is loaded on top, last-binding-wins, so a
 //! user can rebind or extend without touching Rust. Rust keeps only a hardwired
 //! Ctrl-C quit (in `tui::run_loop`) as a safety net so a broken config can never
@@ -30,18 +33,28 @@ use mlua::{Function, Lua, StdLib, Table, Variadic};
 
 use crate::domain::Annotation;
 use crate::tui::{App, Focus};
-use keys::{KeyChord, Mode};
+use keys::{Key, KeyChord, KeySeq, Mode};
 
 /// Environment variable that points directly at a config file, overriding the
 /// XDG/`$HOME` search.
 pub const CONFIG_ENV: &str = "MUDPUPPY_CONFIG";
 
-/// The `(mode, chord)` → callback registry. `Rc<RefCell<…>>` so the `'static`
+/// The `(mode, sequence)` → callback registry. A binding is keyed on a *sequence*
+/// of chords, so multi-key bindings (`g g`, `<leader> t r`) are first-class; a
+/// single-key binding is a length-1 sequence. `Rc<RefCell<…>>` so the `'static`
 /// registration closure handed to Lua can mutate it.
-type Bindings = Rc<RefCell<HashMap<(Mode, KeyChord), Function>>>;
+type Bindings = Rc<RefCell<HashMap<(Mode, KeySeq), Function>>>;
 
 /// The event → handlers registry, registered via `mudpuppy.on`.
 type Events = Rc<RefCell<HashMap<EventKind, Vec<Function>>>>;
+
+/// The command-name → callback registry, registered via `mudpuppy.command` and
+/// driven by the `:command` palette.
+type Commands = Rc<RefCell<HashMap<String, Function>>>;
+
+/// The configurable leader chord (default `space`), shared so `mudpuppy.leader`
+/// can update it and `map` can expand `<leader>` at registration time.
+type Leader = Rc<RefCell<KeyChord>>;
 
 /// A lifecycle/store event a script can subscribe to with `mudpuppy.on`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -81,6 +94,8 @@ pub struct LuaEngine {
     mudpuppy: Table,
     bindings: Bindings,
     events: Events,
+    commands: Commands,
+    leader: Leader,
     /// Where the user config lives (if anywhere). `None` disables user config —
     /// used by tests so the default keymap is exercised in isolation.
     config_path: Option<PathBuf>,
@@ -105,6 +120,9 @@ impl LuaEngine {
 
         let bindings: Bindings = Rc::new(RefCell::new(HashMap::new()));
         let events: Events = Rc::new(RefCell::new(HashMap::new()));
+        let commands: Commands = Rc::new(RefCell::new(HashMap::new()));
+        // Default leader is `space`; a config can change it with `mudpuppy.leader`.
+        let leader: Leader = Rc::new(RefCell::new(KeyChord::plain(Key::Char(' '))));
         let status: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
         // Redirect `print` to the status buffer — the TUI owns the screen, so a
@@ -120,8 +138,14 @@ impl LuaEngine {
             .set("print", print)
             .map_err(|e| anyhow!("binding print: {e}"))?;
 
-        let mudpuppy = api::build_table(&lua, bindings.clone(), events.clone())
-            .map_err(|e| anyhow!("building the mudpuppy table: {e}"))?;
+        let mudpuppy = api::build_table(
+            &lua,
+            bindings.clone(),
+            events.clone(),
+            commands.clone(),
+            leader.clone(),
+        )
+        .map_err(|e| anyhow!("building the mudpuppy table: {e}"))?;
         lua.globals()
             .set("mudpuppy", mudpuppy.clone())
             .map_err(|e| anyhow!("binding the mudpuppy table: {e}"))?;
@@ -143,6 +167,8 @@ impl LuaEngine {
             mudpuppy,
             bindings,
             events,
+            commands,
+            leader,
             config_path,
             status,
         };
@@ -190,6 +216,10 @@ impl LuaEngine {
     pub fn reload_config(&self) -> Result<()> {
         self.bindings.borrow_mut().clear();
         self.events.borrow_mut().clear();
+        self.commands.borrow_mut().clear();
+        // The leader is config-set too, so reset it before re-exec so a removed
+        // `mudpuppy.leader` call reverts to the default.
+        *self.leader.borrow_mut() = KeyChord::plain(Key::Char(' '));
         *self.status.borrow_mut() = None;
         self.load_scripts(false)
     }
@@ -203,42 +233,109 @@ impl LuaEngine {
         *self.status.borrow_mut() = Some(msg);
     }
 
-    /// Dispatch a key press: look up the callback for the active mode (falling
-    /// back to `Global`, except in the exclusive `Help` mode) and run it in a
-    /// scope that can mutate `app`. A miss is a silent no-op.
+    /// Dispatch a key press through the sequence state machine.
+    ///
+    /// The pending count and partial sequence live on [`App`] (so `render` can
+    /// surface them). A digit with no sequence in flight folds into the count;
+    /// otherwise the chord extends `pending_seq`, which is resolved against the
+    /// active mode (with the `Global` fallback, except in the exclusive `Help`
+    /// mode):
+    ///
+    /// * a **strict prefix** of a longer binding waits for the next key;
+    /// * an **exact match** runs (with the count still set, so count-aware verbs
+    ///   read it) and then clears the count + sequence;
+    /// * a **miss** discards the dead sequence and the count.
+    ///
+    /// A faulty binding (a Lua error) is surfaced in the status bar, never
+    /// propagated — a broken key must not crash the viewer.
     pub(crate) fn dispatch(&self, app: &mut App, chord: KeyChord) -> Result<()> {
         let mode = active_mode(app);
-        let callback = {
-            let bindings = self.bindings.borrow();
-            bindings
-                .get(&(mode, chord))
-                .or_else(|| {
-                    // Help is exclusive: it swallows keys it doesn't bind rather
-                    // than letting Global act underneath the overlay.
-                    if mode == Mode::Help {
-                        None
-                    } else {
-                        bindings.get(&(Mode::Global, chord))
-                    }
-                })
-                .cloned()
+
+        // 1. Count prefix: only while no sequence is in flight. A leading `0`
+        //    (no count yet) is a normal key, matching vim.
+        if app.pending_seq.is_empty() {
+            if let Some(d) = chord.count_digit() {
+                if d != 0 || app.pending_count.is_some() {
+                    let cur = app.pending_count.unwrap_or(0);
+                    // Cap so a long digit run can't overflow; far past any view.
+                    let next = cur.saturating_mul(10).saturating_add(d).min(1_000_000);
+                    app.pending_count = Some(next);
+                    return Ok(());
+                }
+            }
+        }
+
+        // 2. Extend the pending sequence and resolve it.
+        app.pending_seq.push(chord);
+        match self.resolve(mode, &app.pending_seq) {
+            Resolution::Prefix => Ok(()), // wait for the next key
+            Resolution::Miss => {
+                app.pending_seq.clear();
+                app.pending_count = None;
+                Ok(())
+            }
+            Resolution::Exact(callback) => {
+                app.pending_seq.clear();
+                let result = self.run_in_scope(app, &callback);
+                app.pending_count = None;
+                if let Err(e) = result {
+                    self.set_status(format!("key error: {e}"));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Resolve a pending sequence against `mode` (then `Global`, except in
+    /// `Help`). A longer binding sharing this prefix always wins over an exact
+    /// match here — the prefix-wait rule — so a binding may not be both a prefix
+    /// of another and a usable terminal (documented as the one keymap-authoring
+    /// constraint; the default keymap obeys it).
+    fn resolve(&self, mode: Mode, seq: &[KeyChord]) -> Resolution {
+        let bindings = self.bindings.borrow();
+        let modes: &[Mode] = if mode == Mode::Help {
+            &[Mode::Help]
+        } else {
+            &[mode, Mode::Global][..]
         };
+
+        if bindings
+            .keys()
+            .any(|(m, k)| modes.contains(m) && k.len() > seq.len() && k.starts_with(seq))
+        {
+            return Resolution::Prefix;
+        }
+        for m in modes {
+            if let Some(f) = bindings.get(&(*m, seq.to_vec())) {
+                return Resolution::Exact(f.clone());
+            }
+        }
+        Resolution::Miss
+    }
+
+    /// Run a registered command by name (the `:command` palette's Enter action),
+    /// in the same scoped machinery as a key binding. An unknown name is a no-op;
+    /// a Lua error is surfaced, not propagated.
+    pub(crate) fn run_command(&self, app: &mut App, name: &str) -> Result<()> {
+        let callback = self.commands.borrow().get(name).cloned();
         let Some(callback) = callback else {
             return Ok(());
         };
-
-        let cell = RefCell::new(app);
-        let table = &self.mudpuppy;
-        let result = self.lua.scope(|scope| {
-            api::install_scoped(scope, table, &cell)?;
-            callback.call::<()>(())
-        });
-        // A faulty binding (a Lua error in the callback) is surfaced in the status
-        // bar, not propagated — a broken key must never crash the viewer.
-        if let Err(e) = result {
-            self.set_status(format!("key error: {e}"));
+        if let Err(e) = self.run_in_scope(app, &callback) {
+            self.set_status(format!("command error: {e}"));
         }
         Ok(())
+    }
+
+    /// Run one callback with the scoped action/reader verbs installed, borrowing
+    /// `app` through a `RefCell` for the duration of the call.
+    fn run_in_scope(&self, app: &mut App, callback: &Function) -> mlua::Result<()> {
+        let cell = RefCell::new(app);
+        let table = &self.mudpuppy;
+        self.lua.scope(|scope| {
+            api::install_scoped(&self.lua, scope, table, &cell, &self.commands)?;
+            callback.call::<()>(())
+        })
     }
 
     /// Fire `startup` (no payload).
@@ -300,7 +397,7 @@ impl LuaEngine {
         let cell = RefCell::new(app);
         let table = &self.mudpuppy;
         let result = self.lua.scope(|scope| {
-            api::install_scoped(scope, table, &cell)?;
+            api::install_scoped(&self.lua, scope, table, &cell, &self.commands)?;
             // Build the payload, then drop the read borrow before calling the
             // handlers (which may take a write borrow via an action verb).
             let payload = {
@@ -319,6 +416,16 @@ impl LuaEngine {
         }
         Ok(())
     }
+}
+
+/// The outcome of resolving a pending key sequence against the registry.
+enum Resolution {
+    /// A strict prefix of at least one longer binding — wait for the next key.
+    Prefix,
+    /// An exact match — run this callback.
+    Exact(Function),
+    /// No binding matches — discard the sequence.
+    Miss,
 }
 
 /// The active keymap mode: `Help` while the overlay is open, otherwise the
@@ -434,9 +541,12 @@ The mudpuppy table
 Everything lives on the global `mudpuppy` table.
 
 Registration (call at load time, i.e. at the top level of your config):
-  mudpuppy.map(mode, key, fn)    bind `key` in `mode` to a function
-  mudpuppy.unmap(mode, key)      remove a binding
+  mudpuppy.map(mode, keys, fn)   bind a key sequence in `mode` to a function
+  mudpuppy.unmap(mode, keys)     remove a binding
   mudpuppy.on(event, fn)         run `fn` when `event` fires
+  mudpuppy.command(name, fn)     register a `:name` command for the palette
+  mudpuppy.leader(key)           set the leader chord (default "space"); call it
+                                 before any map that uses <leader>
 
 Actions (call these from inside a binding or hook):
   mudpuppy.quit()
@@ -445,15 +555,19 @@ Actions (call these from inside a binding or hook):
   mudpuppy.toggle_help()
   mudpuppy.toggle_panel()        the annotations side panel
   mudpuppy.release_turn()        hand the turn back to the agent
+  mudpuppy.open_picker()         the fuzzy "add any file" picker
+  mudpuppy.open_palette()        the `:command` palette
   mudpuppy.select_file(i)        open file i (1-based; clamped to the file list)
+  mudpuppy.move_selection(delta) move the tree selection by delta (count-aware)
   mudpuppy.set_scroll(n)         scroll the diff to absolute row n (clamped)
-  mudpuppy.scroll(delta)         scroll the diff by delta rows (negative = up)
-  mudpuppy.next_hunk()
-  mudpuppy.prev_hunk()
-  mudpuppy.move_cursor(delta)    move the diff line cursor (negative = up)
+  mudpuppy.scroll(delta)         scroll the diff by delta rows (count-aware)
+  mudpuppy.next_hunk()           (count-aware)
+  mudpuppy.prev_hunk()           (count-aware)
+  mudpuppy.move_cursor(delta)    move the diff line cursor (count-aware)
   mudpuppy.set_cursor(n)         move the cursor to absolute row n (clamped)
   mudpuppy.cursor_to_top()
   mudpuppy.cursor_to_bottom()
+  mudpuppy.expand_down() / expand_up() / expand_all()   reveal hidden context
   mudpuppy.toggle_visual()       start/stop a whole-line region selection
   mudpuppy.clear_selection()     leave visual mode (and cancel a delete prompt)
   mudpuppy.add_comment()         comment the cursor line (or the selection)
@@ -463,8 +577,11 @@ Actions (call these from inside a binding or hook):
   mudpuppy.delete_comment()      delete your annotation (confirm with y)
   mudpuppy.cycle_status()        open → resolved → wontfix for the cursor line
 
+The count-aware verbs multiply/repeat by the pending count (see Counts below);
+the absolute verbs (select_file, set_scroll, set_cursor, cursor_to_*) ignore it.
+
 Readers (return tables describing the current state):
-  mudpuppy.state()        { focus, selected, scroll, cursor, show_help,
+  mudpuppy.state()        { focus, selected, scroll, cursor, count, show_help,
                             show_panel, selection = { lo, hi } | nil,
                             turn = { owner, seq, agent_waiting, approved },
                             viewport = { height, total, top } }
@@ -474,6 +591,11 @@ Readers (return tables describing the current state):
                             scope, severity, tag, status, body, reply_to,
                             created_at, updated_at }
   mudpuppy.screen()       the diff rows currently visible on screen
+
+`state()` is a live view, not a snapshot: each field is read on access. Its
+`count` field is the only writable one — `mudpuppy.state().count = 5` sets the
+pending count and `= nil` clears it; assigning any other field is an error.
+(Because there are no real keys, `pairs(mudpuppy.state())` does not enumerate.)
 
 `selected` and `select_file(i)` are 1-based.
 
@@ -489,14 +611,38 @@ Modes
 A key is looked up in the active mode first, then in `global` (except in `help`).
 So a mode-specific binding wins over a global one.
 
-Key names
----------
+Key names & sequences
+---------------------
 A key is a single character (case-sensitive, so "G" is shift-g) or a named key,
 optionally prefixed with modifiers:
   modifiers:  ctrl-  (or c-),  alt-  (or m-)      e.g. "ctrl-d", "c-d"
   named keys: tab, backtab, enter, esc, up, down, left, right, home, end,
               pageup, pagedown, space, backspace, delete
   examples:   "q"   "G"   "?"   "ctrl-d"   "tab"   "pageup"
+
+A binding is keyed on a *sequence* of keys separated by spaces, so multi-key
+chords are first-class. The token "<leader>" expands to the configured leader
+(default "space") at map time, so set the leader first if you change it.
+  "g g"            press g, then g
+  "<leader> t r"   leader, then t, then r
+  "q"              a single key is just a length-1 sequence
+
+Authoring constraint: a sequence that is a prefix of a longer binding cannot
+also be its own terminal binding — the prefix always wins and waits for the next
+key. So don't bind both "g" and "g g"; the "g" binding would be unreachable.
+
+Counts
+------
+A number typed before a motion is an ambient count, applied in one shot by the
+count-aware verbs: "5j" moves five rows, "100G" jumps to row 100. A leading "0"
+(with no count yet) is a normal key, matching vim. The count is readable and
+writable as `mudpuppy.state().count`, so a custom binding can act on it.
+
+The :command palette
+--------------------
+Press ":" to open a fuzzy command palette over every name registered with
+`mudpuppy.command(name, fn)`. Type to filter, Tab to autocomplete to the top
+match, Enter to run, Esc to cancel.
 
 Events
 ------
@@ -654,6 +800,149 @@ index 333..444 100644
             .dispatch(&mut a, KeyChord::parse("esc").unwrap())
             .unwrap();
         assert!(!a.show_help);
+    }
+
+    #[test]
+    fn count_prefix_accumulates_then_scales_and_clears() {
+        let engine = LuaEngine::new(None).unwrap();
+        let mut a = app();
+        a.set_focus("diff");
+        // `5` then `0` builds a count of 50 without running anything.
+        engine
+            .dispatch(&mut a, KeyChord::parse("5").unwrap())
+            .unwrap();
+        engine
+            .dispatch(&mut a, KeyChord::parse("0").unwrap())
+            .unwrap();
+        assert_eq!(a.pending_count, Some(50));
+        assert_eq!(a.cursor, 0, "a count alone moves nothing");
+        // The next motion applies it in one shot (clamped) and clears the count.
+        engine
+            .dispatch(&mut a, KeyChord::parse("j").unwrap())
+            .unwrap();
+        assert_eq!(a.cursor, a.view.rows.len() - 1, "50j ran past the end");
+        assert_eq!(a.pending_count, None);
+    }
+
+    #[test]
+    fn leading_zero_is_a_normal_key_not_a_count() {
+        let engine = LuaEngine::new(None).unwrap();
+        let mut a = app();
+        a.set_focus("diff");
+        // `0` with no count pending is just a key (unbound here) — not a count.
+        engine
+            .dispatch(&mut a, KeyChord::parse("0").unwrap())
+            .unwrap();
+        assert_eq!(a.pending_count, None);
+        assert!(a.pending_seq.is_empty(), "the unbound 0 missed and cleared");
+    }
+
+    #[test]
+    fn sequence_waits_on_a_prefix_then_runs_the_exact_match() {
+        let engine = LuaEngine::new(None).unwrap();
+        let mut a = app();
+        a.set_focus("diff");
+        a.cursor = 1;
+        // `g` is a strict prefix of `g g`: it waits, running nothing.
+        engine
+            .dispatch(&mut a, KeyChord::parse("g").unwrap())
+            .unwrap();
+        assert_eq!(a.pending_seq.len(), 1, "g waits for more keys");
+        assert_eq!(a.cursor, 1, "nothing ran on the prefix");
+        // The second `g` completes `g g` → jump to top.
+        engine
+            .dispatch(&mut a, KeyChord::parse("g").unwrap())
+            .unwrap();
+        assert_eq!(a.cursor, 0);
+        assert!(a.pending_seq.is_empty());
+    }
+
+    #[test]
+    fn a_dead_sequence_is_discarded_on_a_miss() {
+        let engine = LuaEngine::new(None).unwrap();
+        let mut a = app();
+        a.set_focus("diff");
+        a.cursor = 1;
+        engine
+            .dispatch(&mut a, KeyChord::parse("g").unwrap())
+            .unwrap();
+        // `g x` matches nothing: the sequence is dropped, cursor untouched.
+        engine
+            .dispatch(&mut a, KeyChord::parse("x").unwrap())
+            .unwrap();
+        assert!(a.pending_seq.is_empty());
+        assert_eq!(a.cursor, 1);
+    }
+
+    #[test]
+    fn leader_sequence_runs_a_bound_verb() {
+        let engine = LuaEngine::new(None).unwrap();
+        let mut a = app();
+        // `<leader> a` (Space a) toggles the annotations panel.
+        engine
+            .dispatch(&mut a, KeyChord::parse("space").unwrap())
+            .unwrap();
+        assert_eq!(a.pending_seq.len(), 1, "the leader waits");
+        engine
+            .dispatch(&mut a, KeyChord::parse("a").unwrap())
+            .unwrap();
+        assert!(a.show_panel, "Space a toggled the panel");
+        assert!(a.pending_seq.is_empty());
+    }
+
+    #[test]
+    fn state_count_is_readable_and_writable_from_lua() {
+        // Reading: a binding sees the pending count. Writing: a binding sets it,
+        // and the very next count-aware verb in the same call applies it.
+        let (_dir, path) = config(
+            "mudpuppy.map(\"global\", \"z\", function() print(\"c=\" .. tostring(mudpuppy.state().count)) end)\n\
+             mudpuppy.map(\"diff\", \"w\", function() mudpuppy.state().count = 4; mudpuppy.move_cursor(1) end)\n",
+        );
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        a.set_focus("diff");
+        // Read: `3z` prints the pending count.
+        engine
+            .dispatch(&mut a, KeyChord::parse("3").unwrap())
+            .unwrap();
+        engine
+            .dispatch(&mut a, KeyChord::parse("z").unwrap())
+            .unwrap();
+        assert_eq!(engine.status_message().as_deref(), Some("c=3"));
+        // Write: `w` sets count=4 then moves once → lands four rows down (clamped).
+        let mut a = app();
+        a.set_focus("diff");
+        engine
+            .dispatch(&mut a, KeyChord::parse("w").unwrap())
+            .unwrap();
+        assert_eq!(
+            a.cursor,
+            a.view.rows.len() - 1,
+            "the written count scaled the move"
+        );
+    }
+
+    #[test]
+    fn the_palette_opens_seeded_with_registered_commands() {
+        let engine = LuaEngine::new(None).unwrap();
+        let mut a = app();
+        // `:` opens the palette, seeded with the default command names.
+        engine
+            .dispatch(&mut a, KeyChord::parse(":").unwrap())
+            .unwrap();
+        let palette = a.palette.as_ref().expect("the palette is open");
+        assert!(palette.all.iter().any(|n| n == "release-turn"));
+        assert!(palette.all.iter().any(|n| n == "toggle-panel"));
+    }
+
+    #[test]
+    fn run_command_invokes_a_registered_command() {
+        let engine = LuaEngine::new(None).unwrap();
+        let mut a = app();
+        engine.run_command(&mut a, "help").unwrap();
+        assert!(a.show_help, "the help command toggled the overlay");
+        // An unknown command name is a silent no-op.
+        engine.run_command(&mut a, "no-such-command").unwrap();
     }
 
     #[test]

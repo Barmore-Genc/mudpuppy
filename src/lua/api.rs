@@ -24,39 +24,47 @@
 
 use std::cell::RefCell;
 
-use mlua::{Function, Lua, Result, Scope, Table};
+use mlua::{Function, Lua, Result, Scope, Table, Value};
 
-use super::keys::{KeyChord, Mode};
+use super::keys::{KeyChord, KeySeq, Mode};
 use super::views;
-use super::{Bindings, EventKind, Events};
+use super::{Bindings, Commands, EventKind, Events, Leader};
 use crate::tui::App;
 
-/// Build the persistent `mudpuppy` table with the `map`/`unmap`/`on`
-/// registration functions wired to the shared registries.
-pub fn build_table(lua: &Lua, bindings: Bindings, events: Events) -> Result<Table> {
+/// Build the persistent `mudpuppy` table with the `map`/`unmap`/`on`/`command`/
+/// `leader` registration functions wired to the shared registries.
+pub fn build_table(
+    lua: &Lua,
+    bindings: Bindings,
+    events: Events,
+    commands: Commands,
+    leader: Leader,
+) -> Result<Table> {
     let table = lua.create_table()?;
 
     let b = bindings.clone();
+    let lead = leader.clone();
     table.set(
         "map",
         lua.create_function(move |_, (mode, key, func): (String, String, Function)| {
-            let (mode, chord) = parse_binding(&mode, &key)?;
-            // Last binding for a (mode, chord) wins — that's how a user config
+            let (mode, seq) = parse_binding(&mode, &key, *lead.borrow())?;
+            // Last binding for a (mode, sequence) wins — that's how a user config
             // overrides a core default.
-            b.borrow_mut().insert((mode, chord), func);
+            b.borrow_mut().insert((mode, seq), func);
             Ok(())
         })?,
     )?;
 
     let b = bindings;
+    let lead = leader.clone();
     table.set(
         "unmap",
         lua.create_function(move |_, (mode, key): (String, String)| {
-            let (mode, chord) = parse_binding(&mode, &key)?;
+            let (mode, seq) = parse_binding(&mode, &key, *lead.borrow())?;
             // Remove the binding outright (vs. shadowing it with a no-op), so the
             // key falls back to the Global map — or does nothing if unbound there
             // too. Removing an absent binding is a no-op.
-            b.borrow_mut().remove(&(mode, chord));
+            b.borrow_mut().remove(&(mode, seq));
             Ok(())
         })?,
     )?;
@@ -72,6 +80,27 @@ pub fn build_table(lua: &Lua, bindings: Bindings, events: Events) -> Result<Tabl
         })?,
     )?;
 
+    let c = commands;
+    table.set(
+        "command",
+        lua.create_function(move |_, (name, func): (String, Function)| {
+            // Last registration for a name wins, mirroring `map`.
+            c.borrow_mut().insert(name, func);
+            Ok(())
+        })?,
+    )?;
+
+    let lead = leader;
+    table.set(
+        "leader",
+        lua.create_function(move |_, key: String| {
+            let chord = KeyChord::parse(&key)
+                .ok_or_else(|| mlua::Error::runtime(format!("unparseable leader key {key:?}")))?;
+            *lead.borrow_mut() = chord;
+            Ok(())
+        })?,
+    )?;
+
     Ok(table)
 }
 
@@ -79,9 +108,11 @@ pub fn build_table(lua: &Lua, bindings: Bindings, events: Events) -> Result<Tabl
 /// each borrowing the app through `cell`. The functions stop working when the
 /// surrounding `lua.scope` ends.
 pub fn install_scoped<'scope>(
+    lua: &Lua,
     scope: &'scope Scope<'scope, '_>,
     table: &Table,
     cell: &'scope RefCell<&mut App>,
+    commands: &Commands,
 ) -> Result<()> {
     // --- mutating actions ---------------------------------------------------
 
@@ -190,6 +221,27 @@ pub fn install_scoped<'scope>(
             Ok(())
         })?,
     )?;
+    // Seed the palette with the registered command names (captured here so the
+    // verb can read the live registry).
+    let cmds = commands.clone();
+    table.set(
+        "open_palette",
+        scope.create_function(move |_, ()| {
+            let mut names: Vec<String> = cmds.borrow().keys().cloned().collect();
+            names.sort();
+            cell.borrow_mut().open_palette(names);
+            Ok(())
+        })?,
+    )?;
+    // Move the tree's file selection by `delta` (count-aware), the sequence-era
+    // replacement for the `select_file(selected()+delta)` idiom.
+    table.set(
+        "move_selection",
+        scope.create_function(move |_, delta: i64| {
+            cell.borrow_mut().move_selection(delta);
+            Ok(())
+        })?,
+    )?;
 
     // --- cursor, visual selection, and authoring ----------------------------
 
@@ -280,9 +332,32 @@ pub fn install_scoped<'scope>(
 
     // --- read-only views ----------------------------------------------------
 
+    // `state()` returns a live proxy, not an eager snapshot: an empty table whose
+    // metatable reads fields from `App` on access (`__index`) and writes the few
+    // writable ones back (`__newindex`, erroring on read-only fields). This is
+    // what makes `state().count = n` work while keeping every existing read
+    // (`state().selected`, `.viewport.height`, …) unchanged. `pairs()` won't
+    // enumerate it (there are no real keys), which no binding relies on.
+    let meta = lua.create_table()?;
+    meta.set(
+        "__index",
+        scope.create_function(move |lua, (_, key): (Table, String)| {
+            views::state_field(lua, &cell.borrow(), &key)
+        })?,
+    )?;
+    meta.set(
+        "__newindex",
+        scope.create_function(move |_, (_, key, value): (Table, String, Value)| {
+            views::set_state_field(&mut cell.borrow_mut(), &key, value)
+        })?,
+    )?;
     table.set(
         "state",
-        scope.create_function(move |lua, ()| views::state(lua, &cell.borrow()))?,
+        scope.create_function(move |lua, ()| {
+            let proxy = lua.create_table()?;
+            proxy.set_metatable(Some(meta.clone()));
+            Ok(proxy)
+        })?,
     )?;
     table.set(
         "files",
@@ -304,12 +379,13 @@ pub fn install_scoped<'scope>(
     Ok(())
 }
 
-/// Parse a `(mode, key)` pair into the registry key, mapping bad spellings to a
+/// Parse a `(mode, key)` pair into the registry key — a mode plus a chord
+/// *sequence*, with `<leader>` expanded to `leader` — mapping bad spellings to a
 /// Lua error the config author will see.
-fn parse_binding(mode: &str, key: &str) -> Result<(Mode, KeyChord)> {
+fn parse_binding(mode: &str, key: &str, leader: KeyChord) -> Result<(Mode, KeySeq)> {
     let mode =
         Mode::parse(mode).ok_or_else(|| mlua::Error::runtime(format!("unknown mode {mode:?}")))?;
-    let chord = KeyChord::parse(key)
+    let seq = KeyChord::parse_sequence(key, leader)
         .ok_or_else(|| mlua::Error::runtime(format!("unparseable key {key:?}")))?;
-    Ok((mode, chord))
+    Ok((mode, seq))
 }

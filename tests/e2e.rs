@@ -123,11 +123,12 @@ fn clean_exit_restores_the_terminal() {
 }
 
 /// Config hot-reload over the real binary: the keymap is re-read live when the
-/// config file changes, with no restart. We confirm the default `a` (toggle the
-/// annotations panel) works, then rewrite the config to `unmap` `a` and bind the
-/// panel to `p` instead, and confirm — in the same running process — that `a`
-/// goes dead and `p` takes over. The `print(...)` marker in the new config is our
-/// signal (on the status bar) that the reload has actually landed.
+/// config file changes, with no restart. We confirm the default `Space a`
+/// (toggle the annotations panel) works, then rewrite the config to `unmap` that
+/// leader sequence and bind the panel to `p` instead, and confirm — in the same
+/// running process — that `Space a` goes dead and `p` takes over. The
+/// `print(...)` marker in the new config is our signal (on the status bar) that
+/// the reload has actually landed.
 #[test]
 fn config_hot_reload_rebinds_keys_live() {
     let repo = repo_with_changes();
@@ -146,26 +147,26 @@ fn config_hot_reload_rebinds_keys_live() {
     );
     assert!(session.wait_for_screen("file 1/2", Duration::from_secs(10)));
 
-    // Default binding: `a` opens the annotations panel.
-    session.feed(b"a");
+    // Default binding: `Space a` opens the annotations panel.
+    session.feed(b" a");
     assert!(
         session.wait_for_screen("Annotations", Duration::from_secs(5)),
-        "default `a` did not open the panel; screen:\n{}",
+        "default `Space a` did not open the panel; screen:\n{}",
         session.screen()
     );
     // Close it again so the post-reload checks start from a known (closed) state.
-    session.feed(b"a");
+    session.feed(b" a");
     assert!(
         session.wait_until_absent("Annotations", Duration::from_secs(5)),
-        "default `a` did not close the panel; screen:\n{}",
+        "default `Space a` did not close the panel; screen:\n{}",
         session.screen()
     );
 
-    // Rewrite the config: drop the default `a`, bind the panel to `p`, and print
-    // a marker we can wait on to know the hot-reload has landed.
+    // Rewrite the config: drop the default `Space a`, bind the panel to `p`, and
+    // print a marker we can wait on to know the hot-reload has landed.
     std::fs::write(
         &config,
-        "mudpuppy.unmap(\"global\", \"a\")\n\
+        "mudpuppy.unmap(\"global\", \"<leader> a\")\n\
          mudpuppy.map(\"global\", \"p\", function() mudpuppy.toggle_panel() end)\n\
          print(\"HOTRELOADED\")\n",
     )
@@ -176,11 +177,11 @@ fn config_hot_reload_rebinds_keys_live() {
         session.screen()
     );
 
-    // The old key is now dead: `a` must do nothing.
-    session.feed(b"a");
+    // The old sequence is now dead: `Space a` must do nothing.
+    session.feed(b" a");
     assert!(
         session.absent_after("Annotations", Duration::from_millis(600)),
-        "`a` still toggled the panel after being unmapped; screen:\n{}",
+        "`Space a` still toggled the panel after being unmapped; screen:\n{}",
         session.screen()
     );
 
@@ -242,8 +243,8 @@ fn picker_pulls_in_an_untracked_file() {
         session.screen()
     );
 
-    // Ctrl-P opens the picker; filter to the untracked file, then select it.
-    session.feed(b"\x10");
+    // `Space f` opens the picker; filter to the untracked file, then select it.
+    session.feed(b" f");
     session.feed(b"scratch");
     assert!(
         session.wait_for_screen("scratch_pad.txt", Duration::from_secs(10)),

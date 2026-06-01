@@ -369,8 +369,9 @@ fn wait_blocks_until_the_tui_releases_the_turn() {
         tui.screen()
     );
 
-    // The human releases the turn with `r`; that store write is what wakes `wait`.
-    tui.feed(b"r");
+    // The human releases the turn with `Space t r`; that store write is what
+    // wakes `wait`.
+    tui.feed(b" tr");
 
     let out = child.wait_with_output().expect("wait should exit");
     let stdout = String::from_utf8_lossy(&out.stdout);

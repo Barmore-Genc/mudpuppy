@@ -19,6 +19,7 @@
 //!   contract; the most heavily tested module.
 //! - [`source`] — diff-source providers (local `git`, PR `gh`).
 //! - [`blob`] — full file-content provider (working tree / `git show` / `gh api`).
+//! - `command` — the `:command` palette state + fuzzy filtering over names.
 //! - [`diff`] — hand-rolled unified-diff parser + anchoring/staleness.
 //! - [`highlight`] — syntect syntax highlighting for the diff pane.
 //! - [`lua`] — embedded Luau sandbox: the configurable keymap and event hooks.
@@ -32,6 +33,7 @@
 pub mod agent;
 pub mod blob;
 pub mod cli;
+mod command;
 pub mod diff;
 pub mod domain;
 pub mod highlight;

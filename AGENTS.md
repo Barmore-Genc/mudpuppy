@@ -47,7 +47,8 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 - `session.rs`: repo + target resolution and store-path derivation (resume).
 - `tui/`: the ratatui app — file tree, diff pane, gutter marks, panels, turn release; key presses route through the Lua engine.
 - `picker.rs`: fuzzy-find file picker state + subsequence matcher for the "add any file" overlay.
-- `lua/`: embedded Luau sandbox — the configurable keymap and event hooks. All default bindings live in `lua/core.luau`; the user config is `$MUDPUPPY_CONFIG`, else `$XDG_CONFIG_HOME`/`~/.config/mudpuppy/mudpuppy.luau` (`%APPDATA%` on Windows). Rust keeps only a hardwired Ctrl-C quit.
+- `command.rs`: the `:command` palette state — fuzzy filtering over registered command names (reuses the picker's matcher).
+- `lua/`: embedded Luau sandbox — the configurable keymap and event hooks. Bindings are keyed on key *sequences* (multi-key chords, a `<leader>`, and count prefixes), resolved by a sequence state machine. All default bindings live in `lua/core.luau`; the user config is `$MUDPUPPY_CONFIG`, else `$XDG_CONFIG_HOME`/`~/.config/mudpuppy/mudpuppy.luau` (`%APPDATA%` on Windows). Rust keeps only a hardwired Ctrl-C quit.
 - `domain/`: pure on-disk schema types (`Annotation`, `StateFile`, enums).
 
 `tests/` (end-to-end over the real compiled binary):

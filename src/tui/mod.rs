@@ -179,6 +179,23 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                         if app.handle_picker_key(key) {
                             continue;
                         }
+                        // The command palette captures keys before the engine,
+                        // like the picker. Enter chooses a command, which runs
+                        // through the same scoped machinery as a key binding, so
+                        // diff snapshots around it and fire any change events.
+                        if app.palette.is_some() {
+                            let before = Snapshot::of(app);
+                            app.notice = None;
+                            if let Some(name) = app.handle_palette_key(key) {
+                                engine.run_command(app, &name)?;
+                                if app.should_quit {
+                                    return Ok(());
+                                }
+                            }
+                            let after = Snapshot::of(app);
+                            fire_changes(&engine, app, &before, &after)?;
+                            continue;
+                        }
                         if let Some(chord) = KeyChord::from_event(&key) {
                             let before = Snapshot::of(app);
                             // Clear the prior transient hint on each fresh key so

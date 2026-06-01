@@ -88,7 +88,7 @@ fn visual_mode_selects_an_inclusive_row_span() {
 fn c_comments_the_cursor_line_through_the_composer() {
     let (mut a, _dir) = stored_app();
     cursor_to_new_line(&mut a, 1); // the `use std::io;` context line
-    a.handle_key(key(KeyCode::Char('c')));
+    leader(&mut a, "cc");
     assert!(a.composer.is_some(), "c opens the composer");
     type_body(&mut a, "looks good");
     a.handle_key(ctrl('s'));
@@ -110,7 +110,7 @@ fn c_on_a_selection_writes_a_region() {
     cursor_to_new_line(&mut a, 2);
     a.handle_key(key(KeyCode::Char('v')));
     a.handle_key(key(KeyCode::Char('j'))); // extend over new lines 2..=3
-    a.handle_key(key(KeyCode::Char('c')));
+    leader(&mut a, "cc");
     type_body(&mut a, "this whole block");
     a.handle_key(ctrl('s'));
 
@@ -124,7 +124,7 @@ fn c_on_a_selection_writes_a_region() {
 #[test]
 fn capital_f_comments_the_whole_file() {
     let (mut a, _dir) = stored_app();
-    a.handle_key(key(KeyCode::Char('F')));
+    leader(&mut a, "cf");
     type_body(&mut a, "overall this file needs work");
     a.handle_key(ctrl('s'));
 
@@ -145,7 +145,7 @@ fn capital_r_replies_to_the_annotation_on_the_cursor_line() {
     );
     let (mut a, _dir) = stored_app_with(vec![parent]);
     cursor_to_new_line(&mut a, 1);
-    a.handle_key(key(KeyCode::Char('R')));
+    leader(&mut a, "cr");
     assert!(a.composer.is_some(), "R opens a reply composer");
     type_body(&mut a, "addressed it");
     a.handle_key(ctrl('s'));
@@ -172,7 +172,7 @@ fn e_edits_the_humans_own_annotation() {
     own.body = "first".to_string();
     let (mut a, _dir) = stored_app_with(vec![own]);
     cursor_to_new_line(&mut a, 1);
-    a.handle_key(key(KeyCode::Char('e')));
+    leader(&mut a, "ce");
     assert!(a.composer.is_some(), "e opens the composer prefilled");
     // Append to the prefilled body and save.
     type_body(&mut a, " + more");
@@ -194,7 +194,7 @@ fn e_refuses_to_edit_the_agents_annotation() {
     );
     let (mut a, _dir) = stored_app_with(vec![theirs]);
     cursor_to_new_line(&mut a, 1);
-    a.handle_key(key(KeyCode::Char('e')));
+    leader(&mut a, "ce");
     assert!(a.composer.is_none(), "no composer for the agent's note");
     assert!(a.notice.is_some(), "a hint explains why");
 }
@@ -211,7 +211,7 @@ fn capital_d_deletes_after_a_y_confirmation() {
     );
     let (mut a, _dir) = stored_app_with(vec![own]);
     cursor_to_new_line(&mut a, 1);
-    a.handle_key(key(KeyCode::Char('D')));
+    leader(&mut a, "cd");
     assert_eq!(a.pending_delete.as_deref(), Some("human001"));
     a.handle_key(key(KeyCode::Char('y')));
     assert!(a.pending_delete.is_none());
@@ -230,7 +230,7 @@ fn delete_confirmation_is_cancelled_by_any_other_key() {
     );
     let (mut a, _dir) = stored_app_with(vec![own]);
     cursor_to_new_line(&mut a, 1);
-    a.handle_key(key(KeyCode::Char('D')));
+    leader(&mut a, "cd");
     a.handle_key(key(KeyCode::Char('n')));
     assert!(a.pending_delete.is_none(), "n cancels the prompt");
     assert_eq!(a.annotations.len(), 1, "nothing deleted");
@@ -248,11 +248,11 @@ fn s_cycles_the_status_of_the_cursor_annotation() {
     );
     let (mut a, _dir) = stored_app_with(vec![own]);
     cursor_to_new_line(&mut a, 1);
-    a.handle_key(key(KeyCode::Char('s')));
+    leader(&mut a, "cs");
     assert_eq!(a.annotations[0].status, Status::Resolved);
-    a.handle_key(key(KeyCode::Char('s')));
+    leader(&mut a, "cs");
     assert_eq!(a.annotations[0].status, Status::Wontfix);
-    a.handle_key(key(KeyCode::Char('s')));
+    leader(&mut a, "cs");
     assert_eq!(a.annotations[0].status, Status::Open);
 }
 
@@ -260,7 +260,7 @@ fn s_cycles_the_status_of_the_cursor_annotation() {
 fn comment_on_a_non_line_row_is_a_no_op_with_a_hint() {
     let (mut a, _dir) = stored_app();
     a.cursor = 0; // the hunk header row
-    a.handle_key(key(KeyCode::Char('c')));
+    leader(&mut a, "cc");
     assert!(a.composer.is_none(), "no composer on a hunk header");
     assert!(a.notice.is_some(), "a hint is surfaced");
     assert!(a.annotations.is_empty());
@@ -270,7 +270,7 @@ fn comment_on_a_non_line_row_is_a_no_op_with_a_hint() {
 fn composer_overlay_renders_with_target_and_body() {
     let (mut a, _dir) = stored_app();
     cursor_to_new_line(&mut a, 1);
-    a.handle_key(key(KeyCode::Char('c')));
+    leader(&mut a, "cc");
     type_body(&mut a, "needs a guard here");
     let term = drive(&mut a, 100, 24, &[]);
     let s = screen(&term);
