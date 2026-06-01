@@ -33,17 +33,20 @@ fn cold_launch_renders_local_diff() {
     let repo = repo_with_changes();
     let mut session = Session::launch(repo.path());
 
+    // Settle on the status bar, the last thing painted, so we don't snapshot a
+    // half-drawn first frame (the file name shows in the tree title before the
+    // diff body and status bar land).
     assert!(
-        session.wait_for_screen("a_app.rs", Duration::from_secs(10)),
-        "first paint never showed the modified file; screen was:\n{}",
+        session.wait_for_screen("file 1/2", Duration::from_secs(10)),
+        "first paint never settled; screen was:\n{}",
         session.screen()
     );
     let screen = session.screen();
+    assert!(screen.contains("a_app.rs"), "modified file missing:\n{screen}");
     assert!(
         screen.contains("b_notes.txt"),
         "added file missing:\n{screen}"
     );
-    assert!(screen.contains("file 1/2"), "status bar missing:\n{screen}");
     // A real diff body line from the parsed git output (a deletion near the top
     // of the open file's first hunk).
     assert!(screen.contains("line 05"), "diff body missing:\n{screen}");
