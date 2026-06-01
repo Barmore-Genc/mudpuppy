@@ -1,4 +1,4 @@
-//! mudpuppy — collaborative, turn-based code review between a human and an AI
+//! mudpuppy — collaborative, turn-based code review between a user and an AI
 //! agent, mediated entirely by an on-disk annotation store.
 //!
 //! This crate is the testable core behind the `mudpuppy` binary. The binary
@@ -28,6 +28,7 @@
 //! - [`tui`] — the ratatui application.
 //! - [`agent`] — implementation of the `agent` subcommands.
 //! - [`install`] — `install claude`: writes Claude Code skills to disk.
+//! - [`logging`] — file-logging facility (env-gated) with a test-mockable sink.
 //! - [`cli`] — the clap command tree and top-level dispatch.
 
 pub mod agent;
@@ -38,6 +39,7 @@ pub mod diff;
 pub mod domain;
 pub mod highlight;
 pub mod install;
+pub mod logging;
 pub mod lua;
 mod picker;
 pub mod session;

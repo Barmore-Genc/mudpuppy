@@ -36,7 +36,7 @@ pub struct ParseEnumError {
 #[serde(rename_all = "lowercase")]
 pub enum Author {
     Agent,
-    Human,
+    User,
 }
 
 /// How significant an annotation is.
@@ -72,7 +72,7 @@ pub enum Tag {
 /// Lifecycle state of an annotation.
 ///
 /// `Withdrawn` is a soft retraction: the agent retracted an annotation that the
-/// human had already replied to, so the thread stays coherent (PLAN.md §7).
+/// user had already replied to, so the thread stays coherent (PLAN.md §7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
@@ -111,11 +111,11 @@ impl FromStr for Author {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
             "agent" => Ok(Author::Agent),
-            "human" => Ok(Author::Human),
+            "user" => Ok(Author::User),
             _ => Err(ParseEnumError {
                 kind: "author",
                 value: s.to_string(),
-                expected: "agent, human",
+                expected: "agent, user",
             }),
         }
     }
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn enums_parse_from_cli_strings_case_insensitively() {
         assert_eq!("agent".parse::<Author>().unwrap(), Author::Agent);
-        assert_eq!("HUMAN".parse::<Author>().unwrap(), Author::Human);
+        assert_eq!("USER".parse::<Author>().unwrap(), Author::User);
         assert_eq!("blocker".parse::<Severity>().unwrap(), Severity::Blocker);
         assert_eq!("Left".parse::<Side>().unwrap(), Side::Left);
         assert_eq!("wontfix".parse::<Status>().unwrap(), Status::Wontfix);

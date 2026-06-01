@@ -3,7 +3,7 @@ source: src/tui/tests/rendering.rs
 expression: screen(&term)
 ---
 "┌ Files (7) ──────┌ Help ────────────────────────────────────────────────────────┐─────────────────┐"
-"│M src/alpha.rs  +│mudpuppy — diff viewer                                        │                 │"
+"│M src/alpha.rs  +│mudpuppy — default keymap                                     │                 │"
 "│M src/long.rs  +4│Navigation                                                    │                 │"
 "│M README.md  +1 -│  j / k         move cursor (diff) / selection (tree)         │                 │"
 "│A src/new_module.│  d/u  f/b      half / full page down / up                    │                 │"

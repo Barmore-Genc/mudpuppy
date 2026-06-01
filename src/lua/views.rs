@@ -250,7 +250,7 @@ fn file_status_name(status: FileStatus) -> &'static str {
 fn author_name(author: Author) -> &'static str {
     match author {
         Author::Agent => "agent",
-        Author::Human => "human",
+        Author::User => "user",
     }
 }
 

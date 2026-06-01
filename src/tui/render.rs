@@ -15,7 +15,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::app::{App, Focus, Row};
-use super::composer::Composer;
+use super::composer::{Composer, Mode};
 use crate::command::CommandPalette;
 use crate::diff::{DiffLine, FileStatus, LineKind};
 use crate::domain::{Author, Severity, Side, Status, Tag, Target};
@@ -29,7 +29,7 @@ pub(crate) const MARK: &str = "●";
 /// key-handling pass.
 pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     // On first contact an approval banner claims the top row. It only appears
-    // until the human approves, so an established session lays out exactly as
+    // until the user approves, so an established session lays out exactly as
     // before and its snapshots are unchanged.
     let body = if app.awaiting_approval() {
         let [banner, body] =
@@ -276,7 +276,7 @@ fn render_panel(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The first-contact approval banner (PLAN.md §6): a full-width highlighted row
-/// telling the human an agent wants to collaborate and that releasing the turn
+/// telling the user an agent wants to collaborate and that releasing the turn
 /// (`r`) approves it. Shown only while [`App::awaiting_approval`] holds.
 fn render_approval_banner(frame: &mut Frame, area: Rect) {
     let text = " An agent wants to collaborate on this review — press r to approve and hand it the first turn ";
@@ -333,7 +333,7 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     let mut spans = vec![Span::raw(left)];
 
     // A pending count and/or partial key sequence (`5`, `g`, `Space c`), so the
-    // human sees a multi-key binding building up the way vim's command line does.
+    // user sees a multi-key binding building up the way vim's command line does.
     if let Some(hint) = pending_hint(app) {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
@@ -345,7 +345,7 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
 
-    // Visual-mode selection size and a pending delete confirmation, so the human
+    // Visual-mode selection size and a pending delete confirmation, so the user
     // always sees the mode they're in and what a `y` will remove.
     if let Some((lo, hi)) = app.selection_span() {
         spans.push(Span::raw("  "));
@@ -559,22 +559,48 @@ fn render_composer(frame: &mut Frame, area: Rect, composer: &Composer) {
         Span::raw("  "),
         Span::styled(tag_label, Style::default().fg(Color::Gray)),
     ]));
-    lines.push(Line::raw(""));
+    // Mode indicator, vim-style.
+    let (mode_label, mode_color) = match composer.mode {
+        Mode::Insert => ("-- INSERT --", Color::Green),
+        Mode::Normal => ("-- NORMAL --", Color::Cyan),
+    };
+    lines.push(Line::from(Span::styled(
+        mode_label,
+        Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+    )));
 
-    // Body, with a block caret on the last line so the insertion point is clear.
-    let body_lines: Vec<&str> = composer.body.split('\n').collect();
-    let last = body_lines.len() - 1;
-    for (i, text) in body_lines.iter().enumerate() {
-        let mut spans = vec![Span::raw((*text).to_string())];
-        if i == last {
-            spans.push(Span::styled("█", Style::default().fg(Color::Cyan)));
+    // Body, with a caret on the cursor cell.
+    let caret = Style::default().bg(Color::Cyan).fg(Color::Black);
+    for (i, text) in composer.lines.iter().enumerate() {
+        if i != composer.row {
+            lines.push(Line::raw(text.clone()));
+            continue;
         }
-        lines.push(Line::from(spans));
+        let chars: Vec<char> = text.chars().collect();
+        let before: String = chars[..composer.col.min(chars.len())].iter().collect();
+        let after: String = chars
+            .get(composer.col + 1..)
+            .map(|s| s.iter().collect())
+            .unwrap_or_default();
+        let at = match chars.get(composer.col) {
+            // Reverse-video the character under the cursor.
+            Some(c) => Span::styled(c.to_string(), caret),
+            // Past the end of the line: a block glyph, *not* a reverse-video
+            // space — a whitespace-only line renders as two visual rows under
+            // ratatui's `Wrap`, which would split an empty body's caret onto its
+            // own row away from where typing lands.
+            None => Span::styled("█", Style::default().fg(Color::Cyan)),
+        };
+        lines.push(Line::from(vec![Span::raw(before), at, Span::raw(after)]));
     }
 
     lines.push(Line::raw(""));
+    let footer = match composer.mode {
+        Mode::Insert => "Esc normal  ·  Enter newline  ·  Ctrl-S save  ·  Ctrl-E severity  ·  Ctrl-T tag",
+        Mode::Normal => "Enter save  ·  i/a/o insert  ·  x/dd delete  ·  Esc cancel  ·  Ctrl-E severity  ·  Ctrl-T tag",
+    };
     lines.push(Line::from(Span::styled(
-        "Ctrl-S save  ·  Esc cancel  ·  Ctrl-E severity  ·  Ctrl-T tag  ·  Enter newline",
+        footer,
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -591,12 +617,18 @@ fn render_composer(frame: &mut Frame, area: Rect, composer: &Composer) {
 ///
 /// Kept compact (cyan section headers, no blank separators) so the whole list —
 /// including the closing hint — fits within a short, 24-row terminal.
+///
+/// TODO: this list is hand-written and only describes the *default* keymap, so it
+/// silently drifts once a user rebinds anything in their config. We need to
+/// generate it from the live binding registry instead — likely by attaching an
+/// optional description to each `m.map`/`m.command` and rendering those. Labelled
+/// "default keymap" in the meantime so it doesn't claim to be authoritative.
 fn render_help(frame: &mut Frame, area: Rect) {
     let section =
         |name: &'static str| Line::from(Span::styled(name, Style::default().fg(Color::Cyan)));
     let text = vec![
         Line::from(Span::styled(
-            "mudpuppy — diff viewer",
+            "mudpuppy — default keymap",
             Style::default().add_modifier(Modifier::BOLD),
         )),
         section("Navigation"),
@@ -801,7 +833,7 @@ fn severity_word(severity: Severity) -> &'static str {
 fn author_word(author: Author) -> &'static str {
     match author {
         Author::Agent => "agent",
-        Author::Human => "human",
+        Author::User => "user",
     }
 }
 

@@ -185,12 +185,12 @@ fn replies_thread_and_cancel_hard_deletes() {
 }
 
 #[test]
-fn agent_cannot_cancel_the_humans_annotation() {
+fn agent_cannot_cancel_the_users_annotation() {
     let repo = repo_with_changes();
     let data = tempfile::tempdir().unwrap();
     let (repo, data) = (repo.path(), data.path());
 
-    // Create the store via a normal agent add, then inject a *human* annotation
+    // Create the store via a normal agent add, then inject a *user* annotation
     // directly — standing in for one the TUI wrote.
     let (_, _, ok) = run(
         repo,
@@ -215,15 +215,15 @@ fn agent_cannot_cancel_the_humans_annotation() {
         .as_array_mut()
         .unwrap()
         .push(serde_json::json!({
-            "id": "human001",
-            "author": "human",
+            "id": "user0001",
+            "author": "user",
             "file": "a_app.rs",
             "line": 1,
             "side": "RIGHT",
             "severity": "warning",
             "tag": null,
             "status": "open",
-            "body": "human note",
+            "body": "user note",
             "reply_to": null,
             "created_at": "2026-05-28T12:00:00Z",
             "updated_at": "2026-05-28T12:00:00Z"
@@ -234,16 +234,16 @@ fn agent_cannot_cancel_the_humans_annotation() {
     let (_, stderr, ok) = run(
         repo,
         data,
-        &["agent", "comment", "cancel", "--id", "human001"],
+        &["agent", "comment", "cancel", "--id", "user0001"],
     );
-    assert!(!ok, "agent must not cancel the human's annotation");
-    assert!(stderr.contains("human's annotation"), "stderr: {stderr}");
+    assert!(!ok, "agent must not cancel the user's annotation");
+    assert!(stderr.contains("user's annotation"), "stderr: {stderr}");
 
     // But a status change (resolve) is allowed on either author's annotation.
     let (_, _, ok) = run(
         repo,
         data,
-        &["agent", "comment", "resolve", "--id", "human001"],
+        &["agent", "comment", "resolve", "--id", "user0001"],
     );
     assert!(ok, "resolving any annotation is allowed");
 }
@@ -369,7 +369,7 @@ fn wait_blocks_until_the_tui_releases_the_turn() {
         tui.screen()
     );
 
-    // The human releases the turn with `Space t r`; that store write is what
+    // The user releases the turn with `Space t r`; that store write is what
     // wakes `wait`.
     tui.feed(b" tr");
 

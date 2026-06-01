@@ -1,10 +1,10 @@
-//! The human's annotation mutations, authored from inside the viewer.
+//! The user's annotation mutations, authored from inside the viewer.
 //!
 //! Each verb maps the cursor (or the visual selection) to an anchor, then writes
 //! through [`store::update`] — the only safe path, since it reloads inside the
 //! lock and merges by id (PLAN.md §4) — and calls [`App::reload`] to refresh in
 //! place. Authoring mirrors the agent's semantics in `agent.rs`, but stamps
-//! [`Author::Human`]. The composer (`composer.rs`) drives the create/edit verbs;
+//! [`Author::User`]. The composer (`composer.rs`) drives the create/edit verbs;
 //! delete and status changes act on the annotation anchored to the cursor line.
 
 use anyhow::{bail, Context, Result};
@@ -125,7 +125,7 @@ impl App {
         }
     }
 
-    /// Create a line or region annotation authored by the human.
+    /// Create a line or region annotation authored by the user.
     pub(crate) fn add_annotation(
         &mut self,
         side: Side,
@@ -139,7 +139,7 @@ impl App {
         let now = Timestamp::now();
         let annotation = Annotation {
             id: Annotation::new_id(),
-            author: Author::Human,
+            author: Author::User,
             file,
             line,
             end_line,
@@ -171,7 +171,7 @@ impl App {
         let now = Timestamp::now();
         let annotation = Annotation {
             id: Annotation::new_id(),
-            author: Author::Human,
+            author: Author::User,
             file,
             line: 0,
             end_line: None,
@@ -207,7 +207,7 @@ impl App {
                 .with_context(|| format!("reply target `{parent}` not found"))?;
             let annotation = Annotation {
                 id: Annotation::new_id(),
-                author: Author::Human,
+                author: Author::User,
                 file: p.file.clone(),
                 line: p.line,
                 end_line: p.end_line,
@@ -226,7 +226,7 @@ impl App {
         });
     }
 
-    /// Revise the human's own annotation in place. Guards against editing the
+    /// Revise the user's own annotation in place. Guards against editing the
     /// agent's annotations.
     pub(crate) fn edit_annotation(
         &mut self,
@@ -240,7 +240,7 @@ impl App {
             let a = s
                 .get_mut(&id)
                 .with_context(|| format!("no annotation with id `{id}`"))?;
-            if a.author != Author::Human {
+            if a.author != Author::User {
                 bail!("`{id}` is the agent's annotation; you can only edit your own");
             }
             a.body = body;
@@ -251,7 +251,7 @@ impl App {
         });
     }
 
-    /// Delete the human's own annotation: hard-delete when nothing replies to it,
+    /// Delete the user's own annotation: hard-delete when nothing replies to it,
     /// else soft-retract to `withdrawn` so a thread the agent replied to stays
     /// coherent (the same rule as `agent comment cancel`).
     pub(crate) fn delete_annotation(&mut self, id: String) {
@@ -259,7 +259,7 @@ impl App {
         self.mutate_store(move |s| {
             match s.get(&id) {
                 None => bail!("no annotation with id `{id}`"),
-                Some(a) if a.author != Author::Human => {
+                Some(a) if a.author != Author::User => {
                     bail!("`{id}` is the agent's annotation; you can only delete your own")
                 }
                 Some(_) => {}

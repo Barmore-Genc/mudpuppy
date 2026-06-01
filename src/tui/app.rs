@@ -248,7 +248,7 @@ pub(crate) struct App {
     pub(crate) view: FileView,
     /// Top visible row of the diff pane.
     pub(crate) scroll: usize,
-    /// Focused row index into `view.rows` — the line the human's comment/visual
+    /// Focused row index into `view.rows` — the line the user's comment/visual
     /// verbs act on (GitHub-style cursor). Kept visible via [`App::follow_cursor`].
     pub(crate) cursor: usize,
     /// `Some` while in visual mode: the inclusive selection spans the rows
@@ -431,7 +431,7 @@ impl App {
     }
 
     /// Release the turn back to the agent (PLAN.md §6): bump `seq`, take
-    /// ownership, clear the waiting flag, and record approval (the human's first
+    /// ownership, clear the waiting flag, and record approval (the user's first
     /// release doubles as first-contact approval). The atomic store write is what
     /// wakes an agent blocked in `agent wait`. A no-op when no store is attached.
     pub(crate) fn release_turn(&mut self) {
@@ -454,9 +454,9 @@ impl App {
     }
 
     /// Whether an agent is making first contact: it is blocked in `agent wait`
-    /// (so it has written to this session and is expecting a turn) but the human
+    /// (so it has written to this session and is expecting a turn) but the user
     /// has not yet approved. While this holds the TUI surfaces an approval prompt,
-    /// and the human's first turn-release (`r`) doubles as approval (PLAN.md §6).
+    /// and the user's first turn-release (`r`) doubles as approval (PLAN.md §6).
     /// Once approved a session stays approved, so this is only ever true at the
     /// very start.
     pub(crate) fn awaiting_approval(&self) -> bool {

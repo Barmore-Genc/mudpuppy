@@ -1,11 +1,17 @@
 //! The modal comment composer overlay.
 //!
-//! [`Composer`] is the human's authoring surface: a small text buffer plus a
+//! [`Composer`] is the user's authoring surface: a small text buffer plus a
 //! severity and an optional tag, bound to a [`ComposerTarget`] captured when it
 //! was opened (a line, a region, the whole file, a reply, or an edit). Key input
 //! is captured in Rust before it reaches Lua — the same precedence the picker
 //! uses (see [`App::handle_composer_key`]). On save it calls the matching
 //! `annotate` method; on cancel it just closes.
+//!
+//! Editing is vim-like and modal. The composer opens in [`Mode::Insert`] (cursor
+//! at the end of any prefilled body) so typing works immediately; `Esc` drops to
+//! [`Mode::Normal`], where `Enter` saves, `i`/`a`/`o`/`O` re-enter insert, and the
+//! usual `h`/`j`/`k`/`l`/`x`/`dd` motions edit the buffer. `Ctrl-S` (save),
+//! `Ctrl-E`/`Ctrl-T` (severity/tag) and `Ctrl-J` (newline) work in either mode.
 //!
 //! The composer-opening verbs (`add_comment`, `comment_file`, `reply`,
 //! `edit_comment`) live here too, since they construct the [`Composer`] from the
@@ -29,14 +35,33 @@ pub(crate) enum ComposerTarget {
     File,
     /// A threaded reply under an existing annotation `id`.
     Reply { parent: String },
-    /// An in-place edit of the human's own annotation `id`.
+    /// An in-place edit of the user's own annotation `id`.
     Edit { id: String },
+}
+
+/// Which vim-like editing mode the composer is in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Mode {
+    /// Keys type into the buffer; `Esc` drops to [`Mode::Normal`].
+    Insert,
+    /// Keys are motions/operators; `Enter` saves, `i`/`a`/`o` re-enter insert.
+    Normal,
 }
 
 /// The composer overlay's state.
 pub(crate) struct Composer {
-    /// The markdown body being authored (multi-line; `enter` inserts a newline).
-    pub(crate) body: String,
+    /// The markdown body, split into lines (always at least one, possibly empty);
+    /// joined with `\n` by [`Composer::body`] on save.
+    pub(crate) lines: Vec<String>,
+    /// Cursor row into `lines`.
+    pub(crate) row: usize,
+    /// Cursor column as a *char* offset within `lines[row]` (may equal the line
+    /// length, i.e. one past the last char).
+    pub(crate) col: usize,
+    pub(crate) mode: Mode,
+    /// A `d` operator in [`Mode::Normal`] awaiting its second `d` (the `dd`
+    /// line-delete).
+    pending_d: bool,
     pub(crate) severity: Severity,
     pub(crate) tag: Option<Tag>,
     /// What gets written on save.
@@ -47,15 +72,36 @@ pub(crate) struct Composer {
 
 impl Composer {
     /// A fresh composer for `target` on `file`, defaulting to a `Suggestion` with
-    /// no tag and an empty body.
+    /// no tag and an empty body, ready to type into ([`Mode::Insert`]).
     pub(crate) fn new(target: ComposerTarget, file: String) -> Composer {
         Composer {
-            body: String::new(),
+            lines: vec![String::new()],
+            row: 0,
+            col: 0,
+            mode: Mode::Insert,
+            pending_d: false,
             severity: Severity::Suggestion,
             tag: None,
             target,
             file,
         }
+    }
+
+    /// Replace the buffer with `body`, placing the cursor at the very end. Used to
+    /// prefill an edit so further typing appends, as the old single-`String`
+    /// composer did.
+    fn set_body(&mut self, body: &str) {
+        self.lines = body.split('\n').map(str::to_string).collect();
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.row = self.lines.len() - 1;
+        self.col = self.lines[self.row].chars().count();
+    }
+
+    /// The buffer as a single string, for saving.
+    pub(crate) fn body(&self) -> String {
+        self.lines.join("\n")
     }
 
     /// A one-line summary of what the composer is anchored to, for the header.
@@ -90,49 +136,213 @@ impl Composer {
             Some(Tag::Direction) => None,
         };
     }
+
+    /// Char count of the cursor's line.
+    fn line_len(&self) -> usize {
+        self.lines[self.row].chars().count()
+    }
+
+    /// Byte offset of char index `col` within the cursor's line (its byte length
+    /// when `col` is at or past the end).
+    fn byte_at(&self, col: usize) -> usize {
+        let line = &self.lines[self.row];
+        line.char_indices()
+            .nth(col)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len())
+    }
+
+    // --- Insert-mode edits ---
+
+    fn insert_char(&mut self, ch: char) {
+        let at = self.byte_at(self.col);
+        self.lines[self.row].insert(at, ch);
+        self.col += 1;
+    }
+
+    /// Split the current line at the cursor; the tail becomes a new line below.
+    fn insert_newline(&mut self) {
+        let at = self.byte_at(self.col);
+        let tail = self.lines[self.row].split_off(at);
+        self.lines.insert(self.row + 1, tail);
+        self.row += 1;
+        self.col = 0;
+    }
+
+    /// Delete the char before the cursor, joining with the previous line at a
+    /// line start.
+    fn backspace(&mut self) {
+        if self.col > 0 {
+            let at = self.byte_at(self.col - 1);
+            self.lines[self.row].remove(at);
+            self.col -= 1;
+        } else if self.row > 0 {
+            let line = self.lines.remove(self.row);
+            self.row -= 1;
+            self.col = self.line_len();
+            self.lines[self.row].push_str(&line);
+        }
+    }
+
+    // --- Normal-mode operators ---
+
+    /// `x` — delete the char under the cursor.
+    fn delete_char(&mut self) {
+        if self.col < self.line_len() {
+            let at = self.byte_at(self.col);
+            self.lines[self.row].remove(at);
+            self.clamp_col();
+        }
+    }
+
+    /// `dd` — delete the current line, keeping at least one empty line.
+    fn delete_line(&mut self) {
+        self.lines.remove(self.row);
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.row = self.row.min(self.lines.len() - 1);
+        self.col = 0;
+    }
+
+    // --- Motions ---
+
+    fn move_left(&mut self) {
+        self.col = self.col.saturating_sub(1);
+    }
+
+    fn move_right(&mut self) {
+        if self.col < self.line_len() {
+            self.col += 1;
+        }
+    }
+
+    fn move_up(&mut self) {
+        if self.row > 0 {
+            self.row -= 1;
+            self.clamp_col();
+        }
+    }
+
+    fn move_down(&mut self) {
+        if self.row + 1 < self.lines.len() {
+            self.row += 1;
+            self.clamp_col();
+        }
+    }
+
+    /// Keep the cursor column within the current line after a vertical move or a
+    /// delete.
+    fn clamp_col(&mut self) {
+        self.col = self.col.min(self.line_len());
+    }
+
+    // --- Insert-mode entry points ---
+
+    fn enter_insert_after(&mut self) {
+        if self.col < self.line_len() {
+            self.col += 1;
+        }
+        self.mode = Mode::Insert;
+    }
+
+    /// `o` / `O` — open an empty line below / above and start inserting on it.
+    fn open_line(&mut self, below: bool) {
+        let at = if below { self.row + 1 } else { self.row };
+        self.lines.insert(at, String::new());
+        self.row = at;
+        self.col = 0;
+        self.mode = Mode::Insert;
+    }
+
+    /// Handle one key in [`Mode::Normal`]. `Enter` (save) and `Esc` (cancel) are
+    /// not here — they need [`App`] and are handled by the caller.
+    fn normal_key(&mut self, ev: KeyEvent) {
+        // A pending `d` only pairs with a second `d`; any other key abandons it.
+        if std::mem::take(&mut self.pending_d) {
+            if matches!(ev.code, KeyCode::Char('d')) {
+                self.delete_line();
+            }
+            return;
+        }
+        match ev.code {
+            KeyCode::Char('i') => self.mode = Mode::Insert,
+            KeyCode::Char('a') => self.enter_insert_after(),
+            KeyCode::Char('A') => {
+                self.col = self.line_len();
+                self.mode = Mode::Insert;
+            }
+            KeyCode::Char('I') => {
+                self.col = 0;
+                self.mode = Mode::Insert;
+            }
+            KeyCode::Char('o') => self.open_line(true),
+            KeyCode::Char('O') => self.open_line(false),
+            KeyCode::Char('h') | KeyCode::Left => self.move_left(),
+            KeyCode::Char('l') | KeyCode::Right => self.move_right(),
+            KeyCode::Char('k') | KeyCode::Up => self.move_up(),
+            KeyCode::Char('j') | KeyCode::Down => self.move_down(),
+            KeyCode::Char('0') | KeyCode::Home => self.col = 0,
+            KeyCode::Char('$') | KeyCode::End => self.col = self.line_len(),
+            KeyCode::Char('x') => self.delete_char(),
+            KeyCode::Char('d') => self.pending_d = true,
+            _ => {}
+        }
+    }
 }
 
 impl App {
     /// Feed one key event to the open composer. Returns `true` if it was consumed
     /// (the composer was open); `false` lets the caller route the key elsewhere.
     ///
-    /// Mirrors `handle_picker_key`: captured in Rust before Lua. `Esc` cancels,
-    /// `Ctrl-S` saves, `Ctrl-E`/`Ctrl-T` cycle severity/tag, everything else
-    /// edits the body.
+    /// Mirrors `handle_picker_key`: captured in Rust before Lua. Editing is modal
+    /// (see the module docs): `Ctrl-S` saves, `Ctrl-E`/`Ctrl-T` cycle
+    /// severity/tag and `Ctrl-J` inserts a newline in either mode; otherwise the
+    /// key is routed by the current [`Mode`].
     pub(crate) fn handle_composer_key(&mut self, ev: KeyEvent) -> bool {
         let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
-        if self.composer.is_none() {
+        let Some(mode) = self.composer.as_ref().map(|c| c.mode) else {
             return false;
-        }
+        };
+
+        // Chords that work the same in either mode.
         match ev.code {
-            KeyCode::Esc => self.composer = None,
-            KeyCode::Char('s') if ctrl => self.save_composer(),
+            KeyCode::Char('s') if ctrl => {
+                self.save_composer();
+                return true;
+            }
             KeyCode::Char('e') if ctrl => {
-                if let Some(c) = self.composer.as_mut() {
-                    c.cycle_severity();
-                }
+                self.composer.as_mut().unwrap().cycle_severity();
+                return true;
             }
             KeyCode::Char('t') if ctrl => {
-                if let Some(c) = self.composer.as_mut() {
-                    c.cycle_tag();
-                }
+                self.composer.as_mut().unwrap().cycle_tag();
+                return true;
             }
-            KeyCode::Enter => {
-                if let Some(c) = self.composer.as_mut() {
-                    c.body.push('\n');
-                }
-            }
-            KeyCode::Backspace => {
-                if let Some(c) = self.composer.as_mut() {
-                    c.body.pop();
-                }
-            }
-            KeyCode::Char(ch) if !ctrl => {
-                if let Some(c) = self.composer.as_mut() {
-                    c.body.push(ch);
-                }
+            KeyCode::Char('j') if ctrl => {
+                self.composer.as_mut().unwrap().insert_newline();
+                return true;
             }
             _ => {}
+        }
+
+        match mode {
+            Mode::Insert => {
+                let c = self.composer.as_mut().unwrap();
+                match ev.code {
+                    KeyCode::Esc => c.mode = Mode::Normal,
+                    KeyCode::Enter => c.insert_newline(),
+                    KeyCode::Backspace => c.backspace(),
+                    KeyCode::Char(ch) if !ctrl => c.insert_char(ch),
+                    _ => {}
+                }
+            }
+            // `Enter` (save) and `Esc` (cancel) need `App`; the rest is buffer-local.
+            Mode::Normal => match ev.code {
+                KeyCode::Enter => self.save_composer(),
+                KeyCode::Esc => self.composer = None,
+                _ => self.composer.as_mut().unwrap().normal_key(ev),
+            },
         }
         true
     }
@@ -144,12 +354,12 @@ impl App {
         let Some(composer) = self.composer.take() else {
             return;
         };
-        if composer.body.trim().is_empty() {
+        let body = composer.body();
+        if body.trim().is_empty() {
             self.notice = Some("empty comment discarded".to_string());
             return;
         }
         let Composer {
-            body,
             severity,
             tag,
             target,
@@ -207,7 +417,7 @@ impl App {
         }
     }
 
-    /// Open the composer to edit the human's own annotation on the cursor line,
+    /// Open the composer to edit the user's own annotation on the cursor line,
     /// prefilled with its current body/severity/tag. A no-op (with a hint) when
     /// there is no such annotation or it is the agent's.
     pub(crate) fn edit_comment(&mut self) {
@@ -218,13 +428,13 @@ impl App {
         let Some(a) = self.annotations.iter().find(|a| a.id == id) else {
             return;
         };
-        if a.author != crate::domain::Author::Human {
+        if a.author != crate::domain::Author::User {
             self.notice = Some("can only edit your own annotations".to_string());
             return;
         }
         let file = self.current().display_path().to_string();
         let mut composer = Composer::new(ComposerTarget::Edit { id }, file);
-        composer.body = a.body.clone();
+        composer.set_body(&a.body);
         composer.severity = a.severity;
         composer.tag = a.tag;
         self.composer = Some(composer);

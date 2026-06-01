@@ -1,4 +1,4 @@
-// Human authoring: the cursor, the visual selection, and the modal composer
+// User authoring: the cursor, the visual selection, and the modal composer
 // that turn key presses into store writes (comment / region / whole-file /
 // reply / edit / delete / status).
 
@@ -96,7 +96,7 @@ fn c_comments_the_cursor_line_through_the_composer() {
     assert!(a.composer.is_none(), "Ctrl-S closes the composer");
     assert_eq!(a.annotations.len(), 1);
     let note = &a.annotations[0];
-    assert_eq!(note.author, Author::Human);
+    assert_eq!(note.author, Author::User);
     assert_eq!(note.file, "src/alpha.rs");
     assert_eq!(note.line, 1);
     assert_eq!(note.end_line, None);
@@ -155,15 +155,15 @@ fn capital_r_replies_to_the_annotation_on_the_cursor_line() {
         .iter()
         .find(|x| x.reply_to.as_deref() == Some("agent001"))
         .expect("a reply threaded under the agent's note");
-    assert_eq!(reply.author, Author::Human);
+    assert_eq!(reply.author, Author::User);
     assert_eq!(reply.line, 1, "reply inherits the parent's anchor");
 }
 
 #[test]
-fn e_edits_the_humans_own_annotation() {
+fn e_edits_the_users_own_annotation() {
     let mut own = note(
-        "human001",
-        Author::Human,
+        "user0001",
+        Author::User,
         "src/alpha.rs",
         Side::Right,
         1,
@@ -202,8 +202,8 @@ fn e_refuses_to_edit_the_agents_annotation() {
 #[test]
 fn capital_d_deletes_after_a_y_confirmation() {
     let own = note(
-        "human001",
-        Author::Human,
+        "user0001",
+        Author::User,
         "src/alpha.rs",
         Side::Right,
         1,
@@ -212,7 +212,7 @@ fn capital_d_deletes_after_a_y_confirmation() {
     let (mut a, _dir) = stored_app_with(vec![own]);
     cursor_to_new_line(&mut a, 1);
     leader(&mut a, "cd");
-    assert_eq!(a.pending_delete.as_deref(), Some("human001"));
+    assert_eq!(a.pending_delete.as_deref(), Some("user0001"));
     a.handle_key(key(KeyCode::Char('y')));
     assert!(a.pending_delete.is_none());
     assert!(a.annotations.is_empty(), "confirmed delete removes it");
@@ -221,8 +221,8 @@ fn capital_d_deletes_after_a_y_confirmation() {
 #[test]
 fn delete_confirmation_is_cancelled_by_any_other_key() {
     let own = note(
-        "human001",
-        Author::Human,
+        "user0001",
+        Author::User,
         "src/alpha.rs",
         Side::Right,
         1,
@@ -239,8 +239,8 @@ fn delete_confirmation_is_cancelled_by_any_other_key() {
 #[test]
 fn s_cycles_the_status_of_the_cursor_annotation() {
     let own = note(
-        "human001",
-        Author::Human,
+        "user0001",
+        Author::User,
         "src/alpha.rs",
         Side::Right,
         1,
@@ -267,6 +267,137 @@ fn comment_on_a_non_line_row_is_a_no_op_with_a_hint() {
 }
 
 #[test]
+fn enter_saves_from_normal_mode() {
+    let (mut a, _dir) = stored_app();
+    cursor_to_new_line(&mut a, 1);
+    leader(&mut a, "cc");
+    type_body(&mut a, "looks good"); // typed in the default insert mode
+    a.handle_key(key(KeyCode::Esc)); // drop to normal
+    assert!(
+        a.composer.is_some(),
+        "Esc only leaves insert mode, not the composer"
+    );
+    a.handle_key(key(KeyCode::Enter)); // normal-mode Enter saves
+
+    assert!(a.composer.is_none(), "normal-mode Enter saves and closes");
+    assert_eq!(a.annotations.len(), 1);
+    assert_eq!(a.annotations[0].body, "looks good");
+}
+
+#[test]
+fn enter_inserts_a_newline_while_inserting() {
+    let (mut a, _dir) = stored_app();
+    cursor_to_new_line(&mut a, 1);
+    leader(&mut a, "cc");
+    type_body(&mut a, "first");
+    a.handle_key(key(KeyCode::Enter)); // insert-mode Enter is a newline
+    type_body(&mut a, "second");
+    a.handle_key(ctrl('s'));
+    assert_eq!(a.annotations[0].body, "first\nsecond");
+}
+
+#[test]
+fn o_opens_a_line_below_and_resumes_insert() {
+    let (mut a, _dir) = stored_app();
+    cursor_to_new_line(&mut a, 1);
+    leader(&mut a, "cc");
+    type_body(&mut a, "first");
+    a.handle_key(key(KeyCode::Esc)); // normal
+    a.handle_key(key(KeyCode::Char('o'))); // open line below, back to insert
+    type_body(&mut a, "second");
+    a.handle_key(ctrl('s'));
+    assert_eq!(a.annotations[0].body, "first\nsecond");
+}
+
+#[test]
+fn ctrl_j_inserts_a_newline() {
+    let (mut a, _dir) = stored_app();
+    cursor_to_new_line(&mut a, 1);
+    leader(&mut a, "cc");
+    type_body(&mut a, "first");
+    a.handle_key(ctrl('j')); // Ctrl-J inserts a newline in either mode
+    type_body(&mut a, "second");
+    a.handle_key(ctrl('s'));
+    assert_eq!(a.annotations[0].body, "first\nsecond");
+}
+
+#[test]
+fn x_deletes_the_char_under_the_cursor() {
+    let (mut a, _dir) = stored_app();
+    cursor_to_new_line(&mut a, 1);
+    leader(&mut a, "cc");
+    type_body(&mut a, "abc");
+    a.handle_key(key(KeyCode::Esc)); // normal
+    a.handle_key(key(KeyCode::Char('0'))); // start of line
+    a.handle_key(key(KeyCode::Char('x'))); // delete 'a'
+    a.handle_key(key(KeyCode::Enter)); // save
+    assert_eq!(a.annotations[0].body, "bc");
+}
+
+#[test]
+fn dd_deletes_the_current_line() {
+    let (mut a, _dir) = stored_app();
+    cursor_to_new_line(&mut a, 1);
+    leader(&mut a, "cc");
+    type_body(&mut a, "first");
+    a.handle_key(ctrl('j'));
+    type_body(&mut a, "second");
+    a.handle_key(key(KeyCode::Esc)); // normal, cursor on the second line
+    a.handle_key(key(KeyCode::Char('d')));
+    a.handle_key(key(KeyCode::Char('d'))); // dd deletes the current line
+    a.handle_key(key(KeyCode::Enter));
+    assert_eq!(a.annotations[0].body, "first");
+}
+
+#[test]
+fn normal_mode_motions_position_the_insert_point() {
+    let (mut a, _dir) = stored_app();
+    cursor_to_new_line(&mut a, 1);
+    leader(&mut a, "cc");
+    type_body(&mut a, "ac");
+    a.handle_key(key(KeyCode::Esc)); // normal, cursor past the end
+    a.handle_key(key(KeyCode::Char('0'))); // column 0
+    a.handle_key(key(KeyCode::Char('l'))); // onto 'c'
+    a.handle_key(key(KeyCode::Char('i'))); // insert before it
+    type_body(&mut a, "b");
+    a.handle_key(ctrl('s'));
+    assert_eq!(a.annotations[0].body, "abc");
+}
+
+#[test]
+fn backspace_at_line_start_joins_with_the_previous_line() {
+    let (mut a, _dir) = stored_app();
+    cursor_to_new_line(&mut a, 1);
+    leader(&mut a, "cc");
+    type_body(&mut a, "first");
+    a.handle_key(key(KeyCode::Enter)); // newline; cursor at col 0 of line two
+    a.handle_key(key(KeyCode::Backspace)); // joins back onto "first"
+    type_body(&mut a, "more");
+    a.handle_key(ctrl('s'));
+    assert_eq!(a.annotations[0].body, "firstmore");
+}
+
+#[test]
+fn editing_resumes_with_the_cursor_at_the_end() {
+    let mut own = note(
+        "user0001",
+        Author::User,
+        "src/alpha.rs",
+        Side::Right,
+        1,
+        Severity::Info,
+    );
+    own.body = "line one\nline two".to_string();
+    let (mut a, _dir) = stored_app_with(vec![own]);
+    cursor_to_new_line(&mut a, 1);
+    leader(&mut a, "ce");
+    // The prefilled body lands the cursor at the end of the last line.
+    type_body(&mut a, "!");
+    a.handle_key(ctrl('s'));
+    assert_eq!(a.annotations[0].body, "line one\nline two!");
+}
+
+#[test]
 fn composer_overlay_renders_with_target_and_body() {
     let (mut a, _dir) = stored_app();
     cursor_to_new_line(&mut a, 1);
@@ -281,10 +412,39 @@ fn composer_overlay_renders_with_target_and_body() {
 }
 
 #[test]
+fn empty_composer_caret_occupies_a_single_row() {
+    // Regression: an empty body rendered its caret as a reverse-video *space*,
+    // and a whitespace-only line is drawn as two visual rows by ratatui's `Wrap`
+    // — so the caret split off from where typing landed. The empty-line caret is
+    // now a block glyph, which stays on one row directly below the mode label.
+    let (mut a, _dir) = stored_app();
+    cursor_to_new_line(&mut a, 1);
+    leader(&mut a, "cc");
+    let term = drive(&mut a, 100, 24, &[]);
+    let s = screen(&term);
+    let rows: Vec<&str> = s.lines().collect();
+    let insert = rows
+        .iter()
+        .position(|r| r.contains("-- INSERT --"))
+        .expect("insert-mode label");
+    let caret_rows: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.contains('█'))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        caret_rows,
+        vec![insert + 1],
+        "the caret is a single row directly below the mode label:\n{s}"
+    );
+}
+
+#[test]
 fn file_level_header_and_region_gutter_render() {
     let mut file_note = note(
         "file0001",
-        Author::Human,
+        Author::User,
         "src/alpha.rs",
         Side::Right,
         1,

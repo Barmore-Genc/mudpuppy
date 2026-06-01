@@ -28,25 +28,25 @@ impl Target {
     }
 }
 
-/// The turn-protocol block (PLAN.md §6). Coordinates the human/agent handoff
+/// The turn-protocol block (PLAN.md §6). Coordinates the user/agent handoff
 /// over the filesystem with no daemon: `agent wait` records `seq`, flips
-/// `agent_waiting`, and blocks until the human bumps `seq` and flips `owner`.
+/// `agent_waiting`, and blocks until the user bumps `seq` and flips `owner`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Turn {
     /// Whose turn it currently is.
     pub owner: Author,
     /// Monotonic turn counter; incremented when a turn is released.
     pub seq: u64,
-    /// Set by `agent wait` while it is blocked on the human.
+    /// Set by `agent wait` while it is blocked on the user.
     pub agent_waiting: bool,
-    /// First-contact approval; the human's first turn-release sets it.
+    /// First-contact approval; the user's first turn-release sets it.
     pub approved: bool,
 }
 
 impl Default for Turn {
     fn default() -> Self {
         // A fresh session belongs to the agent (it comments first), is not yet
-        // waiting, and has not yet been approved by the human.
+        // waiting, and has not yet been approved by the user.
         Turn {
             owner: Author::Agent,
             seq: 0,

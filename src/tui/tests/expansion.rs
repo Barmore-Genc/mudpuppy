@@ -157,7 +157,7 @@ fn synth_app(annotations: Vec<Annotation>) -> App {
 
 /// An out-of-diff annotation for synthetic-file tests.
 fn out_of_diff_note(id: &str, file: &str, line: u32) -> Annotation {
-    note(id, Author::Human, file, Side::Right, line, Severity::Info)
+    note(id, Author::User, file, Side::Right, line, Severity::Info)
 }
 
 #[test]

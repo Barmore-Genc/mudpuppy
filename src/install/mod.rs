@@ -7,7 +7,7 @@
 //! `implementation_review.md`) and lean on `mudpuppy agent --help` as the
 //! canonical surface rather than restating flags that may drift.
 //!
-//! The human picks the install scope (issue #13):
+//! The user picks the install scope (issue #13):
 //! - [`Location::Project`] — `<repo>/.claude/skills/`, committed and shared.
 //! - [`Location::Local`] — same path, but git-ignored via `.git/info/exclude`
 //!   so it stays on this machine only.

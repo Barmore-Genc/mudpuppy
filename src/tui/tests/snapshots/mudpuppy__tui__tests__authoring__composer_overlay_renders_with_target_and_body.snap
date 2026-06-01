@@ -1,5 +1,5 @@
 ---
-source: src/tui/tests.rs
+source: src/tui/tests/authoring.rs
 expression: s
 ---
 "┌ Files (7) ───────────────┐┌ src/alpha.rs [modified] 1/7 ─────────────────────────────────────────┐"
@@ -10,11 +10,11 @@ expression: s
 "│D old.txt  +0┌ Comment ─────────────────────────────────────────────────────────────┐             │"
 "│A assets/logo│on src/alpha.rs  L1                                                   │             │"
 "│R src/relocat│ suggestion   no tag                                                  │             │"
-"│             │                                                                      │             │"
+"│             │-- INSERT --                                                          │             │"
 "│             │needs a guard here█                                                   │             │"
 "│             │                                                                      │             │"
-"│             │Ctrl-S save  ·  Esc cancel  ·  Ctrl-E severity  ·  Ctrl-T tag  ·      │             │"
-"│             │Enter newline                                                         │             │"
+"│             │Esc normal  ·  Enter newline  ·  Ctrl-S save  ·  Ctrl-E severity  ·   │             │"
+"│             │Ctrl-T tag                                                            │             │"
 "│             │                                                                      │             │"
 "│             │                                                                      │             │"
 "│             │                                                                      │             │"
