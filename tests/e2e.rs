@@ -42,7 +42,10 @@ fn cold_launch_renders_local_diff() {
         session.screen()
     );
     let screen = session.screen();
-    assert!(screen.contains("a_app.rs"), "modified file missing:\n{screen}");
+    assert!(
+        screen.contains("a_app.rs"),
+        "modified file missing:\n{screen}"
+    );
     assert!(
         screen.contains("b_notes.txt"),
         "added file missing:\n{screen}"
