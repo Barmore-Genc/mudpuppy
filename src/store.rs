@@ -134,7 +134,7 @@ impl Drop for LockGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Annotation, Author, Severity, Side, Status};
+    use crate::domain::{AnchorScope, Annotation, Author, Severity, Side, Status};
 
     fn target() -> Target {
         Target::Local {
@@ -149,7 +149,9 @@ mod tests {
             author: Author::Agent,
             file: "src/lib.rs".to_string(),
             line: 10,
+            end_line: None,
             side: Side::Right,
+            scope: AnchorScope::Line,
             severity: Severity::Suggestion,
             tag: None,
             status: Status::Open,
@@ -203,6 +205,26 @@ mod tests {
         let loaded = load(&path).unwrap().unwrap();
         assert_eq!(loaded.annotations.len(), 2);
         assert_eq!(loaded.get("a").unwrap().body, "edited");
+    }
+
+    #[test]
+    fn round_trips_region_and_whole_file_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("annotations.json");
+
+        let mut region = ann("rgn", "spans a region");
+        region.end_line = Some(20);
+        let mut whole = ann("whl", "about the file");
+        whole.scope = AnchorScope::File;
+        update(&path, &target(), |s| {
+            s.upsert(region);
+            s.upsert(whole);
+        })
+        .unwrap();
+
+        let loaded = load(&path).unwrap().unwrap();
+        assert_eq!(loaded.get("rgn").unwrap().end_line, Some(20));
+        assert_eq!(loaded.get("whl").unwrap().scope, AnchorScope::File);
     }
 
     #[test]

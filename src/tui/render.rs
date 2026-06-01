@@ -15,8 +15,9 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::app::{App, Focus, Row};
+use super::composer::Composer;
 use crate::diff::{DiffLine, FileStatus, LineKind};
-use crate::domain::{Author, Severity, Side, Status, Target};
+use crate::domain::{Author, Severity, Side, Status, Tag, Target};
 use crate::highlight::HlLine;
 use crate::picker::{fuzzy_match, Picker};
 
@@ -74,6 +75,10 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     if let Some(picker) = app.picker.as_ref() {
         let area = frame.area();
         render_picker(frame, area, picker);
+    }
+    if let Some(composer) = app.composer.as_ref() {
+        let area = frame.area();
+        render_composer(frame, area, composer);
     }
 }
 
@@ -137,15 +142,46 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == Focus::Diff;
     let marks = app.line_marks();
     let gutter = !marks.is_empty();
-    let file = app.current();
     let height = app.diff_height.max(1);
-    let end = (app.scroll + height).min(app.view.rows.len());
 
-    let lines: Vec<Line> = app.view.rows[app.scroll..end]
-        .iter()
-        .map(|row| row_to_line(row, gutter, &marks))
-        .collect();
+    // File-scoped notes have no gutter line, so they ride a header row at the top
+    // of the pane. It consumes one viewport row, so the diff window shrinks to fit.
+    let file_level = app.file_level_annotations();
+    let mut header: Vec<Line> = Vec::new();
+    if !file_level.is_empty() {
+        let sev = file_level
+            .iter()
+            .map(|a| a.severity)
+            .max()
+            .unwrap_or(Severity::Info);
+        header.push(Line::from(Span::styled(
+            format!("▌ file-level: {}", file_level.len()),
+            Style::default()
+                .fg(severity_color(sev))
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
 
+    let avail = height.saturating_sub(header.len()).max(1);
+    let end = (app.scroll + avail).min(app.view.rows.len());
+    let selection = app.selection_span();
+
+    let mut lines: Vec<Line> = header;
+    for (offset, row) in app.view.rows[app.scroll..end].iter().enumerate() {
+        let idx = app.scroll + offset;
+        let mut line = row_to_line(row, gutter, &marks);
+        // Selection span first, then the cursor row on top, so the cursor stays
+        // distinct inside a highlighted region.
+        if selection.is_some_and(|(lo, hi)| lo <= idx && idx <= hi) {
+            line = line.style(Style::default().bg(Color::Rgb(48, 54, 78)));
+        }
+        if focused && idx == app.cursor {
+            line = line.style(Style::default().bg(Color::Rgb(60, 66, 84)));
+        }
+        lines.push(line);
+    }
+
+    let file = app.current();
     let count = marks.len();
     let title = if count == 0 {
         format!(
@@ -191,6 +227,7 @@ fn render_panel(frame: &mut Frame, area: Rect, app: &App) {
             )));
         }
     } else {
+        let cursor_id = app.annotation_id_at_cursor();
         for a in &here {
             let indent = if a.is_reply() { "  " } else { "" };
             let tag = a
@@ -198,16 +235,21 @@ fn render_panel(frame: &mut Frame, area: Rect, app: &App) {
                 .map(|t| format!(" {}", tag_symbol(t)))
                 .unwrap_or_default();
             let header = format!(
-                "{indent}{MARK} L{} {}{}  {}",
-                a.line,
+                "{indent}{MARK} {} {}{}  {}",
+                panel_anchor(a),
                 author_word(a.author),
                 tag,
                 ann_status(a.status),
             );
-            lines.push(Line::from(vec![Span::styled(
-                header,
-                Style::default().fg(severity_color(a.severity)),
-            )]));
+            // Highlight the annotation anchored to the cursor line so the panel
+            // tracks what reply/edit/delete/status will act on.
+            let mut style = Style::default().fg(severity_color(a.severity));
+            if cursor_id.as_deref() == Some(a.id.as_str()) {
+                style = style
+                    .bg(Color::Rgb(48, 54, 78))
+                    .add_modifier(Modifier::BOLD);
+            }
+            lines.push(Line::from(vec![Span::styled(header, style)]));
             // First body line as a preview; the panel stays scannable.
             if let Some(preview) = a.body.lines().next() {
                 lines.push(Line::from(Span::styled(
@@ -284,6 +326,38 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     let mut spans = vec![Span::raw(left)];
+
+    // Visual-mode selection size and a pending delete confirmation, so the human
+    // always sees the mode they're in and what a `y` will remove.
+    if let Some((lo, hi)) = app.selection_span() {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!(" VISUAL {} lines ", hi - lo + 1),
+            Style::default()
+                .bg(Color::Magenta)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(id) = &app.pending_delete {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!(" delete {id}? y/n "),
+            Style::default()
+                .bg(Color::Red)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    // A transient authoring hint (e.g. "no diff line under the cursor").
+    if let Some(notice) = &app.notice {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!(" {notice} "),
+            Style::default().fg(Color::Black).bg(Color::Yellow),
+        ));
+    }
+
     // When an agent is blocked in `agent wait`, make it impossible to miss and
     // advertise the release key (PLAN.md §6). Before first-contact approval the
     // same `r` press approves, so the hint says so (the banner spells it out).
@@ -396,6 +470,69 @@ fn picker_row(path: &str, positions: &[usize], selected: bool) -> Line<'static> 
     Line::from(spans)
 }
 
+/// The modal comment composer: the target anchor, severity + tag chips, the
+/// body with a visible caret, and a key-hint footer.
+fn render_composer(frame: &mut Frame, area: Rect, composer: &Composer) {
+    let area = centered_rect(72, (area.height * 6 / 10).max(8), area);
+    let block = bordered(" Comment ", true);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("on ", Style::default().fg(Color::DarkGray)),
+        Span::raw(composer.file.clone()),
+        Span::raw("  "),
+        Span::styled(
+            composer.anchor_label(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Severity and tag chips.
+    let tag_label = match composer.tag {
+        Some(t) => format!("tag {}", tag_symbol(t)),
+        None => "no tag".to_string(),
+    };
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {} ", severity_word(composer.severity)),
+            Style::default()
+                .bg(severity_color(composer.severity))
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(tag_label, Style::default().fg(Color::Gray)),
+    ]));
+    lines.push(Line::raw(""));
+
+    // Body, with a block caret on the last line so the insertion point is clear.
+    let body_lines: Vec<&str> = composer.body.split('\n').collect();
+    let last = body_lines.len() - 1;
+    for (i, text) in body_lines.iter().enumerate() {
+        let mut spans = vec![Span::raw((*text).to_string())];
+        if i == last {
+            spans.push(Span::styled("█", Style::default().fg(Color::Cyan)));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "Ctrl-S save  ·  Esc cancel  ·  Ctrl-E severity  ·  Ctrl-T tag  ·  Enter newline",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 /// The centered help overlay listing every keybinding.
 ///
 /// Kept compact (cyan section headers, no blank separators) so the whole list —
@@ -409,26 +546,23 @@ fn render_help(frame: &mut Frame, area: Rect) {
             Style::default().add_modifier(Modifier::BOLD),
         )),
         section("Navigation"),
-        Line::raw("  j / k        down / up (scroll diff, move file selection)"),
-        Line::raw("  Ctrl-d / -u  half page down / up"),
-        Line::raw("  Ctrl-f / -b  full page down / up"),
-        Line::raw("  g / G        top / bottom (or first / last file)"),
+        Line::raw("  j / k        move cursor (diff) / selection (tree)"),
+        Line::raw("  Ctrl-d/u/f/b half / full page down / up"),
+        Line::raw("  g / G        top / bottom (cursor in diff, first/last file)"),
         Line::raw("  } / {        next / prev hunk   (also n / N)"),
         Line::raw("  J / K        next / prev file (from the diff pane)"),
         section("Focus"),
-        Line::raw("  Tab          switch between file tree and diff"),
-        Line::raw("  l / Enter    file tree → diff"),
-        Line::raw("  h            diff → file tree"),
+        Line::raw("  Tab / l / h  toggle · tree → diff · diff → tree"),
         section("Annotations"),
         Line::raw("  a            toggle the annotations panel"),
-        section("Turn"),
+        Line::raw("  v / V  Esc   whole-line selection (diff) · clear"),
+        Line::raw("  c / F        comment line/selection · whole file"),
+        Line::raw("  R / e / D    reply · edit · delete (D confirms with y)"),
+        Line::raw("  s            cycle status (open → resolved → wontfix)"),
+        section("More"),
         Line::raw("  r            release the turn; first release approves"),
-        section("Files"),
         Line::raw("  Ctrl-p       add any file (fuzzy picker)"),
-        section("Other"),
-        Line::raw("  ?            toggle this help"),
-        Line::raw("  q / Ctrl-c   quit"),
-        Line::raw(""),
+        Line::raw("  ? q Ctrl-c   help · quit"),
         Line::from(Span::styled(
             "press ?, q, or Esc to close",
             Style::default().fg(Color::DarkGray),
@@ -598,6 +732,16 @@ fn severity_color(severity: Severity) -> Color {
     }
 }
 
+/// Single-word severity label (composer chip).
+fn severity_word(severity: Severity) -> &'static str {
+    match severity {
+        Severity::Info => "info",
+        Severity::Suggestion => "suggestion",
+        Severity::Warning => "warning",
+        Severity::Blocker => "blocker",
+    }
+}
+
 /// Single-word author label for the annotations panel.
 fn author_word(author: Author) -> &'static str {
     match author {
@@ -616,9 +760,21 @@ fn ann_status(status: Status) -> &'static str {
     }
 }
 
+/// The panel's anchor label for an annotation: `(whole file)`, `L42–50`, or
+/// `L42`.
+fn panel_anchor(a: &crate::domain::Annotation) -> String {
+    use crate::domain::AnchorScope;
+    if a.scope == AnchorScope::File {
+        return "(whole file)".to_string();
+    }
+    match a.end_line {
+        Some(end) if end != a.line => format!("L{}–{}", a.line, end),
+        _ => format!("L{}", a.line),
+    }
+}
+
 /// The one-character tag symbol shown in the panel.
-fn tag_symbol(tag: crate::domain::Tag) -> &'static str {
-    use crate::domain::Tag;
+fn tag_symbol(tag: Tag) -> &'static str {
     match tag {
         Tag::Question => "?",
         Tag::Concern => "!",

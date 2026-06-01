@@ -64,16 +64,18 @@ m.map("tree", "enter", function() m.set_focus("diff") end)
 m.map("tree", "l", function() m.set_focus("diff") end)
 m.map("tree", "right", function() m.set_focus("diff") end)
 
--- ---- Diff: scroll, hunk-hop, and jump files without leaving the pane --------
+-- ---- Diff: move a cursor (GitHub-style), author comments, hunk-hop ----------
 
-m.map("diff", "j", function() m.scroll(1) end)
-m.map("diff", "down", function() m.scroll(1) end)
-m.map("diff", "k", function() m.scroll(-1) end)
-m.map("diff", "up", function() m.scroll(-1) end)
-m.map("diff", "g", function() m.set_scroll(0) end)
-m.map("diff", "home", function() m.set_scroll(0) end)
-m.map("diff", "G", function() m.set_scroll(m.state().viewport.total) end)
-m.map("diff", "end", function() m.set_scroll(m.state().viewport.total) end)
+-- j/k move the line cursor; the viewport follows it. Paging (ctrl-d/-u/-f/-b,
+-- bound in global) scrolls and carries the cursor along.
+m.map("diff", "j", function() m.move_cursor(1) end)
+m.map("diff", "down", function() m.move_cursor(1) end)
+m.map("diff", "k", function() m.move_cursor(-1) end)
+m.map("diff", "up", function() m.move_cursor(-1) end)
+m.map("diff", "g", function() m.cursor_to_top() end)
+m.map("diff", "home", function() m.cursor_to_top() end)
+m.map("diff", "G", function() m.cursor_to_bottom() end)
+m.map("diff", "end", function() m.cursor_to_bottom() end)
 m.map("diff", "}", function() m.next_hunk() end)
 m.map("diff", "n", function() m.next_hunk() end)
 m.map("diff", "{", function() m.prev_hunk() end)
@@ -85,6 +87,20 @@ m.map("diff", "J", function() m.select_file(selected() + 1) end)
 m.map("diff", "K", function() m.select_file(selected() - 1) end)
 m.map("diff", "h", function() m.set_focus("tree") end)
 m.map("diff", "left", function() m.set_focus("tree") end)
+
+-- Visual selection (a whole-line region) and clearing it.
+m.map("diff", "v", function() m.toggle_visual() end)
+m.map("diff", "V", function() m.toggle_visual() end)
+m.map("diff", "esc", function() m.clear_selection() end)
+
+-- Authoring: comment the cursor line / region (c), the whole file (F), reply to
+-- (R), edit (e), delete (D, confirmed with y), and cycle status (s).
+m.map("diff", "c", function() m.add_comment() end)
+m.map("diff", "F", function() m.comment_file() end)
+m.map("diff", "R", function() m.reply() end)
+m.map("diff", "e", function() m.edit_comment() end)
+m.map("diff", "D", function() m.delete_comment() end)
+m.map("diff", "s", function() m.cycle_status() end)
 
 -- ---- Help: the overlay is exclusive; only its own dismissal keys are bound --
 

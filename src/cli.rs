@@ -167,9 +167,15 @@ pub struct AddArgs {
     /// File the line belongs to.
     #[arg(long, value_name = "FILE")]
     pub file: String,
-    /// Line number to anchor to.
+    /// Line number to anchor to (the region start when `--end-line` is given).
     #[arg(long, value_name = "N")]
     pub line: u32,
+    /// Inclusive end line for a whole-line region; omit for a single line.
+    #[arg(long, value_name = "N")]
+    pub end_line: Option<u32>,
+    /// Anchor to the whole file instead of a line (ignores `--line`/`--side`).
+    #[arg(long)]
+    pub whole_file: bool,
     /// Which side of the diff: `right` (added/new) or `left` (removed/old).
     #[arg(long, value_name = "SIDE", default_value = "right")]
     pub side: String,
@@ -254,6 +260,39 @@ mod tests {
         assert_eq!(args.line, 10);
         assert_eq!(args.side, "right"); // default
         assert_eq!(args.body, "hello");
+        assert_eq!(args.end_line, None);
+        assert!(!args.whole_file);
+    }
+
+    #[test]
+    fn parses_region_and_whole_file_flags() {
+        let cli = Cli::try_parse_from([
+            "mudpuppy",
+            "agent",
+            "comment",
+            "add",
+            "--file",
+            "src/lib.rs",
+            "--line",
+            "10",
+            "--end-line",
+            "20",
+            "--whole-file",
+            "--body",
+            "hi",
+        ])
+        .unwrap();
+        let Some(Command::Agent {
+            command:
+                AgentCommand::Comment {
+                    command: CommentCommand::Add(args),
+                },
+        }) = cli.command
+        else {
+            panic!("expected agent comment add");
+        };
+        assert_eq!(args.end_line, Some(20));
+        assert!(args.whole_file);
     }
 
     #[test]

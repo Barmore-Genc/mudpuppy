@@ -3,8 +3,18 @@
 use std::str::FromStr;
 
 use jiff::Timestamp;
+use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Alphanumeric id alphabet. We avoid nanoid's default `-`/`_` so an id can
+/// never start with `-` and be mistaken for a CLI flag (e.g. `--id -X…`).
+const ID_ALPHABET: [char; 62] = [
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S',
+    'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l',
+    'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '0', '1', '2', '3', '4',
+    '5', '6', '7', '8', '9',
+];
 
 /// Failure to parse one of the annotation enums from a CLI string.
 ///
@@ -80,6 +90,20 @@ pub enum Status {
 pub enum Side {
     Right,
     Left,
+}
+
+/// What an annotation is anchored to.
+///
+/// `Line` (the default, and the only shape before this field existed) anchors to
+/// a line or whole-line region on one [`Side`]. `File` anchors to the whole file;
+/// its `line`/`end_line`/`side` are then not meaningful (kept as written, ignored
+/// on display).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AnchorScope {
+    #[default]
+    Line,
+    File,
 }
 
 impl FromStr for Author {
@@ -179,10 +203,18 @@ pub struct Annotation {
     pub author: Author,
     /// Path within the diff.
     pub file: String,
-    /// Anchored line number on `side`.
+    /// Anchored line number on `side` (the region start for a multi-line region).
     pub line: u32,
+    /// Inclusive end line of a whole-line region on `side`; `None` is a single
+    /// line (the only shape before regions existed). Added additively so old
+    /// stores keep loading.
+    #[serde(default)]
+    pub end_line: Option<u32>,
     /// Which side of the diff the line is on.
     pub side: Side,
+    /// What the annotation is anchored to. Absent in old stores → [`AnchorScope::Line`].
+    #[serde(default)]
+    pub scope: AnchorScope,
     /// Significance.
     pub severity: Severity,
     /// Optional intent marker; `None` serializes to `null`.
@@ -202,6 +234,15 @@ pub struct Annotation {
 }
 
 impl Annotation {
+    /// Mint a fresh annotation id: a length-8 [nanoid] over `ID_ALPHABET`.
+    /// Both the agent CLI and the TUI author through this, so the id shape stays
+    /// in one place.
+    ///
+    /// [nanoid]: https://github.com/ai/nanoid
+    pub fn new_id() -> String {
+        nanoid!(8, &ID_ALPHABET)
+    }
+
     /// Whether this annotation is still actionable (neither resolved, declined,
     /// nor withdrawn).
     pub fn is_open(&self) -> bool {
@@ -224,7 +265,9 @@ mod tests {
             author: Author::Agent,
             file: "src/auth.rs".to_string(),
             line: 42,
+            end_line: None,
             side: Side::Right,
+            scope: AnchorScope::Line,
             severity: Severity::Suggestion,
             tag: Some(Tag::Question),
             status: Status::Open,
@@ -262,6 +305,47 @@ mod tests {
         // ...and a missing `tag` key deserializes back to None.
         let back: Annotation = serde_json::from_value(json).unwrap();
         assert_eq!(back.tag, None);
+    }
+
+    #[test]
+    fn absent_end_line_and_scope_default_for_back_compat() {
+        // A store written before regions/whole-file existed has neither key; both
+        // must default so old stores and the existing agent CLI keep working.
+        let json = r#"{
+            "id": "V1StGXR8",
+            "author": "agent",
+            "file": "src/auth.rs",
+            "line": 42,
+            "side": "RIGHT",
+            "severity": "suggestion",
+            "tag": null,
+            "status": "open",
+            "body": "hi",
+            "created_at": "2026-05-28T12:00:00Z",
+            "updated_at": "2026-05-28T12:00:00Z"
+        }"#;
+        let a: Annotation = serde_json::from_str(json).unwrap();
+        assert_eq!(a.end_line, None);
+        assert_eq!(a.scope, AnchorScope::Line);
+    }
+
+    #[test]
+    fn region_and_whole_file_round_trip() {
+        let mut a = sample();
+        a.end_line = Some(50);
+        a.scope = AnchorScope::File;
+        let json = serde_json::to_value(&a).unwrap();
+        assert_eq!(json["end_line"], 50);
+        assert_eq!(json["scope"], "file");
+        let back: Annotation = serde_json::from_value(json).unwrap();
+        assert_eq!(a, back);
+    }
+
+    #[test]
+    fn new_id_is_eight_url_safe_chars() {
+        let id = Annotation::new_id();
+        assert_eq!(id.len(), 8);
+        assert!(id.chars().all(|c| c.is_ascii_alphanumeric()));
     }
 
     #[test]
