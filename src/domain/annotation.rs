@@ -234,7 +234,7 @@ pub struct Annotation {
 }
 
 impl Annotation {
-    /// Mint a fresh annotation id: a length-8 [nanoid] over [`ID_ALPHABET`].
+    /// Mint a fresh annotation id: a length-8 [nanoid] over `ID_ALPHABET`.
     /// Both the agent CLI and the TUI author through this, so the id shape stays
     /// in one place.
     ///
