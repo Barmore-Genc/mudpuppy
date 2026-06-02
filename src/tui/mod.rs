@@ -14,13 +14,13 @@
 //! `notify` coordination bus `agent wait` uses (PLAN.md §9): the event loop
 //! watches the store directory and refreshes in place when a write lands.
 //!
-//! Milestone 3 adds the human's half of the turn protocol (PLAN.md §6): when an
+//! Milestone 3 adds the user's half of the turn protocol (PLAN.md §6): when an
 //! agent is blocked in `agent wait`, the store's `turn.agent_waiting` flag is
 //! set and the status bar surfaces it; pressing `r` **releases the turn** —
 //! bumping `turn.seq`, handing ownership back to the agent, and (on first
 //! contact) recording approval. That store write is what wakes the waiting
-//! agent. On an agent's **first contact** — before the human has approved — a
-//! top banner asks the human to approve, and that first `r` release doubles as
+//! agent. On an agent's **first contact** — before the user has approved — a
+//! top banner asks the user to approve, and that first `r` release doubles as
 //! approval (the same write `agent wait` gates on).
 //!
 //! The diff pane is **syntax-highlighted** via [`crate::highlight`] (syntect):
@@ -179,6 +179,23 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                         if app.handle_picker_key(key) {
                             continue;
                         }
+                        // The command palette captures keys before the engine,
+                        // like the picker. Enter chooses a command, which runs
+                        // through the same scoped machinery as a key binding, so
+                        // diff snapshots around it and fire any change events.
+                        if app.palette.is_some() {
+                            let before = Snapshot::of(app);
+                            app.notice = None;
+                            if let Some(name) = app.handle_palette_key(key) {
+                                engine.run_command(app, &name)?;
+                                if app.should_quit {
+                                    return Ok(());
+                                }
+                            }
+                            let after = Snapshot::of(app);
+                            fire_changes(&engine, app, &before, &after)?;
+                            continue;
+                        }
                         if let Some(chord) = KeyChord::from_event(&key) {
                             let before = Snapshot::of(app);
                             // Clear the prior transient hint on each fresh key so
@@ -307,7 +324,7 @@ fn watch_config(tx: UnboundedSender<()>) -> Vec<RecommendedWatcher> {
 /// wanted. Mirrors `agent wait`'s watch (non-recursive on the store directory,
 /// since atomic writes land as a temp file + rename within it).
 ///
-/// The store directory may not exist yet when the human opens the TUI before any
+/// The store directory may not exist yet when the user opens the TUI before any
 /// annotation is written, so it's created first — both so the watch can attach
 /// and so it's already in place to catch the agent's very first write.
 fn watch_store_dir(dir: &Path, tx: UnboundedSender<()>) -> Result<RecommendedWatcher> {

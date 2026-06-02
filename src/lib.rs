@@ -1,4 +1,4 @@
-//! mudpuppy — collaborative, turn-based code review between a human and an AI
+//! mudpuppy — collaborative, turn-based code review between a user and an AI
 //! agent, mediated entirely by an on-disk annotation store.
 //!
 //! This crate is the testable core behind the `mudpuppy` binary. The binary
@@ -19,6 +19,7 @@
 //!   contract; the most heavily tested module.
 //! - [`source`] — diff-source providers (local `git`, PR `gh`).
 //! - [`blob`] — full file-content provider (working tree / `git show` / `gh api`).
+//! - `command` — the `:command` palette state + fuzzy filtering over names.
 //! - [`diff`] — hand-rolled unified-diff parser + anchoring/staleness.
 //! - [`highlight`] — syntect syntax highlighting for the diff pane.
 //! - [`lua`] — embedded Luau sandbox: the configurable keymap and event hooks.
@@ -27,15 +28,18 @@
 //! - [`tui`] — the ratatui application.
 //! - [`agent`] — implementation of the `agent` subcommands.
 //! - [`install`] — `install claude`: writes Claude Code skills to disk.
+//! - [`logging`] — file-logging facility (env-gated) with a test-mockable sink.
 //! - [`cli`] — the clap command tree and top-level dispatch.
 
 pub mod agent;
 pub mod blob;
 pub mod cli;
+mod command;
 pub mod diff;
 pub mod domain;
 pub mod highlight;
 pub mod install;
+pub mod logging;
 pub mod lua;
 mod picker;
 pub mod session;

@@ -1,9 +1,9 @@
-// The turn protocol (the human's release / first-contact approval, PLAN.md §6)
+// The turn protocol (the user's release / first-contact approval, PLAN.md §6)
 // and live reload (the data path a notify tick drives, PLAN.md §9).
 
 use super::*;
 
-// ---- turn protocol: the human's release (PLAN.md §6) -------------------
+// ---- turn protocol: the user's release (PLAN.md §6) -------------------
 
 #[test]
 fn r_releases_the_turn_back_to_the_agent() {
@@ -14,10 +14,10 @@ fn r_releases_the_turn_back_to_the_agent() {
         head_sha: "abc".to_string(),
     };
 
-    // Seed a store where an agent is blocked waiting on the human at seq 3.
+    // Seed a store where an agent is blocked waiting on the user at seq 3.
     let mut seed = StateFile::new(target.clone());
     seed.turn.agent_waiting = true;
-    seed.turn.owner = Author::Human;
+    seed.turn.owner = Author::User;
     seed.turn.seq = 3;
     store::save(&path, &seed).unwrap();
 
@@ -25,7 +25,7 @@ fn r_releases_the_turn_back_to_the_agent() {
     a.attach_store(path.clone(), store::load(&path).unwrap());
     assert!(a.turn.agent_waiting, "attach loads the turn block");
 
-    a.handle_key(key(KeyCode::Char('r')));
+    leader(&mut a, "tr");
 
     // In memory: ownership handed back, waiting cleared.
     assert_eq!(a.turn.owner, Author::Agent);
@@ -44,7 +44,7 @@ fn r_without_a_store_is_a_harmless_noop() {
     // No store attached (resolution failed / store-less view): `r` must not
     // panic and leaves the default turn untouched.
     let mut a = app();
-    a.handle_key(key(KeyCode::Char('r')));
+    leader(&mut a, "tr");
     assert_eq!(a.turn, Turn::default());
 }
 

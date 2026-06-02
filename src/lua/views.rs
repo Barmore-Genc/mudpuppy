@@ -8,36 +8,73 @@
 //! mediated here, so the sandbox never needs to hand a script a real file handle
 //! or a mutable reference.
 
-use mlua::{Lua, Result, Table};
+use mlua::{IntoLua, Lua, Result, Table, Value};
 
 use crate::diff::{DiffLine, FileDiff, FileStatus, LineKind};
 use crate::domain::{AnchorScope, Annotation, Author, Severity, Side, Status, Tag, Turn};
 use crate::tui::{App, Focus, Row};
 
-/// `mudpuppy.state()` — focus, selection, scroll, overlay flags, the turn block,
-/// and the diff viewport. `selected` is 1-based to match `select_file`.
-pub fn state(lua: &Lua, app: &App) -> Result<Table> {
-    let t = lua.create_table()?;
-    t.set("focus", focus_name(app.focus))?;
-    t.set("selected", app.selected + 1)?;
-    t.set("scroll", app.scroll)?;
-    t.set("cursor", app.cursor)?;
-    if let Some((lo, hi)) = app.selection_span() {
-        let sel = lua.create_table()?;
-        sel.set("lo", lo)?;
-        sel.set("hi", hi)?;
-        t.set("selection", sel)?;
+/// Read one field of the `state()` proxy from the live [`App`] — the `__index`
+/// side of `mudpuppy.state()`. Recognised fields: `focus`, `selected` (1-based,
+/// matching `select_file`), `scroll`, `cursor`, `count` (the pending count, or
+/// `nil`), `show_help`, `show_panel`, `selection` (`{lo, hi}` or `nil`), `turn`,
+/// and `viewport`. The nested `selection`/`turn`/`viewport` are plain read-only
+/// tables. An unknown field is `nil`.
+pub fn state_field(lua: &Lua, app: &App, key: &str) -> Result<Value> {
+    match key {
+        "focus" => focus_name(app.focus).into_lua(lua),
+        "selected" => (app.selected + 1).into_lua(lua),
+        "scroll" => app.scroll.into_lua(lua),
+        "cursor" => app.cursor.into_lua(lua),
+        // The pending count is exposed as a plain number (or nil when unset), so a
+        // binding can read `state().count` and write it back via `__newindex`.
+        "count" => match app.pending_count {
+            Some(n) => n.into_lua(lua),
+            None => Ok(Value::Nil),
+        },
+        "show_help" => app.show_help.into_lua(lua),
+        "show_panel" => app.show_panel.into_lua(lua),
+        "selection" => match app.selection_span() {
+            Some((lo, hi)) => {
+                let sel = lua.create_table()?;
+                sel.set("lo", lo)?;
+                sel.set("hi", hi)?;
+                Value::Table(sel).into_lua(lua)
+            }
+            None => Ok(Value::Nil),
+        },
+        "turn" => Value::Table(turn_table(lua, &app.turn)?).into_lua(lua),
+        "viewport" => {
+            let viewport = lua.create_table()?;
+            viewport.set("height", app.diff_height)?;
+            viewport.set("total", app.view.rows.len())?;
+            viewport.set("top", app.scroll)?;
+            Value::Table(viewport).into_lua(lua)
+        }
+        _ => Ok(Value::Nil),
     }
-    t.set("show_help", app.show_help)?;
-    t.set("show_panel", app.show_panel)?;
-    t.set("turn", turn_table(lua, &app.turn)?)?;
+}
 
-    let viewport = lua.create_table()?;
-    viewport.set("height", app.diff_height)?;
-    viewport.set("total", app.view.rows.len())?;
-    viewport.set("top", app.scroll)?;
-    t.set("viewport", viewport)?;
-    Ok(t)
+/// Write one field of the `state()` proxy back to the live [`App`] — the
+/// `__newindex` side. Only `count` is writable (a number sets the pending count;
+/// `nil` clears it); any other field is read-only and raises a Lua error the
+/// config author sees.
+pub fn set_state_field(app: &mut App, key: &str, value: Value) -> Result<()> {
+    match key {
+        "count" => {
+            app.pending_count = match value {
+                Value::Nil => None,
+                Value::Integer(n) if n > 0 => Some(n as u32),
+                Value::Number(n) if n >= 1.0 => Some(n as u32),
+                // 0, negatives, and non-numbers don't make sense as a count.
+                _ => None,
+            };
+            Ok(())
+        }
+        _ => Err(mlua::Error::runtime(format!(
+            "state().{key} is read-only (only `count` can be assigned)"
+        ))),
+    }
 }
 
 /// `mudpuppy.files()` — the file tree as a 1-based array of `{path, status,
@@ -213,7 +250,7 @@ fn file_status_name(status: FileStatus) -> &'static str {
 fn author_name(author: Author) -> &'static str {
     match author {
         Author::Agent => "agent",
-        Author::Human => "human",
+        Author::User => "user",
     }
 }
 

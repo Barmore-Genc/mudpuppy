@@ -41,13 +41,49 @@ pub struct KeyChord {
     pub alt: bool,
 }
 
+/// A sequence of chords — the lookup key for a binding. A single-key binding is
+/// a length-1 sequence, so the old one-chord-per-binding model is the common
+/// special case. `Vec<KeyChord>` derives `Hash`/`Eq` from `KeyChord`, so it works
+/// directly as a registry key.
+pub type KeySeq = Vec<KeyChord>;
+
 impl KeyChord {
     /// A chord with no modifiers.
-    fn plain(key: Key) -> KeyChord {
+    pub(crate) fn plain(key: Key) -> KeyChord {
         KeyChord {
             key,
             ctrl: false,
             alt: false,
+        }
+    }
+
+    /// Parse a binding spelling into a chord *sequence*: whitespace-separated
+    /// tokens, each parsed with [`parse`](KeyChord::parse), with the `<leader>`
+    /// token expanded to `leader`. A single token (no whitespace) yields a
+    /// length-1 sequence, so existing single-key configs are unchanged. Returns
+    /// `None` if any token is unparseable or the string is empty.
+    pub fn parse_sequence(s: &str, leader: KeyChord) -> Option<KeySeq> {
+        let mut seq = KeySeq::new();
+        for token in s.split_ascii_whitespace() {
+            if token == "<leader>" {
+                seq.push(leader);
+            } else {
+                seq.push(KeyChord::parse(token)?);
+            }
+        }
+        if seq.is_empty() {
+            return None;
+        }
+        Some(seq)
+    }
+
+    /// Whether this chord is an unmodified ASCII digit — a candidate count prefix
+    /// when no sequence is in flight. The `0`-only-with-a-pending-count rule
+    /// (vim's, so a leading `0` stays a normal key) is applied by the caller.
+    pub(crate) fn count_digit(&self) -> Option<u32> {
+        match self.key {
+            Key::Char(c) if !self.ctrl && !self.alt && c.is_ascii_digit() => c.to_digit(10),
+            _ => None,
         }
     }
 
@@ -243,6 +279,45 @@ mod tests {
                 "round trip via {printed:?}"
             );
         }
+    }
+
+    #[test]
+    fn parses_sequences_and_expands_leader() {
+        let space = KeyChord::plain(Key::Char(' '));
+        // A single token is a length-1 sequence.
+        assert_eq!(
+            KeyChord::parse_sequence("g", space),
+            Some(vec![KeyChord::plain(Key::Char('g'))])
+        );
+        // Whitespace-separated tokens become a multi-chord sequence.
+        assert_eq!(
+            KeyChord::parse_sequence("g g", space),
+            Some(vec![
+                KeyChord::plain(Key::Char('g')),
+                KeyChord::plain(Key::Char('g'))
+            ])
+        );
+        // `<leader>` expands to the configured leader chord.
+        assert_eq!(
+            KeyChord::parse_sequence("<leader> t r", space),
+            Some(vec![
+                space,
+                KeyChord::plain(Key::Char('t')),
+                KeyChord::plain(Key::Char('r')),
+            ])
+        );
+        // An unparseable token fails the whole sequence; empty input is None.
+        assert_eq!(KeyChord::parse_sequence("g hyper-x", space), None);
+        assert_eq!(KeyChord::parse_sequence("   ", space), None);
+    }
+
+    #[test]
+    fn count_digit_recognizes_unmodified_digits() {
+        assert_eq!(KeyChord::plain(Key::Char('5')).count_digit(), Some(5));
+        assert_eq!(KeyChord::plain(Key::Char('0')).count_digit(), Some(0));
+        assert_eq!(KeyChord::plain(Key::Char('g')).count_digit(), None);
+        // A modified digit is a chord, not a count.
+        assert_eq!(KeyChord::parse("ctrl-5").unwrap().count_digit(), None);
     }
 
     #[test]

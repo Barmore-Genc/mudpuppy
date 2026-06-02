@@ -9,7 +9,7 @@
 //! they merge-by-id under a lock and never clobber a concurrent writer.
 //!
 //! `wait` is the exception that reads *and waits*: it blocks on store-directory
-//! changes (the `notify` coordination bus) until the human releases the turn,
+//! changes (the `notify` coordination bus) until the user releases the turn,
 //! then prints what they changed (PLAN.md §6). For this milestone the agent
 //! targets **local** changes (the common case); attaching to a live TUI's PR
 //! target arrives later.
@@ -208,7 +208,7 @@ fn edit(
             .get_mut(&id)
             .with_context(|| format!("no annotation with id `{id}`"))?;
         if a.author != Author::Agent {
-            bail!("`{id}` is the human's annotation; the agent can only edit its own");
+            bail!("`{id}` is the user's annotation; the agent can only edit its own");
         }
         if let Some(b) = body {
             a.body = b;
@@ -233,7 +233,7 @@ fn edit(
 /// `agent comment cancel` — retract one of the agent's own annotations.
 ///
 /// Hard-deletes it when nothing replies to it (turn-internal "changed my mind"
-/// noise vanishes); soft-retracts it to `withdrawn` when the human already
+/// noise vanishes); soft-retracts it to `withdrawn` when the user already
 /// replied, so the thread stays coherent (PLAN.md §7).
 fn cancel(id: String) -> Result<()> {
     let session = session()?;
@@ -244,7 +244,7 @@ fn cancel(id: String) -> Result<()> {
             match s.get(&id) {
                 None => bail!("no annotation with id `{id}`"),
                 Some(a) if a.author != Author::Agent => {
-                    bail!("`{id}` is the human's annotation; the agent can only cancel its own")
+                    bail!("`{id}` is the user's annotation; the agent can only cancel its own")
                 }
                 Some(_) => {}
             }
@@ -297,7 +297,7 @@ fn reset() -> Result<()> {
 /// How the block ended, kept separate from the side effects so the caller can
 /// restore state (clear `agent_waiting`) once, regardless of which arm fired.
 enum WaitOutcome {
-    /// The human bumped `seq` — the turn was released back to the agent.
+    /// The user bumped `seq` — the turn was released back to the agent.
     Released,
     /// `--timeout` elapsed before any release.
     TimedOut,
@@ -305,15 +305,15 @@ enum WaitOutcome {
     Interrupted,
 }
 
-/// `agent wait [--timeout S]` — block until the human releases the turn, then
+/// `agent wait [--timeout S]` — block until the user releases the turn, then
 /// print everything they changed in the meantime (PLAN.md §6).
 ///
 /// The flow is serverless, entirely over the store directory: record the current
-/// `turn.seq`, hand the turn to the human (`owner = human`, `agent_waiting =
+/// `turn.seq`, hand the turn to the user (`owner = user`, `agent_waiting =
 /// true`), and snapshot the annotations. Then block on `notify` until the store
-/// shows a higher `seq` *and* the human has approved (first contact gates here
+/// shows a higher `seq` *and* the user has approved (first contact gates here
 /// until they opt in; once approved a session stays approved). While we're
-/// blocked only the human writes, so any difference from the snapshot is
+/// blocked only the user writes, so any difference from the snapshot is
 /// precisely their work. On any exit path we clear `agent_waiting` so a stale
 /// flag never lingers.
 fn wait(timeout: Option<u64>) -> Result<()> {
@@ -334,21 +334,21 @@ fn wait(timeout: Option<u64>) -> Result<()> {
             Ok(())
         }
         WaitOutcome::TimedOut => bail!(
-            "timed out after {}s waiting for the human to release the turn",
+            "timed out after {}s waiting for the user to release the turn",
             timeout.unwrap_or(0)
         ),
-        WaitOutcome::Interrupted => bail!("interrupted while waiting for the human"),
+        WaitOutcome::Interrupted => bail!("interrupted while waiting for the user"),
     }
 }
 
 /// Mark the agent as waiting and capture the pre-wait state: returns the `seq`
 /// we must see exceeded, plus a snapshot of the annotations keyed by id. Creates
-/// the store if it doesn't exist yet, so `wait` works even before the human has
+/// the store if it doesn't exist yet, so `wait` works even before the user has
 /// opened the TUI.
 fn begin_wait(session: &Session) -> Result<(u64, HashMap<String, Annotation>)> {
     store::update(&session.store_path, &session.target, |s| {
         s.turn.agent_waiting = true;
-        s.turn.owner = Author::Human;
+        s.turn.owner = Author::User;
         let snapshot = s
             .annotations
             .iter()
@@ -402,7 +402,7 @@ fn watch_for_release(
             .with_context(|| format!("watching the store directory {}", dir.display()))?;
 
         // Close the race between snapshotting `seq` and the watch attaching: if
-        // the human released in that window, the event is already lost, so check
+        // the user released in that window, the event is already lost, so check
         // once up front.
         if turn_released(&store_path, recorded_seq)? {
             return Ok(WaitOutcome::Released);
@@ -437,8 +437,8 @@ fn watch_for_release(
 }
 
 /// Whether the store now records a turn the agent may take: a `seq` past
-/// `recorded_seq` (the human released) *and* `approved` set. The approval gate
-/// holds the agent at first contact until the human has opted in — the human's
+/// `recorded_seq` (the user released) *and* `approved` set. The approval gate
+/// holds the agent at first contact until the user has opted in — the user's
 /// first turn-release sets both at once, so an established session (already
 /// approved) is unaffected. A missing store (shouldn't happen after
 /// `begin_wait`) reads as "not yet".
@@ -446,7 +446,7 @@ fn turn_released(store_path: &Path, recorded_seq: u64) -> Result<bool> {
     Ok(store::load(store_path)?.is_some_and(|s| s.turn.approved && s.turn.seq > recorded_seq))
 }
 
-/// Render what the human changed during their turn, by diffing the released
+/// Render what the user changed during their turn, by diffing the released
 /// `state` against the pre-wait `snapshot`. Each entry is tagged `[+] new`,
 /// `[~] changed`, or `[-] removed` and followed by the annotation as
 /// [`render`] would show it in `comment list`, so the agent reads one familiar
@@ -539,7 +539,7 @@ fn anchor_desc(a: &Annotation) -> String {
 fn author_word(a: Author) -> &'static str {
     match a {
         Author::Agent => "agent",
-        Author::Human => "human",
+        Author::User => "user",
     }
 }
 
@@ -628,7 +628,7 @@ index 3..4 100644
 
     #[test]
     fn render_shows_region_and_whole_file_anchors() {
-        let base = ann("rgn00001", Author::Human, "spans lines");
+        let base = ann("rgn00001", Author::User, "spans lines");
         let mut region = base.clone();
         region.end_line = Some(50);
         assert!(
@@ -676,18 +676,18 @@ index 3..4 100644
 
     #[test]
     fn render_changes_flags_new_changed_and_removed() {
-        // Snapshot taken before the human's turn: one agent comment.
+        // Snapshot taken before the user's turn: one agent comment.
         let original = ann("aaaaaaaa", Author::Agent, "agent body");
         let snapshot: HashMap<String, Annotation> = [(original.id.clone(), original.clone())]
             .into_iter()
             .collect();
 
-        // After release: the agent comment was edited, the human added a reply,
+        // After release: the agent comment was edited, the user added a reply,
         // and a (snapshot-only) comment was removed.
         let mut edited = original.clone();
         edited.status = Status::Resolved;
         edited.body = "agent body (resolved)".to_string();
-        let reply = ann("bbbbbbbb", Author::Human, "human reply");
+        let reply = ann("bbbbbbbb", Author::User, "user reply");
 
         let mut snapshot = snapshot;
         let removed = ann("cccccccc", Author::Agent, "gone");
@@ -699,7 +699,7 @@ index 3..4 100644
         assert!(text.contains("[~] changed\n[aaaaaaaa]"), "edited: {text}");
         assert!(text.contains("agent body (resolved)"));
         assert!(text.contains("[+] new\n[bbbbbbbb]"), "added: {text}");
-        assert!(text.contains("human reply"));
+        assert!(text.contains("user reply"));
         assert!(text.contains("[-] removed\n[cccccccc]"), "removed: {text}");
     }
 
@@ -721,7 +721,7 @@ index 3..4 100644
         let path = dir.path().join("annotations.json");
         let mut s = state_with(vec![]);
 
-        // First contact: the human bumped `seq` but has not approved yet — the
+        // First contact: the user bumped `seq` but has not approved yet — the
         // agent must stay blocked.
         s.turn.seq = 1;
         s.turn.approved = false;
@@ -731,7 +731,7 @@ index 3..4 100644
             "an unapproved release does not unblock the agent"
         );
 
-        // Approval flips it (the human's first release sets both at once).
+        // Approval flips it (the user's first release sets both at once).
         s.turn.approved = true;
         store::save(&path, &s).unwrap();
         assert!(turn_released(&path, 0).unwrap(), "approved + advanced = go");

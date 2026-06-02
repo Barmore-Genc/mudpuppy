@@ -15,9 +15,11 @@ use std::path::PathBuf;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::blob::{self, BlobSide};
+use crate::command::CommandPalette;
 use crate::diff::{DiffLine, FileDiff, GapPos, LineKind};
 use crate::domain::{AnchorScope, Annotation, Author, Severity, Side, StateFile, Target, Turn};
 use crate::highlight::{Highlighter, HlLine};
+use crate::lua::keys::KeyChord;
 use crate::picker::Picker;
 use crate::tui::composer::Composer;
 use crate::{source, store};
@@ -246,7 +248,7 @@ pub(crate) struct App {
     pub(crate) view: FileView,
     /// Top visible row of the diff pane.
     pub(crate) scroll: usize,
-    /// Focused row index into `view.rows` — the line the human's comment/visual
+    /// Focused row index into `view.rows` — the line the user's comment/visual
     /// verbs act on (GitHub-style cursor). Kept visible via [`App::follow_cursor`].
     pub(crate) cursor: usize,
     /// `Some` while in visual mode: the inclusive selection spans the rows
@@ -299,6 +301,16 @@ pub(crate) struct App {
     /// The working-tree file universe (tracked + untracked, gitignore-respecting),
     /// loaded once on first picker open and cached for the session.
     file_universe: Option<Vec<String>>,
+    /// The `:command` palette overlay; `Some` while it is open. It captures all
+    /// key input until dismissed (same precedence as the picker).
+    pub(crate) palette: Option<CommandPalette>,
+    /// A pending numeric count prefix (`5j`), ambient until a verb consumes it.
+    /// Read/written from Lua via `state().count`; cleared when a sequence
+    /// resolves or misses.
+    pub(crate) pending_count: Option<u32>,
+    /// The partial key sequence awaiting more keys (`g` waiting for `g g`).
+    /// Surfaced in the status bar; cleared on resolution or miss.
+    pub(crate) pending_seq: Vec<KeyChord>,
 }
 
 impl App {
@@ -335,7 +347,16 @@ impl App {
             picker: None,
             picker_added: HashSet::new(),
             file_universe: None,
+            palette: None,
+            pending_count: None,
+            pending_seq: Vec::new(),
         }
+    }
+
+    /// The pending count prefix, defaulting to 1 — the multiplier count-aware
+    /// verbs (`move_cursor`, `scroll`, hunk hops, `move_selection`) apply.
+    pub(crate) fn count(&self) -> u32 {
+        self.pending_count.unwrap_or(1)
     }
 
     /// Attach a resolved store path and its current state (annotations + turn).
@@ -410,7 +431,7 @@ impl App {
     }
 
     /// Release the turn back to the agent (PLAN.md §6): bump `seq`, take
-    /// ownership, clear the waiting flag, and record approval (the human's first
+    /// ownership, clear the waiting flag, and record approval (the user's first
     /// release doubles as first-contact approval). The atomic store write is what
     /// wakes an agent blocked in `agent wait`. A no-op when no store is attached.
     pub(crate) fn release_turn(&mut self) {
@@ -433,9 +454,9 @@ impl App {
     }
 
     /// Whether an agent is making first contact: it is blocked in `agent wait`
-    /// (so it has written to this session and is expecting a turn) but the human
+    /// (so it has written to this session and is expecting a turn) but the user
     /// has not yet approved. While this holds the TUI surfaces an approval prompt,
-    /// and the human's first turn-release (`r`) doubles as approval (PLAN.md §6).
+    /// and the user's first turn-release (`r`) doubles as approval (PLAN.md §6).
     /// Once approved a session stays approved, so this is only ever true at the
     /// very start.
     pub(crate) fn awaiting_approval(&self) -> bool {
@@ -513,10 +534,11 @@ impl App {
         self.view.rows.len().saturating_sub(1)
     }
 
-    /// Scroll the diff by `delta`, carrying the cursor by the same amount so
-    /// paging (ctrl-d/-u/-f/-b) keeps it in view. Both are clamped to their
-    /// ranges independently.
+    /// Scroll the diff by `delta` (scaled by the pending count), carrying the
+    /// cursor by the same amount so paging keeps it in view. Both are clamped to
+    /// their ranges independently.
     pub(crate) fn scroll_by(&mut self, delta: isize) {
+        let delta = delta.saturating_mul(self.count() as isize);
         let next = self.scroll as isize + delta;
         self.scroll = next.clamp(0, self.max_scroll() as isize) as usize;
         let cur = self.cursor as isize + delta;
@@ -535,12 +557,23 @@ impl App {
         self.cursor = cur.clamp(0, self.last_row() as i64) as usize;
     }
 
-    /// Move the cursor by `delta` rows (clamped), nudging the viewport to keep
-    /// it visible.
+    /// Move the cursor by `delta` rows (scaled by the pending count, clamped),
+    /// nudging the viewport to keep it visible.
     pub(crate) fn move_cursor(&mut self, delta: i64) {
+        let delta = delta.saturating_mul(self.count() as i64);
         let next = self.cursor as i64 + delta;
         self.cursor = next.clamp(0, self.last_row() as i64) as usize;
         self.follow_cursor();
+    }
+
+    /// Move the tree's file selection by `delta` (scaled by the pending count),
+    /// clamped to the file list — the count-aware replacement for the old
+    /// `select_file(selected() + delta)` Lua idiom.
+    pub(crate) fn move_selection(&mut self, delta: i64) {
+        let delta = delta.saturating_mul(self.count() as i64);
+        let next = self.selected as i64 + delta;
+        let last = self.files.len().saturating_sub(1) as i64;
+        self.select(next.clamp(0, last) as usize);
     }
 
     /// Move the cursor to an absolute row (clamped), keeping it visible.
@@ -625,21 +658,31 @@ impl App {
         self.show_panel = !self.show_panel;
     }
 
+    /// Jump to the next hunk header below the cursor, repeated by the pending
+    /// count (`3}` skips three hunks ahead). Stops at the last hunk.
     pub(crate) fn next_hunk(&mut self) {
-        if let Some(&s) = self.view.hunk_starts.iter().find(|&&s| s > self.cursor) {
-            self.set_cursor(s as i64);
+        for _ in 0..self.count() {
+            match self.view.hunk_starts.iter().find(|&&s| s > self.cursor) {
+                Some(&s) => self.set_cursor(s as i64),
+                None => break,
+            }
         }
     }
 
+    /// Jump to the previous hunk header above the cursor, repeated by the
+    /// pending count. Stops at the first hunk.
     pub(crate) fn prev_hunk(&mut self) {
-        if let Some(&s) = self
-            .view
-            .hunk_starts
-            .iter()
-            .rev()
-            .find(|&&s| s < self.cursor)
-        {
-            self.set_cursor(s as i64);
+        for _ in 0..self.count() {
+            match self
+                .view
+                .hunk_starts
+                .iter()
+                .rev()
+                .find(|&&s| s < self.cursor)
+            {
+                Some(&s) => self.set_cursor(s as i64),
+                None => break,
+            }
         }
     }
 
@@ -693,6 +736,50 @@ impl App {
             _ => {}
         }
         true
+    }
+
+    /// Open the `:command` palette over `names` (the registered command names,
+    /// pre-sorted by the caller).
+    pub(crate) fn open_palette(&mut self, names: Vec<String>) {
+        self.palette = Some(CommandPalette::new(names));
+    }
+
+    /// Feed one key event to the open palette. Returns `Some(name)` when the user
+    /// chose a command (Enter), which the caller runs through the engine; `None`
+    /// otherwise (the palette stayed open, autocompleted, or closed). A no-op
+    /// returning `None` when the palette isn't open.
+    pub(crate) fn handle_palette_key(&mut self, ev: KeyEvent) -> Option<String> {
+        let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
+        let palette = self.palette.as_mut()?;
+        match ev.code {
+            KeyCode::Esc => self.palette = None,
+            KeyCode::Enter => {
+                let name = palette.current_name().map(str::to_owned);
+                self.palette = None;
+                return name;
+            }
+            // Tab autocompletes the query to the top match.
+            KeyCode::Tab => {
+                if let Some(top) = palette.top_name() {
+                    palette.query = top.to_string();
+                    palette.refilter();
+                }
+            }
+            KeyCode::Backspace => {
+                palette.query.pop();
+                palette.refilter();
+            }
+            KeyCode::Down => palette.move_down(),
+            KeyCode::Up => palette.move_up(),
+            KeyCode::Char('n') if ctrl => palette.move_down(),
+            KeyCode::Char('p') if ctrl => palette.move_up(),
+            KeyCode::Char(c) if !ctrl => {
+                palette.query.push(c);
+                palette.refilter();
+            }
+            _ => {}
+        }
+        None
     }
 
     /// Pull the highlighted path into the file list (selecting it if already
@@ -857,8 +944,6 @@ impl App {
 }
 
 #[cfg(test)]
-use crate::lua::keys::KeyChord;
-#[cfg(test)]
 use crate::lua::LuaEngine;
 
 #[cfg(test)]
@@ -878,8 +963,14 @@ impl App {
         if self.handle_picker_key(ev) {
             return self.should_quit;
         }
-        self.notice = None;
         let engine = LuaEngine::new(None).expect("core.luau loads");
+        if self.palette.is_some() {
+            if let Some(name) = self.handle_palette_key(ev) {
+                engine.run_command(self, &name).expect("run_command");
+            }
+            return self.should_quit;
+        }
+        self.notice = None;
         if let Some(chord) = KeyChord::from_event(&ev) {
             engine.dispatch(self, chord).expect("dispatch");
         }

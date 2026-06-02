@@ -15,7 +15,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
 use super::app::{App, Focus, Row};
-use super::composer::Composer;
+use super::composer::{Composer, Mode};
+use crate::command::CommandPalette;
 use crate::diff::{DiffLine, FileStatus, LineKind};
 use crate::domain::{Author, Severity, Side, Status, Tag, Target};
 use crate::highlight::HlLine;
@@ -28,7 +29,7 @@ pub(crate) const MARK: &str = "●";
 /// key-handling pass.
 pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     // On first contact an approval banner claims the top row. It only appears
-    // until the human approves, so an established session lays out exactly as
+    // until the user approves, so an established session lays out exactly as
     // before and its snapshots are unchanged.
     let body = if app.awaiting_approval() {
         let [banner, body] =
@@ -75,6 +76,10 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     if let Some(picker) = app.picker.as_ref() {
         let area = frame.area();
         render_picker(frame, area, picker);
+    }
+    if let Some(palette) = app.palette.as_ref() {
+        let area = frame.area();
+        render_palette(frame, area, palette);
     }
     if let Some(composer) = app.composer.as_ref() {
         let area = frame.area();
@@ -271,7 +276,7 @@ fn render_panel(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 /// The first-contact approval banner (PLAN.md §6): a full-width highlighted row
-/// telling the human an agent wants to collaborate and that releasing the turn
+/// telling the user an agent wants to collaborate and that releasing the turn
 /// (`r`) approves it. Shown only while [`App::awaiting_approval`] holds.
 fn render_approval_banner(frame: &mut Frame, area: Rect) {
     let text = " An agent wants to collaborate on this review — press r to approve and hand it the first turn ";
@@ -327,7 +332,20 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
 
     let mut spans = vec![Span::raw(left)];
 
-    // Visual-mode selection size and a pending delete confirmation, so the human
+    // A pending count and/or partial key sequence (`5`, `g`, `Space c`), so the
+    // user sees a multi-key binding building up the way vim's command line does.
+    if let Some(hint) = pending_hint(app) {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!(" {hint} "),
+            Style::default()
+                .bg(Color::Blue)
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    // Visual-mode selection size and a pending delete confirmation, so the user
     // always sees the mode they're in and what a `y` will remove.
     if let Some((lo, hi)) = app.selection_span() {
         spans.push(Span::raw("  "));
@@ -470,6 +488,42 @@ fn picker_row(path: &str, positions: &[usize], selected: bool) -> Line<'static> 
     Line::from(spans)
 }
 
+/// Modal overlay for the `:command` palette: a `:`-prefixed query line atop a
+/// fuzzy-ranked list of command names. Mirrors [`render_picker`]; matched
+/// characters and the cursor row are highlighted, and the list scrolls to keep
+/// the selection visible.
+fn render_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) {
+    let area = centered_rect(60, (area.height * 6 / 10).max(6), area);
+    let block = bordered(" Command ", true);
+    let inner = block.inner(area);
+    let list_height = inner.height.saturating_sub(1) as usize;
+    let offset = palette
+        .selected
+        .saturating_sub(list_height.saturating_sub(1));
+
+    let mut lines: Vec<Line> = Vec::with_capacity(inner.height as usize);
+    lines.push(Line::from(vec![
+        Span::styled(":", Style::default().fg(Color::Yellow)),
+        Span::raw(palette.query.clone()),
+    ]));
+    for (row, &cand) in palette
+        .filtered
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(list_height)
+    {
+        let name = &palette.all[cand];
+        let positions = fuzzy_match(&palette.query, name)
+            .map(|m| m.positions)
+            .unwrap_or_default();
+        lines.push(picker_row(name, &positions, row == palette.selected));
+    }
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 /// The modal comment composer: the target anchor, severity + tag chips, the
 /// body with a visible caret, and a key-hint footer.
 fn render_composer(frame: &mut Frame, area: Rect, composer: &Composer) {
@@ -505,22 +559,48 @@ fn render_composer(frame: &mut Frame, area: Rect, composer: &Composer) {
         Span::raw("  "),
         Span::styled(tag_label, Style::default().fg(Color::Gray)),
     ]));
-    lines.push(Line::raw(""));
+    // Mode indicator, vim-style.
+    let (mode_label, mode_color) = match composer.mode {
+        Mode::Insert => ("-- INSERT --", Color::Green),
+        Mode::Normal => ("-- NORMAL --", Color::Cyan),
+    };
+    lines.push(Line::from(Span::styled(
+        mode_label,
+        Style::default().fg(mode_color).add_modifier(Modifier::BOLD),
+    )));
 
-    // Body, with a block caret on the last line so the insertion point is clear.
-    let body_lines: Vec<&str> = composer.body.split('\n').collect();
-    let last = body_lines.len() - 1;
-    for (i, text) in body_lines.iter().enumerate() {
-        let mut spans = vec![Span::raw((*text).to_string())];
-        if i == last {
-            spans.push(Span::styled("█", Style::default().fg(Color::Cyan)));
+    // Body, with a caret on the cursor cell.
+    let caret = Style::default().bg(Color::Cyan).fg(Color::Black);
+    for (i, text) in composer.lines.iter().enumerate() {
+        if i != composer.row {
+            lines.push(Line::raw(text.clone()));
+            continue;
         }
-        lines.push(Line::from(spans));
+        let chars: Vec<char> = text.chars().collect();
+        let before: String = chars[..composer.col.min(chars.len())].iter().collect();
+        let after: String = chars
+            .get(composer.col + 1..)
+            .map(|s| s.iter().collect())
+            .unwrap_or_default();
+        let at = match chars.get(composer.col) {
+            // Reverse-video the character under the cursor.
+            Some(c) => Span::styled(c.to_string(), caret),
+            // Past the end of the line: a block glyph, *not* a reverse-video
+            // space — a whitespace-only line renders as two visual rows under
+            // ratatui's `Wrap`, which would split an empty body's caret onto its
+            // own row away from where typing lands.
+            None => Span::styled("█", Style::default().fg(Color::Cyan)),
+        };
+        lines.push(Line::from(vec![Span::raw(before), at, Span::raw(after)]));
     }
 
     lines.push(Line::raw(""));
+    let footer = match composer.mode {
+        Mode::Insert => "Esc normal  ·  Enter newline  ·  Ctrl-S save  ·  Ctrl-E severity  ·  Ctrl-T tag",
+        Mode::Normal => "Enter save  ·  i/a/o insert  ·  x/dd delete  ·  Esc cancel  ·  Ctrl-E severity  ·  Ctrl-T tag",
+    };
     lines.push(Line::from(Span::styled(
-        "Ctrl-S save  ·  Esc cancel  ·  Ctrl-E severity  ·  Ctrl-T tag  ·  Enter newline",
+        footer,
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -537,32 +617,39 @@ fn render_composer(frame: &mut Frame, area: Rect, composer: &Composer) {
 ///
 /// Kept compact (cyan section headers, no blank separators) so the whole list —
 /// including the closing hint — fits within a short, 24-row terminal.
+///
+/// TODO: this list is hand-written and only describes the *default* keymap, so it
+/// silently drifts once a user rebinds anything in their config. We need to
+/// generate it from the live binding registry instead — likely by attaching an
+/// optional description to each `m.map`/`m.command` and rendering those. Labelled
+/// "default keymap" in the meantime so it doesn't claim to be authoritative.
 fn render_help(frame: &mut Frame, area: Rect) {
     let section =
         |name: &'static str| Line::from(Span::styled(name, Style::default().fg(Color::Cyan)));
     let text = vec![
         Line::from(Span::styled(
-            "mudpuppy — diff viewer",
+            "mudpuppy — default keymap",
             Style::default().add_modifier(Modifier::BOLD),
         )),
         section("Navigation"),
-        Line::raw("  j / k        move cursor (diff) / selection (tree)"),
-        Line::raw("  Ctrl-d/u/f/b half / full page down / up"),
-        Line::raw("  g / G        top / bottom (cursor in diff, first/last file)"),
-        Line::raw("  } / {        next / prev hunk   (also n / N)"),
-        Line::raw("  J / K        next / prev file (from the diff pane)"),
+        Line::raw("  j / k         move cursor (diff) / selection (tree)"),
+        Line::raw("  d/u  f/b      half / full page down / up"),
+        Line::raw("  g g / G       top / bottom (cursor in diff, first/last file)"),
+        Line::raw("  } / { (n/N)   next / prev hunk"),
+        Line::raw("  J / K         next / prev file (from the diff pane)"),
+        Line::raw("  5j  100G      a number prefixes a count"),
         section("Focus"),
-        Line::raw("  Tab / l / h  toggle · tree → diff · diff → tree"),
-        section("Annotations"),
-        Line::raw("  a            toggle the annotations panel"),
-        Line::raw("  v / V  Esc   whole-line selection (diff) · clear"),
-        Line::raw("  c / F        comment line/selection · whole file"),
-        Line::raw("  R / e / D    reply · edit · delete (D confirms with y)"),
-        Line::raw("  s            cycle status (open → resolved → wontfix)"),
+        Line::raw("  Tab / l / h   toggle · tree → diff · diff → tree"),
+        section("Annotations  (Space is the leader)"),
+        Line::raw("  Space a       toggle the annotations panel"),
+        Line::raw("  v / V  Esc    whole-line selection (diff) · clear"),
+        Line::raw("  Space c c/f/r comment line/selection · file · reply"),
+        Line::raw("  Space c e/d/s edit · delete (confirm y) · cycle status"),
         section("More"),
-        Line::raw("  r            release the turn; first release approves"),
-        Line::raw("  Ctrl-p       add any file (fuzzy picker)"),
-        Line::raw("  ? q Ctrl-c   help · quit"),
+        Line::raw("  Space t r     release the turn; first release approves"),
+        Line::raw("  Space f       add any file · Space e/y · + expand context"),
+        Line::raw("  :             command palette"),
+        Line::raw("  ? q Ctrl-c    help · quit"),
         Line::from(Span::styled(
             "press ?, q, or Esc to close",
             Style::default().fg(Color::DarkGray),
@@ -746,7 +833,7 @@ fn severity_word(severity: Severity) -> &'static str {
 fn author_word(author: Author) -> &'static str {
     match author {
         Author::Agent => "agent",
-        Author::Human => "human",
+        Author::User => "user",
     }
 }
 
@@ -780,6 +867,29 @@ fn tag_symbol(tag: Tag) -> &'static str {
         Tag::Concern => "!",
         Tag::Direction => ">",
     }
+}
+
+/// The pending count + partial key sequence as a compact string (`5`, `g`,
+/// `5 g g`, `Space c`), or `None` when nothing is in flight.
+fn pending_hint(app: &App) -> Option<String> {
+    if app.pending_count.is_none() && app.pending_seq.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(n) = app.pending_count {
+        parts.push(n.to_string());
+    }
+    // KeyChord's Display spells space as "space"; capitalize it so the leader
+    // reads as "Space" in the status line.
+    parts.extend(app.pending_seq.iter().map(|c| {
+        let s = c.to_string();
+        if s == "space" {
+            "Space".to_string()
+        } else {
+            s
+        }
+    }));
+    Some(parts.join(" "))
 }
 
 /// Short description of what's under review, for the status bar.

@@ -8,7 +8,7 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 
-/// Terminal UI for collaborative, turn-based code review between a human and an
+/// Terminal UI for collaborative, turn-based code review between a user and an
 /// AI agent.
 ///
 /// With no subcommand, opens the TUI on the current repository. Pass a PR
@@ -88,7 +88,7 @@ pub enum AgentCommand {
         command: CommentCommand,
     },
 
-    /// Block until the human releases the turn, then print everything they
+    /// Block until the user releases the turn, then print everything they
     /// changed since this call. The synchronization primitive of the review
     /// loop (PLAN.md §6).
     Wait {
@@ -106,7 +106,7 @@ pub enum CommentCommand {
     /// Leave a new annotation on a line.
     Add(AddArgs),
 
-    /// List annotations, including the human's replies.
+    /// List annotations, including the user's replies.
     List {
         /// Only annotations that are still open.
         #[arg(long)]
@@ -135,7 +135,7 @@ pub enum CommentCommand {
     },
 
     /// Retract one of the agent's own annotations. Hard-deletes it if it has no
-    /// replies; soft-retracts it to `withdrawn` if the human already replied.
+    /// replies; soft-retracts it to `withdrawn` if the user already replied.
     Cancel {
         #[arg(long, value_name = "ID")]
         id: String,

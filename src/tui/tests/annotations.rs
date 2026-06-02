@@ -17,7 +17,7 @@ fn alpha_notes() -> Vec<Annotation> {
         ),
         note(
             "inf00002",
-            Author::Human,
+            Author::User,
             "src/alpha.rs",
             Side::Right,
             4,
@@ -52,14 +52,19 @@ fn unannotated_file_has_no_gutter_column() {
 
 #[test]
 fn annotations_panel_lists_current_file() {
-    // `a` toggles the panel; it lists alpha.rs's two annotations.
+    // `Space a` toggles the panel; it lists alpha.rs's two annotations.
     let mut a = annotated_app(alpha_notes());
-    let term = drive(&mut a, 100, 24, &[key(KeyCode::Char('a'))]);
+    let term = drive(
+        &mut a,
+        100,
+        24,
+        &[key(KeyCode::Char(' ')), key(KeyCode::Char('a'))],
+    );
     assert!(a.show_panel);
     let text = screen(&term);
     assert!(text.contains("Annotations"));
     assert!(text.contains("L2 agent"));
-    assert!(text.contains("L4 human"));
+    assert!(text.contains("L4 user"));
     insta::assert_snapshot!(text);
 }
 

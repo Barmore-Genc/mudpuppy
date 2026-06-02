@@ -1,10 +1,10 @@
 mudpuppy is a Rust TUI for collaborative, turn-based code review between
-a human and an AI agent. Both human user and AI agent can leave comments attached
+a user and an AI agent. Both user and AI agent can leave comments attached
 to lines of code, then hand over to the other once they are done.
 The rich interface can display uncommitted work, any diff, or Github pull requests.
 
 - mudpuppy is local, working on the same machine as the AI agent, on the machine where the code is checked out.
-- AI is not integrated into mudpuppy, instead it is a tool that both a human and an AI agent interact with.
+- AI is not integrated into mudpuppy, instead it is a tool that both a user and an AI agent interact with.
 
 ## Conventions
 
@@ -47,7 +47,9 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 - `session.rs`: repo + target resolution and store-path derivation (resume).
 - `tui/`: the ratatui app — file tree, diff pane, gutter marks, panels, turn release; key presses route through the Lua engine.
 - `picker.rs`: fuzzy-find file picker state + subsequence matcher for the "add any file" overlay.
-- `lua/`: embedded Luau sandbox — the configurable keymap and event hooks. All default bindings live in `lua/core.luau`; the user config is `$MUDPUPPY_CONFIG`, else `$XDG_CONFIG_HOME`/`~/.config/mudpuppy/mudpuppy.luau` (`%APPDATA%` on Windows). Rust keeps only a hardwired Ctrl-C quit.
+- `command.rs`: the `:command` palette state — fuzzy filtering over registered command names (reuses the picker's matcher).
+- `logging.rs`: env-gated (`MUDPUPPY_LOG`) file logging with a thread-local capture sink for tests; `log_debug!`/`info`/`warn`/`error` macros.
+- `lua/`: embedded Luau sandbox — the configurable keymap and event hooks. Bindings are keyed on key *sequences* (multi-key chords, a `<leader>`, and count prefixes), resolved by a sequence state machine. All default bindings live in `lua/core.luau`; the user config is `$MUDPUPPY_CONFIG`, else `$XDG_CONFIG_HOME`/`~/.config/mudpuppy/mudpuppy.luau` (`%APPDATA%` on Windows). Rust keeps only a hardwired Ctrl-C quit.
 - `domain/`: pure on-disk schema types (`Annotation`, `StateFile`, enums).
 
 `tests/` (end-to-end over the real compiled binary):
