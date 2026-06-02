@@ -40,7 +40,7 @@ mod render;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use app::{App, Focus, Row};
+pub(crate) use app::{App, Focus, Row, Sidebar};
 use render::{render, target_desc};
 
 use std::collections::HashSet;

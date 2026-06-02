@@ -12,12 +12,13 @@ use mlua::{IntoLua, Lua, Result, Table, Value};
 
 use crate::diff::{DiffLine, FileDiff, FileStatus, LineKind};
 use crate::domain::{AnchorScope, Annotation, Author, Severity, Side, Status, Tag, Turn};
-use crate::tui::{App, Focus, Row};
+use crate::tui::{App, Focus, Row, Sidebar};
 
 /// Read one field of the `state()` proxy from the live [`App`] — the `__index`
 /// side of `mudpuppy.state()`. Recognised fields: `focus`, `selected` (1-based,
 /// matching `select_file`), `scroll`, `cursor`, `count` (the pending count, or
-/// `nil`), `show_help`, `show_panel`, `selection` (`{lo, hi}` or `nil`), `turn`,
+/// `nil`), `show_help`, `sidebar` (`"files"`/`"annotations"`), `selection`
+/// (`{lo, hi}` or `nil`), `turn`,
 /// and `viewport`. The nested `selection`/`turn`/`viewport` are plain read-only
 /// tables. An unknown field is `nil`.
 pub fn state_field(lua: &Lua, app: &App, key: &str) -> Result<Value> {
@@ -33,7 +34,7 @@ pub fn state_field(lua: &Lua, app: &App, key: &str) -> Result<Value> {
             None => Ok(Value::Nil),
         },
         "show_help" => app.show_help.into_lua(lua),
-        "show_panel" => app.show_panel.into_lua(lua),
+        "sidebar" => sidebar_name(app.sidebar).into_lua(lua),
         "selection" => match app.selection_span() {
             Some((lo, hi)) => {
                 let sel = lua.create_table()?;
@@ -226,6 +227,13 @@ fn focus_name(focus: Focus) -> &'static str {
     match focus {
         Focus::Tree => "tree",
         Focus::Diff => "diff",
+    }
+}
+
+fn sidebar_name(sidebar: Sidebar) -> &'static str {
+    match sidebar {
+        Sidebar::Files => "files",
+        Sidebar::Annotations => "annotations",
     }
 }
 

@@ -1,0 +1,28 @@
+---
+source: src/tui/tests/annotations.rs
+expression: text
+---
+"┌ Annotations (3) ─────────────────────┐┌ README.md [modified] 3/7  ●1 ────────────────────────────┐"
+"│README.md                             ││ @@ -1,2 +1,2 @@                                          │"
+"│● L1 user  open                       ││     1       - # Old Title                                │"
+"│  body for rdm00003                   ││●          1 + # New Title                                │"
+"│                                      ││     2     2   intro line                                 │"
+"│src/alpha.rs                          ││                                                          │"
+"│● L2 agent  open                      ││                                                          │"
+"│  body for blk00001                   ││                                                          │"
+"│● L4 user  open                       ││                                                          │"
+"│  body for inf00002                   ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"│                                      ││                                                          │"
+"└──────────────────────────────────────┘└──────────────────────────────────────────────────────────┘"
+" local vs main  ·  file 3/7  ·  +1 -1  ·  ● 3 (3 open)  ·  [tree] ALL  ? help  q quit               "

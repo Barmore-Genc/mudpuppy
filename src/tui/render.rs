@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, Focus, Row};
+use super::app::{App, Focus, Row, Sidebar};
 use super::composer::{Composer, Mode};
 use crate::command::CommandPalette;
 use crate::diff::{DiffLine, FileStatus, LineKind};
@@ -42,32 +42,26 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
 
     let [main, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(body);
 
-    // The annotations panel claims a right-hand column when toggled on.
-    let (tree, diff, panel) = if app.show_panel {
-        let [tree, diff, panel] = Layout::horizontal([
-            Constraint::Percentage(24),
-            Constraint::Min(0),
-            Constraint::Length(40),
-        ])
-        .areas(main);
-        (tree, diff, Some(panel))
-    } else {
-        let [tree, diff] =
-            Layout::horizontal([Constraint::Percentage(28), Constraint::Min(0)]).areas(main);
-        (tree, diff, None)
+    // The left sidebar hosts both tabs. The annotations list needs more room to
+    // read than the file tree, so it claims a wider column when it is showing.
+    let sidebar_pct = match app.sidebar {
+        Sidebar::Files => 28,
+        Sidebar::Annotations => 40,
     };
+    let [side, diff] =
+        Layout::horizontal([Constraint::Percentage(sidebar_pct), Constraint::Min(0)]).areas(main);
 
     // Inner heights (minus the one-row borders top and bottom) drive paging and
-    // keep the tree selection visible.
-    app.tree_height = tree.height.saturating_sub(2) as usize;
+    // keep the tree/list selection visible.
+    app.tree_height = side.height.saturating_sub(2) as usize;
     app.diff_height = diff.height.saturating_sub(2) as usize;
     app.scroll = app.scroll.min(app.max_scroll());
 
-    render_tree(frame, tree, app);
-    render_diff(frame, diff, app);
-    if let Some(panel) = panel {
-        render_panel(frame, panel, app);
+    match app.sidebar {
+        Sidebar::Files => render_tree(frame, side, app),
+        Sidebar::Annotations => render_annotations(frame, side, app),
     }
+    render_diff(frame, diff, app);
     render_status(frame, status, app);
 
     if app.show_help {
@@ -180,7 +174,10 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &mut App) {
         if selection.is_some_and(|(lo, hi)| lo <= idx && idx <= hi) {
             line = line.style(Style::default().bg(Color::Rgb(48, 54, 78)));
         }
-        if focused && idx == app.cursor {
+        // Highlight the cursor row when the diff is focused, or when the
+        // annotations tab is driving it (so the previewed line is visible even
+        // though focus stays on the list).
+        if (focused || app.sidebar == Sidebar::Annotations) && idx == app.cursor {
             line = line.style(Style::default().bg(Color::Rgb(60, 66, 84)));
         }
         lines.push(line);
@@ -208,69 +205,105 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &mut App) {
     frame.render_widget(Paragraph::new(lines).block(bordered(&title, focused)), area);
 }
 
-/// The right-hand annotations panel: every annotation on the current file, each
-/// with a severity-coloured mark, its anchor line, author, optional tag, status,
-/// and a one-line body preview. Threaded replies are indented under their parent.
-fn render_panel(frame: &mut Frame, area: Rect, app: &App) {
-    let path = app.current().display_path();
-    let here = app.current_file_annotations();
+/// The annotations sidebar tab: every annotation in the store across all files,
+/// grouped under a bold file header, each row a severity-coloured mark with its
+/// anchor, author, optional tag, status, and a one-line body preview. Threaded
+/// replies are indented under their parent. The selected row is highlighted and
+/// the list scrolls to keep it visible. Replaces the file tree when toggled on.
+fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
+    let focused = app.focus == Focus::Tree;
+    let height = (area.height.saturating_sub(2) as usize).max(1);
+    let list = app.annotation_list();
+    let total = list.len();
 
-    let mut lines: Vec<Line> = Vec::new();
-    if here.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "No annotations on this file.",
+    if total == 0 {
+        app.annotation_scroll = 0;
+        let line = Line::from(Span::styled(
+            "No annotations yet.",
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
-        )));
-        let elsewhere = app.annotations.len();
-        if elsewhere > 0 {
-            lines.push(Line::raw(""));
-            lines.push(Line::from(Span::styled(
-                format!("{elsewhere} on other files."),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-    } else {
-        let cursor_id = app.annotation_id_at_cursor();
-        for a in &here {
-            let indent = if a.is_reply() { "  " } else { "" };
-            let tag = a
-                .tag
-                .map(|t| format!(" {}", tag_symbol(t)))
-                .unwrap_or_default();
-            let header = format!(
-                "{indent}{MARK} {} {}{}  {}",
-                panel_anchor(a),
-                author_word(a.author),
-                tag,
-                ann_status(a.status),
-            );
-            // Highlight the annotation anchored to the cursor line so the panel
-            // tracks what reply/edit/delete/status will act on.
-            let mut style = Style::default().fg(severity_color(a.severity));
-            if cursor_id.as_deref() == Some(a.id.as_str()) {
-                style = style
-                    .bg(Color::Rgb(48, 54, 78))
-                    .add_modifier(Modifier::BOLD);
-            }
-            lines.push(Line::from(vec![Span::styled(header, style)]));
-            // First body line as a preview; the panel stays scannable.
-            if let Some(preview) = a.body.lines().next() {
-                lines.push(Line::from(Span::styled(
-                    format!("{indent}  {preview}"),
-                    Style::default().fg(Color::Gray),
-                )));
-            }
-            lines.push(Line::raw(""));
-        }
+        ));
+        frame.render_widget(
+            Paragraph::new(line).block(bordered(" Annotations (0) ", focused)),
+            area,
+        );
+        return;
     }
 
-    let title = format!(" Annotations · {} ({}) ", path, here.len());
+    let selected = app.annotation_selected.min(total - 1);
+    let sel_bg = Color::Rgb(48, 54, 78);
+
+    // Build the flat line list: a dim bold header before each new file's run,
+    // then a header + preview pair per annotation. `block_start[i]` records where
+    // annotation `i` begins so the selection can be scrolled into view.
+    let mut lines: Vec<Line> = Vec::new();
+    let mut block_start: Vec<usize> = Vec::with_capacity(total);
+    let mut current_file: Option<&str> = None;
+    for (i, a) in list.iter().enumerate() {
+        if current_file != Some(a.file.as_str()) {
+            current_file = Some(a.file.as_str());
+            if !lines.is_empty() {
+                lines.push(Line::raw(""));
+            }
+            lines.push(Line::from(Span::styled(
+                a.file.clone(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
+
+        block_start.push(lines.len());
+        let sel = i == selected;
+        let indent = if a.is_reply() { "  " } else { "" };
+        let tag = a
+            .tag
+            .map(|t| format!(" {}", tag_symbol(t)))
+            .unwrap_or_default();
+        let header = format!(
+            "{indent}{MARK} {} {}{}  {}",
+            panel_anchor(a),
+            author_word(a.author),
+            tag,
+            ann_status(a.status),
+        );
+        let mut header_style = Style::default().fg(severity_color(a.severity));
+        if sel {
+            header_style = header_style.bg(sel_bg).add_modifier(Modifier::BOLD);
+        }
+        lines.push(Line::from(Span::styled(header, header_style)));
+
+        // First body line as a preview; the list stays scannable.
+        let preview = a.body.lines().next().unwrap_or_default();
+        let mut preview_style = Style::default().fg(Color::Gray);
+        if sel {
+            preview_style = preview_style.bg(sel_bg);
+        }
+        lines.push(Line::from(Span::styled(
+            format!("{indent}  {preview}"),
+            preview_style,
+        )));
+    }
+
+    // Keep the two-line selected block within the viewport.
+    let start = block_start[selected];
+    let end = start + 2;
+    let mut scroll = app.annotation_scroll;
+    if start < scroll {
+        scroll = start;
+    } else if end > scroll + height {
+        scroll = end - height;
+    }
+    scroll = scroll.min(lines.len().saturating_sub(height));
+    app.annotation_scroll = scroll;
+
+    let visible = lines.split_off(scroll);
+    let visible: Vec<Line> = visible.into_iter().take(height).collect();
+
+    let title = format!(" Annotations ({total}) ");
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(bordered(&title, false))
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(visible).block(bordered(&title, focused)),
         area,
     );
 }
@@ -641,7 +674,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
         section("Focus"),
         Line::raw("  Tab / l / h   toggle · tree → diff · diff → tree"),
         section("Annotations  (Space is the leader)"),
-        Line::raw("  Space a       toggle the annotations panel"),
+        Line::raw("  Space a       annotations tab (all files) ↔ file tree"),
         Line::raw("  v / V  Esc    whole-line selection (diff) · clear"),
         Line::raw("  Space c c/f/r comment line/selection · file · reply"),
         Line::raw("  Space c e/d/s edit · delete (confirm y) · cycle status"),
