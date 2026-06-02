@@ -14,7 +14,7 @@ expression: screen(&term)
 "│                 │Focus                                                         │                 │"
 "│                 │  Tab / l / h   toggle · tree → diff · diff → tree            │                 │"
 "│                 │Annotations  (Space is the leader)                            │                 │"
-"│                 │  Space a       toggle the annotations panel                  │                 │"
+"│                 │  Space a       annotations tab (all files) ↔ file tree       │                 │"
 "│                 │  v / V  Esc    whole-line selection (diff) · clear           │                 │"
 "│                 │  Space c c/f/r comment line/selection · file · reply         │                 │"
 "│                 │  Space c e/d/s edit · delete (confirm y) · cycle status      │                 │"

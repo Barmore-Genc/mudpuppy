@@ -77,10 +77,10 @@ const SCENARIOS: &[Scenario] = &[
         keys: b" fnot",
         settle_marker: "Add file",
     },
-    // The annotations panel open over a file that actually has comments, plus
-    // their gutter marks in the diff.
+    // The annotations tab open over a store that has comments, listing them all
+    // grouped by file, with their gutter marks still showing in the diff.
     Scenario {
-        name: "annotations_panel",
+        name: "annotations_tab",
         seed: &[
             Seed {
                 line: "3",

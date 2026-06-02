@@ -51,21 +51,100 @@ fn unannotated_file_has_no_gutter_column() {
 }
 
 #[test]
-fn annotations_panel_lists_current_file() {
-    // `Space a` toggles the panel; it lists alpha.rs's two annotations.
-    let mut a = annotated_app(alpha_notes());
+fn annotations_tab_lists_every_file() {
+    // `Space a` swaps the file tree for the annotations tab, which lists every
+    // annotation in the store — including the one on README.md, a file other
+    // than the one open in the diff.
+    let mut notes = alpha_notes();
+    notes.push(note(
+        "rdm00003",
+        Author::User,
+        "README.md",
+        Side::Right,
+        1,
+        Severity::Warning,
+    ));
+    let mut a = annotated_app(notes);
     let term = drive(
         &mut a,
         100,
         24,
         &[key(KeyCode::Char(' ')), key(KeyCode::Char('a'))],
     );
-    assert!(a.show_panel);
+    assert_eq!(a.sidebar, Sidebar::Annotations);
     let text = screen(&term);
-    assert!(text.contains("Annotations"));
+    assert!(text.contains("Annotations (3)"));
+    // Grouped under bold file headers, both files' annotations are present.
+    assert!(text.contains("src/alpha.rs"));
+    assert!(text.contains("README.md"));
     assert!(text.contains("L2 agent"));
     assert!(text.contains("L4 user"));
     insta::assert_snapshot!(text);
+}
+
+#[test]
+fn annotations_tab_jumps_to_the_selected_annotation() {
+    // With the tab open, navigating to README.md's annotation and confirming
+    // selects that file in the diff and focuses the diff pane.
+    let mut notes = alpha_notes();
+    notes.push(note(
+        "rdm00003",
+        Author::User,
+        "README.md",
+        Side::Right,
+        1,
+        Severity::Warning,
+    ));
+    let mut a = annotated_app(notes);
+    // Open the tab, jump to the first item (README.md sorts before src/alpha.rs),
+    // and confirm — even though alpha.rs is the file open at launch.
+    drive(
+        &mut a,
+        100,
+        24,
+        &[
+            key(KeyCode::Char(' ')),
+            key(KeyCode::Char('a')),
+            key(KeyCode::Char('g')),
+            key(KeyCode::Char('g')),
+            key(KeyCode::Enter),
+        ],
+    );
+    assert_eq!(a.current().display_path(), "README.md");
+    assert_eq!(a.focus, Focus::Diff);
+}
+
+#[test]
+fn navigating_the_tab_previews_without_changing_focus() {
+    // Moving through the list switches the diff to each annotation's file and
+    // line live — no Enter needed — while focus stays on the list so j/k keep
+    // walking it.
+    let mut notes = alpha_notes();
+    notes.push(note(
+        "rdm00003",
+        Author::User,
+        "README.md",
+        Side::Right,
+        1,
+        Severity::Warning,
+    ));
+    let mut a = annotated_app(notes);
+    // Opening the tab previews the first row (README.md sorts first), even
+    // though alpha.rs was the file open at launch.
+    drive(
+        &mut a,
+        100,
+        24,
+        &[key(KeyCode::Char(' ')), key(KeyCode::Char('a'))],
+    );
+    assert_eq!(a.current().display_path(), "README.md");
+    assert_eq!(a.focus, Focus::Tree, "focus stays on the list");
+    // `j` moves to src/alpha.rs's first note: the diff follows, focus does not.
+    a.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(a.current().display_path(), "src/alpha.rs");
+    assert_eq!(a.focus, Focus::Tree);
+    // The cursor sits on the annotated line (RIGHT line 2 of alpha.rs).
+    assert_eq!(a.annotation_id_at_cursor().as_deref(), Some("blk00001"));
 }
 
 #[test]
@@ -98,30 +177,4 @@ fn line_marks_keep_the_most_severe_per_line() {
     ]);
     let marks = a.line_marks();
     assert_eq!(marks.get(&(Side::Right, 2)), Some(&Severity::Blocker));
-}
-
-#[test]
-fn current_file_annotations_filter_by_path() {
-    let a = annotated_app(vec![
-        note(
-            "a0000001",
-            Author::Agent,
-            "src/alpha.rs",
-            Side::Right,
-            2,
-            Severity::Info,
-        ),
-        note(
-            "o0000002",
-            Author::Agent,
-            "README.md",
-            Side::Right,
-            1,
-            Severity::Info,
-        ),
-    ]);
-    // alpha.rs is selected at launch.
-    let here = a.current_file_annotations();
-    assert_eq!(here.len(), 1);
-    assert_eq!(here[0].id, "a0000001");
 }

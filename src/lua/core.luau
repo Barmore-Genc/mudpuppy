@@ -24,11 +24,6 @@ local m = mudpuppy
 -- Space is the leader; set it before the `<leader>` maps below expand it.
 m.leader("space")
 
--- How many files are in the tree (for clamping first/last navigation).
-local function file_count()
-  return #m.files()
-end
-
 -- The diff viewport height, used for half- and full-page scrolling.
 local function page()
   return m.state().viewport.height
@@ -38,7 +33,7 @@ end
 
 m.command("quit", function() m.quit() end)
 m.command("help", function() m.toggle_help() end)
-m.command("toggle-panel", function() m.toggle_panel() end)
+m.command("annotations", function() m.toggle_annotations() end)
 m.command("toggle-focus", function() m.toggle_focus() end)
 m.command("release-turn", function() m.release_turn() end)
 m.command("add-file", function() m.open_picker() end)
@@ -74,25 +69,29 @@ m.map("global", "b", function() m.scroll(-page()) end)
 m.map("global", "pagedown", function() m.scroll(page()) end)
 m.map("global", "pageup", function() m.scroll(-page()) end)
 
--- Leader verbs: release the turn, toggle the panel, open the file picker.
+-- Leader verbs: release the turn, switch the sidebar to the annotations tab,
+-- open the file picker.
 m.map("global", "<leader> t r", function() m.release_turn() end)
-m.map("global", "<leader> a", function() m.toggle_panel() end)
+m.map("global", "<leader> a", function() m.toggle_annotations() end)
 m.map("global", "<leader> f", function() m.open_picker() end)
 
--- ---- Tree: move the file selection ------------------------------------------
+-- ---- Sidebar: move the selection in whichever tab is showing -----------------
 
-m.map("tree", "j", function() m.move_selection(1) end)
-m.map("tree", "down", function() m.move_selection(1) end)
-m.map("tree", "k", function() m.move_selection(-1) end)
-m.map("tree", "up", function() m.move_selection(-1) end)
-m.map("tree", "g g", function() m.select_file(1) end)
-m.map("tree", "home", function() m.select_file(1) end)
--- `G` jumps to the last file, or to file N with a count (`3G`).
-m.map("tree", "G", function() m.select_file(m.state().count or file_count()) end)
-m.map("tree", "end", function() m.select_file(file_count()) end)
-m.map("tree", "enter", function() m.set_focus("diff") end)
-m.map("tree", "l", function() m.set_focus("diff") end)
-m.map("tree", "right", function() m.set_focus("diff") end)
+-- These verbs act on the focused sidebar tab — the file tree, or the
+-- all-annotations list. `g g`/Home jump to the first item; `G`/End to the last,
+-- or to item N with a count (`3G`). Enter/`l` open the file (tree) or jump to the
+-- selected annotation (annotations tab).
+m.map("tree", "j", function() m.sidebar_move(1) end)
+m.map("tree", "down", function() m.sidebar_move(1) end)
+m.map("tree", "k", function() m.sidebar_move(-1) end)
+m.map("tree", "up", function() m.sidebar_move(-1) end)
+m.map("tree", "g g", function() m.sidebar_first() end)
+m.map("tree", "home", function() m.sidebar_first() end)
+m.map("tree", "G", function() m.sidebar_last(m.state().count or -1) end)
+m.map("tree", "end", function() m.sidebar_last(-1) end)
+m.map("tree", "enter", function() m.sidebar_confirm() end)
+m.map("tree", "l", function() m.sidebar_confirm() end)
+m.map("tree", "right", function() m.sidebar_confirm() end)
 
 -- ---- Diff: move a cursor (GitHub-style), author comments, hunk-hop ----------
 

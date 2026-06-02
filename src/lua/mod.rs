@@ -553,12 +553,16 @@ Actions (call these from inside a binding or hook):
   mudpuppy.toggle_focus()
   mudpuppy.set_focus("tree" | "diff")
   mudpuppy.toggle_help()
-  mudpuppy.toggle_panel()        the annotations side panel
+  mudpuppy.toggle_annotations()  flip the sidebar to the all-annotations tab
   mudpuppy.release_turn()        hand the turn back to the agent
   mudpuppy.open_picker()         the fuzzy "add any file" picker
   mudpuppy.open_palette()        the `:command` palette
   mudpuppy.select_file(i)        open file i (1-based; clamped to the file list)
   mudpuppy.move_selection(delta) move the tree selection by delta (count-aware)
+  mudpuppy.sidebar_move(delta)   move the focused sidebar tab's selection
+  mudpuppy.sidebar_first()       jump the sidebar tab to its first item
+  mudpuppy.sidebar_last(i)       jump to item i (1-based), or the last if i < 1
+  mudpuppy.sidebar_confirm()     open the file / jump to the annotation
   mudpuppy.set_scroll(n)         scroll the diff to absolute row n (clamped)
   mudpuppy.scroll(delta)         scroll the diff by delta rows (count-aware)
   mudpuppy.next_hunk()           (count-aware)
@@ -582,7 +586,7 @@ the absolute verbs (select_file, set_scroll, set_cursor, cursor_to_*) ignore it.
 
 Readers (return tables describing the current state):
   mudpuppy.state()        { focus, selected, scroll, cursor, count, show_help,
-                            show_panel, selection = { lo, hi } | nil,
+                            sidebar, selection = { lo, hi } | nil,
                             turn = { owner, seq, agent_waiting, approved },
                             viewport = { height, total, top } }
   mudpuppy.files()        array of { path, status, additions, deletions, binary }
@@ -878,7 +882,7 @@ index 333..444 100644
     fn leader_sequence_runs_a_bound_verb() {
         let engine = LuaEngine::new(None).unwrap();
         let mut a = app();
-        // `<leader> a` (Space a) toggles the annotations panel.
+        // `<leader> a` (Space a) flips the sidebar to the annotations tab.
         engine
             .dispatch(&mut a, KeyChord::parse("space").unwrap())
             .unwrap();
@@ -886,7 +890,11 @@ index 333..444 100644
         engine
             .dispatch(&mut a, KeyChord::parse("a").unwrap())
             .unwrap();
-        assert!(a.show_panel, "Space a toggled the panel");
+        assert_eq!(
+            a.sidebar,
+            crate::tui::Sidebar::Annotations,
+            "Space a opened the annotations tab"
+        );
         assert!(a.pending_seq.is_empty());
     }
 
@@ -932,7 +940,7 @@ index 333..444 100644
             .unwrap();
         let palette = a.palette.as_ref().expect("the palette is open");
         assert!(palette.all.iter().any(|n| n == "release-turn"));
-        assert!(palette.all.iter().any(|n| n == "toggle-panel"));
+        assert!(palette.all.iter().any(|n| n == "annotations"));
     }
 
     #[test]
@@ -947,16 +955,20 @@ index 333..444 100644
 
     #[test]
     fn user_config_overrides_a_default_binding() {
-        // Rebind `q` (normally quit) to toggle the annotations panel instead.
+        // Rebind `q` (normally quit) to open the annotations tab instead.
         let (_dir, path) =
-            config(r#"mudpuppy.map("global", "q", function() mudpuppy.toggle_panel() end)"#);
+            config(r#"mudpuppy.map("global", "q", function() mudpuppy.toggle_annotations() end)"#);
         let engine = LuaEngine::new(Some(path)).unwrap();
         let mut a = app();
         engine
             .dispatch(&mut a, KeyChord::parse("q").unwrap())
             .unwrap();
         assert!(!a.should_quit, "the override replaced quit");
-        assert!(a.show_panel, "`q` now toggles the panel");
+        assert_eq!(
+            a.sidebar,
+            crate::tui::Sidebar::Annotations,
+            "`q` now opens the annotations tab"
+        );
     }
 
     #[test]

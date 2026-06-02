@@ -31,6 +31,14 @@ pub(crate) enum Focus {
     Diff,
 }
 
+/// Which tab the left sidebar shows. The file tree and the all-annotations list
+/// occupy the same column; `Space a` flips between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Sidebar {
+    Files,
+    Annotations,
+}
+
 /// A single rendered row of the diff pane.
 pub(crate) enum Row {
     /// A `@@ … @@` hunk header.
@@ -261,8 +269,12 @@ pub(crate) struct App {
     /// Top visible file row of the tree, so the selection stays on screen.
     pub(crate) tree_scroll: usize,
     pub(crate) show_help: bool,
-    /// Whether the annotations side panel is shown.
-    pub(crate) show_panel: bool,
+    /// Which tab the left sidebar shows: the file tree or the all-annotations list.
+    pub(crate) sidebar: Sidebar,
+    /// Selected row in the annotations tab (index into [`App::annotation_list`]).
+    pub(crate) annotation_selected: usize,
+    /// Top visible line of the annotations tab, so the selection stays on screen.
+    pub(crate) annotation_scroll: usize,
     /// Annotations loaded from the store (both authors, every status).
     pub(crate) annotations: Vec<Annotation>,
     /// The turn-protocol block from the store, kept in sync on reload so the
@@ -332,7 +344,9 @@ impl App {
             composer: None,
             tree_scroll: 0,
             show_help: false,
-            show_panel: false,
+            sidebar: Sidebar::Files,
+            annotation_selected: 0,
+            annotation_scroll: 0,
             annotations: Vec::new(),
             turn: Turn::default(),
             store_path: None,
@@ -461,12 +475,6 @@ impl App {
     /// very start.
     pub(crate) fn awaiting_approval(&self) -> bool {
         self.turn.agent_waiting && !self.turn.approved
-    }
-
-    /// Annotations anchored to the file currently open in the diff pane.
-    pub(crate) fn current_file_annotations(&self) -> Vec<&Annotation> {
-        let path = self.current().display_path();
-        self.annotations.iter().filter(|a| a.file == path).collect()
     }
 
     /// A `(side, line) -> severity` map of gutter marks for the current file,
@@ -653,9 +661,143 @@ impl App {
         self.show_help = !self.show_help;
     }
 
-    /// Toggle the annotations side panel.
-    pub(crate) fn toggle_panel(&mut self) {
-        self.show_panel = !self.show_panel;
+    /// Flip the left sidebar between the file tree and the all-annotations list.
+    /// Switching to the annotations tab focuses the sidebar (so `j`/`k` walk the
+    /// list) and clamps the selection to the current list length.
+    pub(crate) fn toggle_annotations(&mut self) {
+        self.sidebar = match self.sidebar {
+            Sidebar::Files => {
+                self.focus = Focus::Tree;
+                let len = self.annotation_list().len();
+                self.annotation_selected = self.annotation_selected.min(len.saturating_sub(1));
+                // Show the diff for whatever row the tab opens on.
+                self.preview_selected_annotation();
+                Sidebar::Annotations
+            }
+            Sidebar::Annotations => Sidebar::Files,
+        };
+    }
+
+    /// The annotations as the tab lists them: every annotation in the store, both
+    /// authors and all files, grouped by file then line so replies sit just under
+    /// their parent. Returned as references in display order; the tab's selection
+    /// and jump verbs index into this.
+    pub(crate) fn annotation_list(&self) -> Vec<&Annotation> {
+        let mut items: Vec<&Annotation> = self.annotations.iter().collect();
+        // Replies inherit their parent's line and are created later, so a (file,
+        // line, created_at) sort keeps each thread contiguous under its parent.
+        items.sort_by(|a, b| {
+            a.file
+                .cmp(&b.file)
+                .then(a.line.cmp(&b.line))
+                .then(a.created_at.cmp(&b.created_at))
+        });
+        items
+    }
+
+    /// Move the annotations-tab selection by `delta` (scaled by the pending
+    /// count), clamped to the list, and preview it (the diff follows the
+    /// highlighted annotation). A no-op on an empty list.
+    pub(crate) fn move_annotation_selection(&mut self, delta: i64) {
+        let len = self.annotation_list().len();
+        if len == 0 {
+            return;
+        }
+        let delta = delta.saturating_mul(self.count() as i64);
+        let next = self.annotation_selected as i64 + delta;
+        self.annotation_selected = next.clamp(0, len as i64 - 1) as usize;
+        self.preview_selected_annotation();
+    }
+
+    /// Move the focused sidebar's selection by `delta`: the file tree, or the
+    /// annotations tab when it is showing. The `j`/`k` verb the tree binds.
+    pub(crate) fn sidebar_move(&mut self, delta: i64) {
+        match self.sidebar {
+            Sidebar::Files => self.move_selection(delta),
+            Sidebar::Annotations => self.move_annotation_selection(delta),
+        }
+    }
+
+    /// Jump the focused sidebar to its first item (`g g` / Home).
+    pub(crate) fn sidebar_first(&mut self) {
+        match self.sidebar {
+            Sidebar::Files => self.select(0),
+            Sidebar::Annotations => {
+                self.annotation_selected = 0;
+                self.preview_selected_annotation();
+            }
+        }
+    }
+
+    /// Jump the focused sidebar to item `index` (1-based), or to its last item
+    /// when `index < 1` (`G` lands on the last; `3G` on the third).
+    pub(crate) fn sidebar_last(&mut self, index: i64) {
+        match self.sidebar {
+            Sidebar::Files => {
+                if index < 1 {
+                    self.select(self.files.len().saturating_sub(1));
+                } else {
+                    self.select_file(index);
+                }
+            }
+            Sidebar::Annotations => {
+                let last = self.annotation_list().len().saturating_sub(1) as i64;
+                let target = if index < 1 {
+                    last
+                } else {
+                    (index - 1).min(last)
+                };
+                self.annotation_selected = target.max(0) as usize;
+                self.preview_selected_annotation();
+            }
+        }
+    }
+
+    /// Activate the focused sidebar row (Enter / `l`): focus the diff in the file
+    /// tree, or commit focus to the diff on the already-previewed annotation.
+    pub(crate) fn sidebar_confirm(&mut self) {
+        match self.sidebar {
+            Sidebar::Files => self.focus = Focus::Diff,
+            Sidebar::Annotations => {
+                self.preview_selected_annotation();
+                self.focus = Focus::Diff;
+            }
+        }
+    }
+
+    /// Open the highlighted annotation's file in the diff and put the cursor on
+    /// its anchored line (when that line is currently materialized), *without*
+    /// changing focus — so the diff tracks the selection as it moves through the
+    /// annotations tab. A file-scoped note just opens its file at the top.
+    fn preview_selected_annotation(&mut self) {
+        let Some(a) = self
+            .annotation_list()
+            .get(self.annotation_selected)
+            .map(|a| (a.file.clone(), a.side, a.line, a.scope))
+        else {
+            return;
+        };
+        let (file, side, line, scope) = a;
+        if let Some(idx) = self.files.iter().position(|f| f.display_path() == file) {
+            self.select(idx);
+        }
+        if scope == AnchorScope::Line {
+            if let Some(row) = self.row_for_anchor(side, line) {
+                self.set_cursor(row as i64);
+            }
+        }
+    }
+
+    /// Row index of the diff line anchored at `(side, line)`, if it is currently
+    /// in the built view (a line hidden inside a collapsed gap won't be found).
+    fn row_for_anchor(&self, side: Side, line: u32) -> Option<usize> {
+        self.view.rows.iter().position(|r| match r {
+            Row::Line(l, _) => match side {
+                Side::Right => l.new_lineno == Some(line),
+                Side::Left => l.old_lineno == Some(line),
+            },
+            _ => false,
+        })
     }
 
     /// Jump to the next hunk header below the cursor, repeated by the pending

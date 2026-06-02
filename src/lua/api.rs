@@ -145,9 +145,37 @@ pub fn install_scoped<'scope>(
         })?,
     )?;
     table.set(
-        "toggle_panel",
+        "toggle_annotations",
         scope.create_function(move |_, ()| {
-            cell.borrow_mut().toggle_panel();
+            cell.borrow_mut().toggle_annotations();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "sidebar_move",
+        scope.create_function(move |_, delta: i64| {
+            cell.borrow_mut().sidebar_move(delta);
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "sidebar_first",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().sidebar_first();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "sidebar_last",
+        scope.create_function(move |_, index: i64| {
+            cell.borrow_mut().sidebar_last(index);
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "sidebar_confirm",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().sidebar_confirm();
             Ok(())
         })?,
     )?;
