@@ -5,7 +5,9 @@
 //! genuinely self-documenting (PLAN.md §7). Keep the `about`/`long_about` text
 //! here accurate as the command surface firms up.
 
-use anyhow::Result;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 
 /// Terminal UI for collaborative, turn-based code review between a user and an
@@ -29,6 +31,11 @@ pub struct Cli {
     /// inferred default branch.
     #[arg(long, value_name = "REF")]
     pub base: Option<String>,
+
+    /// Run as if mudpuppy was started in `<DIR>` instead of the current working
+    /// directory (like `git -C`). Applies to both the TUI and `agent` commands.
+    #[arg(short = 'C', value_name = "DIR", global = true)]
+    pub dir: Option<PathBuf>,
 
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -213,6 +220,12 @@ fn wants_config_help(args: &[String]) -> bool {
 }
 
 fn dispatch(cli: Cli) -> Result<()> {
+    // `-C <DIR>`: change the working directory up front so every downstream
+    // `git`/`gh` invocation (and store-path resolution) runs against that repo.
+    if let Some(dir) = &cli.dir {
+        std::env::set_current_dir(dir)
+            .with_context(|| format!("changing directory to {}", dir.display()))?;
+    }
     match cli.command {
         Some(Command::Agent { command }) => crate::agent::dispatch(command),
         Some(Command::Install { command }) => crate::install::dispatch(command),
@@ -224,6 +237,7 @@ fn dispatch(cli: Cli) -> Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+    use std::path::Path;
 
     #[test]
     fn command_tree_is_valid() {
@@ -300,6 +314,17 @@ mod tests {
         let cli = Cli::try_parse_from(["mudpuppy"]).unwrap();
         assert!(cli.command.is_none());
         assert!(cli.pr.is_none());
+    }
+
+    #[test]
+    fn accepts_dash_c_before_and_after_the_subcommand() {
+        // Before any subcommand (bare TUI invocation), like `git -C`.
+        let cli = Cli::try_parse_from(["mudpuppy", "-C", "/tmp/repo"]).unwrap();
+        assert_eq!(cli.dir.as_deref(), Some(Path::new("/tmp/repo")));
+
+        // And as a global flag after a subcommand.
+        let cli = Cli::try_parse_from(["mudpuppy", "-C", "/tmp/repo", "agent", "reset"]).unwrap();
+        assert_eq!(cli.dir.as_deref(), Some(Path::new("/tmp/repo")));
     }
 
     #[test]
