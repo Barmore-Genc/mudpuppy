@@ -1,4 +1,10 @@
 <p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Barmore-Genc/mudpuppy" alt="License"></a>
+  <a href="https://app.codecov.io/gh/Barmore-Genc/mudpuppy"><img src="https://img.shields.io/codecov/c/github/Barmore-Genc/mudpuppy" alt="Coverage"></a>
+  <a href="https://github.com/Barmore-Genc/mudpuppy/releases"><img src="https://img.shields.io/github/v/release/Barmore-Genc/mudpuppy" alt="Release"></a>
+</p>
+
+<p align="center">
   <img src="assets/mudpuppy.png" alt="mudpuppy" width="600">
 </p>
 
