@@ -39,10 +39,12 @@ fn hunk_navigation_jumps_between_hunks() {
     assert_eq!(a.cursor, second);
     a.handle_key(key(KeyCode::Char('{')));
     assert_eq!(a.cursor, 0);
-    // n / N are aliases.
-    a.handle_key(key(KeyCode::Char('n')));
+    // `]h` / `[h` are aliases (the bracket family).
+    a.handle_key(key(KeyCode::Char(']')));
+    a.handle_key(key(KeyCode::Char('h')));
     assert_eq!(a.cursor, second);
-    a.handle_key(key(KeyCode::Char('N')));
+    a.handle_key(key(KeyCode::Char('[')));
+    a.handle_key(key(KeyCode::Char('h')));
     assert_eq!(a.cursor, 0);
 }
 
@@ -64,7 +66,7 @@ fn g_and_capital_g_jump_top_and_bottom() {
 }
 
 #[test]
-fn d_and_u_half_page() {
+fn ctrl_d_and_u_half_page() {
     let mut a = app();
     drive(
         &mut a,
@@ -73,9 +75,9 @@ fn d_and_u_half_page() {
         &[key(KeyCode::Char('j')), key(KeyCode::Char('l'))],
     );
     let half = a.diff_height / 2;
-    a.handle_key(key(KeyCode::Char('d')));
+    a.handle_key(ctrl('d'));
     assert_eq!(a.scroll, half.min(a.max_scroll()));
-    a.handle_key(key(KeyCode::Char('u')));
+    a.handle_key(ctrl('u'));
     assert_eq!(a.scroll, 0);
 }
 
