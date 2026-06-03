@@ -60,12 +60,12 @@ m.map("global", "backtab", function() m.toggle_focus() end)
 -- The command palette.
 m.map("global", ":", function() m.open_palette() end)
 
--- Half / full page scroll the diff from either pane (was ctrl-d/u/f/b). A count
--- multiplies the distance (`3d` = three half-pages), applied inside `scroll`.
-m.map("global", "d", function() m.scroll(math.floor(page() / 2)) end)
-m.map("global", "u", function() m.scroll(-math.floor(page() / 2)) end)
-m.map("global", "f", function() m.scroll(page()) end)
-m.map("global", "b", function() m.scroll(-page()) end)
+-- Half / full page scroll the diff from either pane. A count multiplies the
+-- distance (`3 ctrl-d` = three half-pages), applied inside `scroll`.
+m.map("global", "ctrl-d", function() m.scroll(math.floor(page() / 2)) end)
+m.map("global", "ctrl-u", function() m.scroll(-math.floor(page() / 2)) end)
+m.map("global", "ctrl-f", function() m.scroll(page()) end)
+m.map("global", "ctrl-b", function() m.scroll(-page()) end)
 m.map("global", "pagedown", function() m.scroll(page()) end)
 m.map("global", "pageup", function() m.scroll(-page()) end)
 
@@ -95,8 +95,8 @@ m.map("tree", "right", function() m.sidebar_confirm() end)
 
 -- ---- Diff: move a cursor (GitHub-style), author comments, hunk-hop ----------
 
--- j/k move the line cursor; the viewport follows it. Paging (d/u/f/b, bound in
--- global) scrolls and carries the cursor along. A count multiplies the move.
+-- j/k move the line cursor; the viewport follows it. Paging (ctrl-d/u/f/b, bound
+-- in global) scrolls and carries the cursor along. A count multiplies the move.
 m.map("diff", "j", function() m.move_cursor(1) end)
 m.map("diff", "down", function() m.move_cursor(1) end)
 m.map("diff", "k", function() m.move_cursor(-1) end)
@@ -109,29 +109,31 @@ m.map("diff", "G", function()
   if n then m.set_cursor(n - 1) else m.cursor_to_bottom() end
 end)
 m.map("diff", "end", function() m.cursor_to_bottom() end)
-m.map("diff", "}", function() m.next_hunk() end)
-m.map("diff", "n", function() m.next_hunk() end)
-m.map("diff", "{", function() m.prev_hunk() end)
-m.map("diff", "N", function() m.prev_hunk() end)
-m.map("diff", "J", function() m.move_selection(1) end)
-m.map("diff", "K", function() m.move_selection(-1) end)
-m.map("diff", "h", function() m.set_focus("tree") end)
-m.map("diff", "left", function() m.set_focus("tree") end)
 
--- Context expansion (was ctrl-e/ctrl-y): expand the nearest gap down / up, or
--- the whole gap with `+`.
-m.map("diff", "<leader> e", function() m.expand_down() end)
-m.map("diff", "<leader> y", function() m.expand_up() end)
-m.map("diff", "+", function() m.expand_all() end)
+-- Hunk navigation: `]h`/`[h` (the gitsigns/vim-diff "next change" idiom) or
+-- `}`/`{` (vim paragraph motion). The `[`/`]` family is reserved for future
+-- prev/next jumps (`]c` comment, `]f` file), so it grows without rebinding.
+m.map("diff", "] h", function() m.next_hunk() end)
+m.map("diff", "[ h", function() m.prev_hunk() end)
+m.map("diff", "}", function() m.next_hunk() end)
+m.map("diff", "{", function() m.prev_hunk() end)
 
 -- Visual selection (a whole-line region) and clearing it.
 m.map("diff", "v", function() m.toggle_visual() end)
 m.map("diff", "V", function() m.toggle_visual() end)
 m.map("diff", "esc", function() m.clear_selection() end)
+m.map("diff", "J", function() m.move_selection(1) end)
+m.map("diff", "K", function() m.move_selection(-1) end)
 
--- Authoring behind the leader: comment the cursor line/region (c c), the whole
--- file (c f), reply (c r), edit (c e), delete (c d, confirmed with y), and cycle
--- status (c s).
+-- Focus the sidebar.
+m.map("diff", "h", function() m.set_focus("tree") end)
+m.map("diff", "left", function() m.set_focus("tree") end)
+
+-- Context expansion: reveal all hidden context around the cursor.
+m.map("diff", "<leader> e", function() m.expand_all() end)
+
+-- Comment authoring under `<leader> c`: comment the cursor line (c c), the whole
+-- file (c f), reply (c r), edit (c e), delete (c d), and cycle status (c s).
 m.map("diff", "<leader> c c", function() m.add_comment() end)
 m.map("diff", "<leader> c f", function() m.comment_file() end)
 m.map("diff", "<leader> c r", function() m.reply() end)
