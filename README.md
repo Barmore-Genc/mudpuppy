@@ -30,7 +30,25 @@ request.
 
 ## Install
 
-Build from source (requires a recent Rust toolchain):
+Prebuilt binaries are published for macOS, Linux, and Windows on every release.
+
+macOS / Linux:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/Barmore-Genc/mudpuppy/releases/latest/download/mudpuppy-installer.sh | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/Barmore-Genc/mudpuppy/releases/latest/download/mudpuppy-installer.ps1 | iex"
+```
+
+Or download an archive for your platform directly from the
+[latest release](https://github.com/Barmore-Genc/mudpuppy/releases/latest).
+
+To build from source instead (requires a recent Rust toolchain and a C/C++
+compiler for the vendored Luau interpreter):
 
 ```sh
 cargo install --path .

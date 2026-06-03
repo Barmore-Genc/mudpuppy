@@ -1,11 +1,11 @@
 [package]
 name = "mudpuppy"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Terminal UI for collaborative, turn-based code review between a user and an AI agent."
 license = "AGPL-3.0-only"
-repository = "https://github.com/kaangenc/mudpuppy"
+repository = "https://github.com/Barmore-Genc/mudpuppy"
 readme = "README.md"
 keywords = ["tui", "code-review", "diff", "git", "agent"]
 categories = ["command-line-utilities", "development-tools"]
@@ -108,3 +108,8 @@ vt100 = "0.15"
 
 # Byte-stable throwaway git repos for the e2e fixtures (never the real repo).
 tempfile = "3"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
