@@ -32,7 +32,7 @@ pub struct Cli {
     #[arg(long, value_name = "REF")]
     pub base: Option<String>,
 
-    /// Run as if mudpuppy was started in <DIR> instead of the current working
+    /// Run as if mudpuppy was started in `<DIR>` instead of the current working
     /// directory (like `git -C`). Applies to both the TUI and `agent` commands.
     #[arg(short = 'C', value_name = "DIR", global = true)]
     pub dir: Option<PathBuf>,
