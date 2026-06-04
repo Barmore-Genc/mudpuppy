@@ -62,6 +62,16 @@ const SCENARIOS: &[Scenario] = &[
         keys: b"?",
         settle_marker: "mudpuppy — default keymap",
     },
+    // The comment composer open on a diff line with a body typed — exercises
+    // the modal that lets a user author an annotation. `l` focuses the diff,
+    // `j` moves the cursor off the hunk header onto a content line, `Space c c`
+    // opens the composer, and the remaining chars become the body.
+    Scenario {
+        name: "annotation_composer",
+        seed: &[],
+        keys: b"lj cclooks reasonable",
+        settle_marker: "-- INSERT --",
+    },
     // The `:` command palette with a partial query, showing the fuzzy-matched
     // subset of command names.
     Scenario {

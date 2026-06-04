@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, Focus, Row, Sidebar};
+use super::app::{App, Focus, Hits, Row, Sidebar};
 use super::composer::{Composer, Mode};
 use crate::command::CommandPalette;
 use crate::diff::{DiffLine, FileStatus, LineKind};
@@ -28,6 +28,11 @@ pub(crate) const MARK: &str = "●";
 /// Draw the whole UI for one frame and record viewport heights for the next
 /// key-handling pass.
 pub(crate) fn render(frame: &mut Frame, app: &mut App) {
+    // Reset last frame's interactive regions; each render path repopulates
+    // anything it draws (issue #29 mouse support). Overlays leave their span
+    // fields `None` when closed, so handlers know the affordance isn't on
+    // screen.
+    app.hits = Hits::default();
     // On first contact an approval banner claims the top row. It only appears
     // until the user approves, so an established session lays out exactly as
     // before and its snapshots are unchanged.
@@ -57,6 +62,12 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     app.diff_height = diff.height.saturating_sub(2) as usize;
     app.scroll = app.scroll.min(app.max_scroll());
 
+    app.hits.sidebar_outer = Some(side);
+    app.hits.sidebar_inner = Some(inner_rect(side));
+    app.hits.diff_outer = Some(diff);
+    app.hits.diff_inner = Some(inner_rect(diff));
+    app.hits.status = Some(status);
+
     match app.sidebar {
         Sidebar::Files => render_tree(frame, side, app),
         Sidebar::Annotations => render_annotations(frame, side, app),
@@ -65,19 +76,30 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     render_status(frame, status, app);
 
     if app.show_help {
-        render_help(frame, frame.area());
+        let area = frame.area();
+        let outer = render_help(frame, area, app);
+        app.hits.help_outer = Some(outer);
     }
     if let Some(picker) = app.picker.as_ref() {
         let area = frame.area();
-        render_picker(frame, area, picker);
+        let (rect, inner, offset) = render_picker(frame, area, picker);
+        app.hits.picker_outer = Some(rect);
+        app.hits.picker_inner = Some(inner);
+        app.hits.picker_offset = offset;
     }
     if let Some(palette) = app.palette.as_ref() {
         let area = frame.area();
-        render_palette(frame, area, palette);
+        let (rect, inner, offset) = render_palette(frame, area, palette);
+        app.hits.palette_outer = Some(rect);
+        app.hits.palette_inner = Some(inner);
+        app.hits.palette_offset = offset;
     }
     if let Some(composer) = app.composer.as_ref() {
         let area = frame.area();
-        render_composer(frame, area, composer);
+        let (rect, save, cancel) = render_composer(frame, area, composer);
+        app.hits.composer_outer = Some(rect);
+        app.hits.composer_save_span = Some(save);
+        app.hits.composer_cancel_span = Some(cancel);
     }
 }
 
@@ -130,8 +152,8 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
         lines.push(line);
     }
 
-    let title = format!(" Files ({}) ", app.files.len());
-    frame.render_widget(Paragraph::new(lines).block(bordered(&title, focused)), area);
+    let block = sidebar_tabs_block(area, app, focused);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// The center diff pane: only the visible window of rows is built into spans.
@@ -164,6 +186,8 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &mut App) {
     let avail = height.saturating_sub(header.len()).max(1);
     let end = (app.scroll + avail).min(app.view.rows.len());
     let selection = app.selection_span();
+    // Click-y mapping needs to know how many non-row header lines come first.
+    app.hits.diff_header_rows = header.len() as u16;
 
     let mut lines: Vec<Line> = header;
     for (offset, row) in app.view.rows[app.scroll..end].iter().enumerate() {
@@ -224,10 +248,8 @@ fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
         ));
-        frame.render_widget(
-            Paragraph::new(line).block(bordered(" Annotations (0) ", focused)),
-            area,
-        );
+        let block = sidebar_tabs_block(area, app, focused);
+        frame.render_widget(Paragraph::new(line).block(block), area);
         return;
     }
 
@@ -297,15 +319,16 @@ fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
     }
     scroll = scroll.min(lines.len().saturating_sub(height));
     app.annotation_scroll = scroll;
+    // Record the per-annotation start lines (in unscrolled coordinates) and the
+    // scroll offset so a click can map y → annotation index.
+    app.hits.annotation_block_starts = block_start;
+    app.hits.annotation_scroll = scroll;
 
     let visible = lines.split_off(scroll);
     let visible: Vec<Line> = visible.into_iter().take(height).collect();
 
-    let title = format!(" Annotations ({total}) ");
-    frame.render_widget(
-        Paragraph::new(visible).block(bordered(&title, focused)),
-        area,
-    );
+    let block = sidebar_tabs_block(area, app, focused);
+    frame.render_widget(Paragraph::new(visible).block(block), area);
 }
 
 /// The first-contact approval banner (PLAN.md §6): a full-width highlighted row
@@ -325,7 +348,7 @@ fn render_approval_banner(frame: &mut Frame, area: Rect) {
 }
 
 /// The bottom status bar: target, position, counts, focus, and the help hint.
-fn render_status(frame: &mut Frame, area: Rect, app: &App) {
+fn render_status(frame: &mut Frame, area: Rect, app: &mut App) {
     let file = app.current();
     let scroll_pct = if app.max_scroll() == 0 {
         "ALL".to_string()
@@ -422,6 +445,9 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw("  "));
+        // Record the clickable span over "r release"/"r approve" so a mouse
+        // click on the call-to-action triggers release_turn (issue #29).
+        let x_start = area.x + span_total_width(&spans).min(area.width);
         spans.push(Span::styled("r", Style::default().fg(Color::Yellow)));
         let action = if app.turn.approved {
             " release  "
@@ -429,6 +455,9 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
             " approve  "
         };
         spans.push(Span::raw(action));
+        let label_chars = 1 + action.trim().chars().count();
+        let x_end = (x_start + label_chars as u16).min(area.x + area.width);
+        app.hits.release_span = Some((area.y, x_start, x_end));
     } else {
         spans.push(Span::raw("  "));
     }
@@ -458,7 +487,7 @@ fn render_status(frame: &mut Frame, area: Rect, app: &App) {
 /// Modal overlay for the "add any file" picker: a query input line atop a
 /// scrollable, fuzzy-ranked result list. Matched characters and the cursor row
 /// are highlighted; the list scrolls to keep the selection visible.
-fn render_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
+fn render_picker(frame: &mut Frame, area: Rect, picker: &Picker) -> (Rect, Rect, usize) {
     let area = centered_rect(70, (area.height * 7 / 10).max(6), area);
     let block = bordered(" Add file ", true);
     let inner = block.inner(area);
@@ -490,6 +519,7 @@ fn render_picker(frame: &mut Frame, area: Rect, picker: &Picker) {
 
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(lines).block(block), area);
+    (area, inner, offset)
 }
 
 /// One picker result row: bold the fuzzy-matched characters; highlight the whole
@@ -525,7 +555,7 @@ fn picker_row(path: &str, positions: &[usize], selected: bool) -> Line<'static> 
 /// fuzzy-ranked list of command names. Mirrors [`render_picker`]; matched
 /// characters and the cursor row are highlighted, and the list scrolls to keep
 /// the selection visible.
-fn render_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) {
+fn render_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) -> (Rect, Rect, usize) {
     let area = centered_rect(60, (area.height * 6 / 10).max(6), area);
     let block = bordered(" Command ", true);
     let inner = block.inner(area);
@@ -555,11 +585,16 @@ fn render_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) {
 
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(lines).block(block), area);
+    (area, inner, offset)
 }
 
 /// The modal comment composer: the target anchor, severity + tag chips, the
 /// body with a visible caret, and a key-hint footer.
-fn render_composer(frame: &mut Frame, area: Rect, composer: &Composer) {
+fn render_composer(
+    frame: &mut Frame,
+    area: Rect,
+    composer: &Composer,
+) -> (Rect, super::app::Hitspan, super::app::Hitspan) {
     let area = centered_rect(72, (area.height * 6 / 10).max(8), area);
     let block = bordered(" Comment ", true);
 
@@ -628,14 +663,48 @@ fn render_composer(frame: &mut Frame, area: Rect, composer: &Composer) {
     }
 
     lines.push(Line::raw(""));
-    let footer = match composer.mode {
-        Mode::Insert => "Esc normal  ·  Enter newline  ·  Ctrl-S save  ·  Ctrl-E severity  ·  Ctrl-T tag",
-        Mode::Normal => "Enter save  ·  i/a/o insert  ·  x/dd delete  ·  Esc cancel  ·  Ctrl-E severity  ·  Ctrl-T tag",
+    // The save / cancel labels are styled as button-like chips (green/red on
+    // black, bold) so they read as something clickable rather than just an
+    // informational footer (issue #29). The rest of the footer keeps the
+    // existing dim hint look. Layout below the chips records their column
+    // ranges so the mouse can hit them.
+    let dim = Style::default().fg(Color::DarkGray);
+    let save_chip_text = " save ";
+    let cancel_chip_text = " cancel ";
+    let save_chip_style = Style::default()
+        .bg(Color::Green)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    let cancel_chip_style = Style::default()
+        .bg(Color::Red)
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let save_hint = match composer.mode {
+        Mode::Insert => " (Ctrl-S)",
+        Mode::Normal => " (Enter)",
     };
-    lines.push(Line::from(Span::styled(
-        footer,
-        Style::default().fg(Color::DarkGray),
-    )));
+    let footer_line_idx = lines.len();
+    let inner_x = area.x + 1;
+    let footer_y = area.y + 1 + footer_line_idx as u16;
+    let save_x0 = inner_x;
+    let save_x1 = save_x0 + save_chip_text.chars().count() as u16;
+    let hint_after_save = save_x1 + save_hint.chars().count() as u16;
+    let pad = "  ";
+    let cancel_x0 = hint_after_save + pad.chars().count() as u16;
+    let cancel_x1 = cancel_x0 + cancel_chip_text.chars().count() as u16;
+    let cancel_hint = match composer.mode {
+        Mode::Insert => " (Esc → normal)",
+        Mode::Normal => " (Esc)",
+    };
+    lines.push(Line::from(vec![
+        Span::styled(save_chip_text, save_chip_style),
+        Span::styled(save_hint, dim),
+        Span::raw(pad),
+        Span::styled(cancel_chip_text, cancel_chip_style),
+        Span::styled(cancel_hint, dim),
+        Span::raw(pad),
+        Span::styled("Ctrl-E severity  ·  Ctrl-T tag  ·  Ctrl-J newline", dim),
+    ]));
 
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -644,19 +713,26 @@ fn render_composer(frame: &mut Frame, area: Rect, composer: &Composer) {
             .wrap(Wrap { trim: false }),
         area,
     );
+
+    let save_span: super::app::Hitspan = (footer_y, save_x0, save_x1);
+    let cancel_span: super::app::Hitspan = (footer_y, cancel_x0, cancel_x1);
+    (area, save_span, cancel_span)
 }
 
-/// The centered help overlay listing every keybinding.
+/// The centered help overlay listing every keybinding. The overlay is
+/// scrollable (issue #29): the body that doesn't fit in the viewport can be
+/// paged with `j`/`k`/`PageUp`/`PageDown`/`g`/`G` or the mouse wheel, and the
+/// title shows the current scroll-position percentage so the user knows there's
+/// more below.
 ///
-/// Kept compact (cyan section headers, no blank separators) so the whole list —
-/// including the closing hint — fits within a short, 24-row terminal.
+/// Returns the outer rect so the caller can record it for mouse hit-testing.
 ///
 /// TODO: this list is hand-written and only describes the *default* keymap, so it
 /// silently drifts once a user rebinds anything in their config. We need to
 /// generate it from the live binding registry instead — likely by attaching an
 /// optional description to each `m.map`/`m.command` and rendering those. Labelled
 /// "default keymap" in the meantime so it doesn't claim to be authoritative.
-fn render_help(frame: &mut Frame, area: Rect) {
+fn render_help(frame: &mut Frame, area: Rect, app: &mut App) -> Rect {
     let section =
         |name: &'static str| Line::from(Span::styled(name, Style::default().fg(Color::Cyan)));
     let text = vec![
@@ -664,6 +740,7 @@ fn render_help(frame: &mut Frame, area: Rect) {
             "mudpuppy — default keymap",
             Style::default().add_modifier(Modifier::BOLD),
         )),
+        Line::raw(""),
         section("Navigation"),
         Line::raw("  j / k         move cursor (diff) / selection (tree)"),
         Line::raw("  ctrl-d/u/f/b  half / full page down / up"),
@@ -671,32 +748,105 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::raw("  ]h / [h  } {  next / prev hunk"),
         Line::raw("  J / K         next / prev file (from the diff pane)"),
         Line::raw("  5j  100G      a number prefixes a count"),
+        Line::raw(""),
         section("Focus"),
         Line::raw("  Tab / l / h   toggle · tree → diff · diff → tree"),
+        Line::raw(""),
         section("Annotations  (Space is the leader)"),
         Line::raw("  Space a       annotations tab (all files) ↔ file tree"),
         Line::raw("  v / V  Esc    whole-line selection (diff) · clear"),
         Line::raw("  Space c c/f/r comment line/selection · file · reply"),
         Line::raw("  Space c e/d/s edit · delete (confirm y) · cycle status"),
+        Line::raw(""),
         section("More"),
         Line::raw("  Space t r     release the turn; first release approves"),
         Line::raw("  Space f       add any file · Space e    expand context"),
         Line::raw("  :             command palette"),
         Line::raw("  ? q Ctrl-c    help · quit"),
-        Line::from(Span::styled(
-            "press ?, q, or Esc to close",
-            Style::default().fg(Color::DarkGray),
-        )),
+        Line::raw(""),
+        section("Mouse"),
+        Line::raw("  wheel         scroll the pane / overlay under the cursor"),
+        Line::raw("  click         focus a pane; pick a file / annotation row"),
+        Line::raw("  click title   switch sidebar tabs (Files ↔ Annotations)"),
+        Line::raw("  click r       release / approve the turn (status bar)"),
+        Line::raw("  drag (diff)   enter visual mode and select lines"),
+        Line::raw("  dbl-click     open file (tree) · comment line (diff)"),
+        Line::raw(""),
+        section("Help overlay"),
+        Line::raw("  j / k         scroll down / up one line"),
+        Line::raw("  PgDn / PgUp   page down / up"),
+        Line::raw("  ctrl-d / u    half-page down / up"),
+        Line::raw("  g / G         jump to top / bottom"),
+        Line::raw("  ? / q / Esc   close"),
     ];
 
-    let area = centered_rect(64, text.len() as u16 + 2, area);
-    frame.render_widget(Clear, area);
-    frame.render_widget(
-        Paragraph::new(text)
-            .block(bordered(" Help ", true))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    // Match the picker's vertical sizing so the overlay family feels uniform
+    // — 70% of the terminal height, floored at 8 rows. Width stays at 64 so
+    // the keymap lines (built to fit there) don't wrap.
+    let height = ((area.height * 7 / 10).max(8)).min(text.len() as u16 + 2);
+    let outer = centered_rect(64, height, area);
+    let inner_height = outer.height.saturating_sub(2) as usize;
+
+    // Record metrics so the key handler can clamp/page correctly. When there's
+    // more content below the viewport we steal the last row for a "scroll for
+    // more" hint, so the effective viewport (the height clamping uses) shrinks
+    // by one.
+    app.help_total = text.len();
+    let has_more_hint_reserved = text.len() > inner_height;
+    let effective_height = if has_more_hint_reserved {
+        inner_height.saturating_sub(1).max(1)
+    } else {
+        inner_height
+    };
+    app.help_height = effective_height;
+    if app.help_scroll > app.max_help_scroll() {
+        app.help_scroll = app.max_help_scroll();
+    }
+
+    let at_bottom = app.help_scroll >= app.max_help_scroll();
+    let show_more_hint = has_more_hint_reserved && !at_bottom;
+
+    let pct = if app.max_help_scroll() == 0 {
+        "ALL".to_string()
+    } else if app.help_scroll == 0 {
+        "TOP".to_string()
+    } else if at_bottom {
+        "BOT".to_string()
+    } else {
+        format!("{}%", app.help_scroll * 100 / app.max_help_scroll())
+    };
+    let title = format!(" Help · {pct} · j/k · ? close ");
+
+    let block = bordered(&title, true);
+    let inner_area = block.inner(outer);
+    frame.render_widget(Clear, outer);
+    frame.render_widget(block, outer);
+
+    if show_more_hint {
+        let [content_area, hint_area] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner_area);
+        frame.render_widget(
+            Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .scroll((app.help_scroll as u16, 0)),
+            content_area,
+        );
+        let hint = Line::from(Span::styled(
+            "  ↓ press j or scroll for more ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ));
+        frame.render_widget(Paragraph::new(hint), hint_area);
+    } else {
+        frame.render_widget(
+            Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .scroll((app.help_scroll as u16, 0)),
+            inner_area,
+        );
+    }
+    outer
 }
 
 /// Turn one diff row into a styled line. `gutter` reserves the annotation-mark
@@ -805,6 +955,65 @@ fn diff_line(
         }
     }
     Line::from(spans)
+}
+
+/// Build the sidebar's bordered block with a two-tab title strip — `Files (N)`
+/// and `Annotations (M)` separated by `│`, the active tab styled as a chip and
+/// the inactive one dimmed. Records each chip's hit span on `app.hits` so a
+/// mouse click on either tab switches to it directly (issue #29). Only the
+/// active tab carries its count, keeping the strip narrow enough to fit inside
+/// the 28-column sidebar of the Files mode.
+fn sidebar_tabs_block(area: Rect, app: &mut App, focused: bool) -> Block<'static> {
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let active = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let inactive = Style::default().fg(Color::DarkGray);
+    let sep = Style::default().fg(Color::DarkGray);
+
+    let files_text = match app.sidebar {
+        Sidebar::Files => format!(" Files ({}) ", app.files.len()),
+        Sidebar::Annotations => " Files ".to_string(),
+    };
+    let annot_text = match app.sidebar {
+        Sidebar::Files => " Annotations ".to_string(),
+        Sidebar::Annotations => format!(" Annotations ({}) ", app.annotations.len()),
+    };
+
+    let (files_style, annot_style) = match app.sidebar {
+        Sidebar::Files => (active, inactive),
+        Sidebar::Annotations => (inactive, active),
+    };
+
+    // Title text is left-aligned just after the top-left corner glyph at
+    // `area.x`. Compute each chip's column span as we lay it out so the hit
+    // tester lands exactly on what the user sees.
+    let title_y = area.y;
+    let files_x0 = area.x + 1;
+    let files_x1 = files_x0 + files_text.chars().count() as u16;
+    let sep_x1 = files_x1 + 1; // single `│` cell
+    let annot_x0 = sep_x1;
+    let annot_x1 = annot_x0 + annot_text.chars().count() as u16;
+
+    app.hits.tab_files_span = Some((title_y, files_x0, files_x1));
+    app.hits.tab_annot_span = Some((title_y, annot_x0, annot_x1));
+
+    let title = Line::from(vec![
+        Span::styled(files_text, files_style),
+        Span::styled("│", sep),
+        Span::styled(annot_text, annot_style),
+    ]);
+
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title)
 }
 
 /// A bordered block whose border brightens when its pane is focused.
@@ -930,6 +1139,27 @@ pub(crate) fn target_desc(target: &Target) -> String {
     match target {
         Target::Local { base, .. } => format!("local vs {base}"),
         Target::Pr { pr, .. } => format!("PR {pr}"),
+    }
+}
+
+/// Sum of the char counts of every span — the approximate rendered width when
+/// the content is plain ASCII / single-cell glyphs. Used by the status bar to
+/// figure out where the next span will land so the release "button" hit region
+/// matches what the user sees. Wide CJK glyphs would skew this, but the status
+/// bar only renders ASCII/box-drawing.
+fn span_total_width(spans: &[Span<'_>]) -> u16 {
+    spans.iter().map(|s| s.content.chars().count() as u16).sum()
+}
+
+/// Shrink `area` by one cell on every side — the body inside a bordered block.
+/// Used to record the pane's clickable interior so a click on the body lands on
+/// the correct content row regardless of the surrounding border.
+fn inner_rect(area: Rect) -> Rect {
+    Rect {
+        x: area.x + 1,
+        y: area.y + 1,
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
     }
 }
 

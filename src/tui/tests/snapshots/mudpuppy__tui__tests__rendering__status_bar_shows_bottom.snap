@@ -1,8 +1,8 @@
 ---
-source: src/tui.rs
+source: src/tui/tests/rendering.rs
 expression: screen(&term)
 ---
-"┌ Files (7) ───────────────┐┌ src/long.rs [modified] 2/7 ──────────────────────────────────────────┐"
+"┌ Files (7) │ Annotations ─┐┌ src/long.rs [modified] 2/7 ──────────────────────────────────────────┐"
 "│M src/alpha.rs  +3 -2     ││    7     7   line 07                                                 │"
 "│M src/long.rs  +4 -2      ││    8     8   line 08                                                 │"
 "│M README.md  +1 -1        ││    9       - line 09 old                                             │"

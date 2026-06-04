@@ -24,7 +24,9 @@ pub(super) use crate::domain::{
 };
 pub(super) use crate::store;
 pub(super) use ratatui::backend::TestBackend;
-pub(super) use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+pub(super) use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 pub(super) use ratatui::style::{Color, Modifier, Style};
 pub(super) use ratatui::Terminal;
 
@@ -32,6 +34,7 @@ mod annotations;
 mod authoring;
 mod expansion;
 mod keymap;
+mod mouse;
 mod rendering;
 mod turns;
 

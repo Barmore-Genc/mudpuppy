@@ -147,17 +147,20 @@ fn config_hot_reload_rebinds_keys_live() {
     );
     assert!(session.wait_for_screen("file 1/2", Duration::from_secs(10)));
 
-    // Default binding: `Space a` opens the annotations tab.
+    // Default binding: `Space a` opens the annotations tab. Both tab chips
+    // ("Files" / "Annotations") are always visible in the sidebar title strip
+    // (issue #29), so we key on the active tab's `(N)` count marker rather
+    // than the bare word.
     session.feed(b" a");
     assert!(
-        session.wait_for_screen("Annotations", Duration::from_secs(5)),
+        session.wait_for_screen("Annotations (", Duration::from_secs(5)),
         "default `Space a` did not open the tab; screen:\n{}",
         session.screen()
     );
     // Close it again so the post-reload checks start from a known (closed) state.
     session.feed(b" a");
     assert!(
-        session.wait_until_absent("Annotations", Duration::from_secs(5)),
+        session.wait_until_absent("Annotations (", Duration::from_secs(5)),
         "default `Space a` did not close the tab; screen:\n{}",
         session.screen()
     );
@@ -180,7 +183,7 @@ fn config_hot_reload_rebinds_keys_live() {
     // The old sequence is now dead: `Space a` must do nothing.
     session.feed(b" a");
     assert!(
-        session.absent_after("Annotations", Duration::from_millis(600)),
+        session.absent_after("Annotations (", Duration::from_millis(600)),
         "`Space a` still opened the tab after being unmapped; screen:\n{}",
         session.screen()
     );
@@ -188,7 +191,7 @@ fn config_hot_reload_rebinds_keys_live() {
     // The new key works: `p` opens the tab.
     session.feed(b"p");
     assert!(
-        session.wait_for_screen("Annotations", Duration::from_secs(5)),
+        session.wait_for_screen("Annotations (", Duration::from_secs(5)),
         "rebound `p` did not open the tab; screen:\n{}",
         session.screen()
     );

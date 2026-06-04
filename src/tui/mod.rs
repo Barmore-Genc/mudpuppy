@@ -49,8 +49,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::crossterm::event::{
-    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
 };
+use ratatui::crossterm::execute;
 use ratatui::DefaultTerminal;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
@@ -90,8 +92,16 @@ pub fn launch(pr: Option<String>, base: Option<String>) -> Result<()> {
 
     // `ratatui::init` enters the alternate screen, turns on raw mode, and
     // installs a panic hook that restores the terminal; `restore` undoes it.
+    // Mouse capture is enabled on top so the TUI receives click/scroll/drag
+    // events (issue #29); a best-effort disable on shutdown puts the terminal
+    // back in its normal mode. A panic during the loop won't undo mouse
+    // capture — ratatui's panic hook only restores raw mode + the alt screen —
+    // but the alt-screen exit clears the visible state, so the leak is mostly
+    // cosmetic.
     let mut terminal = ratatui::init();
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
     let result = run_loop(&mut terminal, &mut app);
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
     result
 }
@@ -167,6 +177,12 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                         // and the hardwired Ctrl-C above. A capture can still
                         // create/remove annotations (composer save, delete), so
                         // diff snapshots around it and fire the change events.
+                        // The help overlay captures keys before Lua so it can
+                        // be scrolled / dismissed without touching the keymap.
+                        // Same precedence as the composer and modal overlays.
+                        if app.handle_help_key(key) {
+                            continue;
+                        }
                         if app.composer.is_some() || app.pending_delete.is_some() {
                             let before = Snapshot::of(app);
                             app.notice = None;
@@ -205,6 +221,30 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                             if app.should_quit {
                                 return Ok(());
                             }
+                            let after = Snapshot::of(app);
+                            fire_changes(&engine, app, &before, &after)?;
+                        }
+                    }
+                    // Mouse input — scroll, click-to-focus/select, drag for
+                    // visual mode, double-click in the diff to comment (issue
+                    // #29). Routed through `App::handle_mouse_event`, which
+                    // touches the same fields a key dispatch would, so we wrap
+                    // it in the same `Snapshot`/`fire_changes` dance to keep
+                    // `file_open`/`turn_change` events firing.
+                    Some(Ok(Event::Mouse(me))) => {
+                        let before = Snapshot::of(app);
+                        app.notice = None;
+                        let changed = app.handle_mouse_event(me);
+                        // A click on a `:command` palette row routes the
+                        // chosen command back through the engine, mirroring
+                        // what `handle_palette_key` returns on Enter.
+                        if let Some(name) = app.take_pending_command() {
+                            engine.run_command(app, &name)?;
+                            if app.should_quit {
+                                return Ok(());
+                            }
+                        }
+                        if changed {
                             let after = Snapshot::of(app);
                             fire_changes(&engine, app, &before, &after)?;
                         }
