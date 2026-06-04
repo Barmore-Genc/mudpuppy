@@ -1,0 +1,78 @@
+name: Pages
+
+# Publishes the project site to GitHub Pages (source: GitHub Actions). The site is
+# two things:
+#   * index.html  — README.md rendered to HTML.
+#   * dist-manifest.json — copied from the latest GitHub Release, so mudpuppy's
+#     built-in update check (src/update.rs) can read the current version over a
+#     plain HTTPS GET, with no `gh` needed on the user's machine.
+#
+# Runs on a push to main (README changed), when a release is published (manifest
+# changed), and on demand.
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# Pages needs id-token (for the deploy) and pages write; only read of contents.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; don't cancel an in-progress one mid-publish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # README.md -> _site/index.html, wrapped in a minimal styled page. Uses the
+      # Python `markdown` package (python3 is preinstalled on the runner). The
+      # script is kept flat (no nested indentation) so it is heredoc-safe.
+      - name: Render README to HTML
+        run: |
+          python3 -m pip install --quiet markdown
+          mkdir -p _site
+          python3 - <<'PY'
+          import markdown
+          body = markdown.markdown(open("README.md", encoding="utf-8").read(), extensions=["fenced_code", "tables", "toc"])
+          style = "body{max-width:50rem;margin:2rem auto;padding:0 1rem;font:16px/1.6 system-ui,sans-serif;color:#1b1f24}pre,code{font-family:ui-monospace,monospace}pre{background:#f5f6f8;padding:1rem;border-radius:6px;overflow:auto}code{background:#f5f6f8;padding:.1em .3em;border-radius:4px}pre code{background:none;padding:0}a{color:#2563eb}"
+          head = '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>mudpuppy</title><style>' + style + "</style></head><body>"
+          open("_site/index.html", "w", encoding="utf-8").write(head + body + "</body></html>")
+          PY
+
+      # Copy dist-manifest.json from the latest published release so the update
+      # check can read it. Tolerate there being no release yet (the site still
+      # publishes; the update check just finds nothing until the first release).
+      - name: Fetch latest release manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release download --repo "$GITHUB_REPOSITORY" \
+               --pattern 'dist-manifest.json' --dir _site --clobber; then
+            echo "Published dist-manifest.json from the latest release."
+          else
+            echo "No release manifest yet; skipping (the site still deploys)."
+          fi
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

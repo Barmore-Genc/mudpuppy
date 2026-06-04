@@ -90,6 +90,13 @@ syntect = { version = "5", default-features = false, features = ["default-fancy"
 # loaded on top. The interpreter is sandboxed: no io/os/network/subprocess.
 mlua = { version = "0.10", features = ["luau", "vendored"] }
 
+# Update check (update.rs). A tiny blocking HTTP+TLS client used for the single
+# launch-time GET of the release `dist-manifest.json` published to GitHub Pages —
+# so the check needs no `gh` (not a hard dependency of mudpuppy). The fetch runs on
+# a `tokio::task::spawn_blocking` thread so it never stalls the event loop; rustls
+# (ureq's default) keeps the TLS stack pure-Rust and toolchain-light.
+ureq = "2"
+
 [dev-dependencies]
 serde_json = "1"
 

@@ -36,6 +36,7 @@
 mod annotate;
 mod app;
 mod composer;
+mod prompt;
 mod render;
 #[cfg(test)]
 mod tests;
@@ -63,6 +64,11 @@ use crate::lua::keys::KeyChord;
 use crate::lua::{self, LuaEngine};
 use crate::session::Session;
 use crate::{source, store};
+
+/// Environment variable that, when set, disables the launch-time update check.
+/// The e2e harness sets it so tests never reach the network; users can set it to
+/// opt out without editing their config.
+pub const NO_UPDATE_CHECK_ENV: &str = "MUDPUPPY_NO_UPDATE_CHECK";
 
 /// Launch the interactive review UI.
 ///
@@ -151,6 +157,24 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
 
         let mut events = EventStream::new();
 
+        // One-shot, launch-time update check. Reviews are short-lived and opened
+        // afresh, so a single check per launch is plenty — no timer (and never
+        // more than once a session). The blocking HTTP fetch runs on a
+        // `spawn_blocking` thread so it never stalls the loop; its result (a newer
+        // version tag, if any) arrives on `update_rx`, and the loop turns that into
+        // an `update_check` event so `core.luau` can prompt. Skipped entirely when
+        // `MUDPUPPY_NO_UPDATE_CHECK` is set (the e2e harness sets it) or the user
+        // disabled checks in their config.
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        if std::env::var_os(NO_UPDATE_CHECK_ENV).is_none() && engine.update_checks_enabled() {
+            let tx = update_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Ok(Some(version)) = crate::update::check() {
+                    let _ = tx.send(version);
+                }
+            });
+        }
+
         // Initial events: `startup` once, then `file_open` for the file the
         // viewer opens on.
         engine.fire_startup(app)?;
@@ -188,6 +212,24 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                             app.notice = None;
                             let _ = app.handle_composer_key(key)
                                 || app.handle_pending_delete_key(key);
+                            let after = Snapshot::of(app);
+                            fire_changes(&engine, app, &before, &after)?;
+                            continue;
+                        }
+                        // A modal prompt (opened by `mudpuppy.prompt`) captures
+                        // keys ahead of the keymap, like the picker and palette.
+                        // Choosing an option runs its Lua callback through the
+                        // engine's scoped machinery, which can release the turn,
+                        // open another prompt, or quit — so snapshot around it.
+                        if app.prompt.is_some() {
+                            let before = Snapshot::of(app);
+                            app.notice = None;
+                            if let Some(index) = app.handle_prompt_key(key) {
+                                engine.run_prompt(app, index)?;
+                                if app.should_quit {
+                                    return Ok(());
+                                }
+                            }
                             let after = Snapshot::of(app);
                             fire_changes(&engine, app, &before, &after)?;
                             continue;
@@ -270,6 +312,18 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                 // Errors are non-fatal and surface in the status bar.
                 Some(()) = cfg_rx.recv() => {
                     let _ = engine.reload_config();
+                }
+                // The launch-time update check found a newer release. Fire
+                // `update_check` so `core.luau` can prompt; its callbacks can
+                // release the turn or quit, so snapshot around it.
+                Some(version) = update_rx.recv() => {
+                    let before = Snapshot::of(app);
+                    engine.fire_update_check(app, &version)?;
+                    if app.should_quit {
+                        return Ok(());
+                    }
+                    let after = Snapshot::of(app);
+                    fire_changes(&engine, app, &before, &after)?;
                 }
             }
         }

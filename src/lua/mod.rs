@@ -56,6 +56,17 @@ type Commands = Rc<RefCell<HashMap<String, Function>>>;
 /// can update it and `map` can expand `<leader>` at registration time.
 type Leader = Rc<RefCell<KeyChord>>;
 
+/// The callbacks for the currently-open `mudpuppy.prompt`, indexed by option. Set
+/// when a prompt opens and cleared when the user chooses or dismisses it; the
+/// labels live on `App` (the render side) while these stay here.
+type Prompts = Rc<RefCell<Vec<Function>>>;
+
+/// Whether automatic update checks are enabled, shared so `mudpuppy.updates`'s
+/// `set_check_enabled`/`disable` can flip it and `check_enabled` can read it.
+/// Default `true`; reset to the default on a config reload (like [`Leader`]) so a
+/// removed disable line reverts.
+type UpdateChecks = Rc<RefCell<bool>>;
+
 /// A lifecycle/store event a script can subscribe to with `mudpuppy.on`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventKind {
@@ -69,6 +80,9 @@ pub enum EventKind {
     AnnotationAdded,
     /// The turn's `seq` or `owner` changed.
     TurnChange,
+    /// A newer release was found by the launch-time check. Payload: `{ version }`.
+    /// `core.luau` subscribes to it to prompt the user.
+    UpdateCheck,
 }
 
 impl EventKind {
@@ -79,6 +93,7 @@ impl EventKind {
             "reload" => EventKind::Reload,
             "annotation_added" => EventKind::AnnotationAdded,
             "turn_change" => EventKind::TurnChange,
+            "update_check" => EventKind::UpdateCheck,
             _ => return None,
         })
     }
@@ -96,6 +111,10 @@ pub struct LuaEngine {
     events: Events,
     commands: Commands,
     leader: Leader,
+    /// Callbacks for the currently-open prompt, indexed by option.
+    prompts: Prompts,
+    /// Whether automatic update checks are on (default true, reset on reload).
+    update_checks: UpdateChecks,
     /// Where the user config lives (if anywhere). `None` disables user config —
     /// used by tests so the default keymap is exercised in isolation.
     config_path: Option<PathBuf>,
@@ -123,6 +142,9 @@ impl LuaEngine {
         let commands: Commands = Rc::new(RefCell::new(HashMap::new()));
         // Default leader is `space`; a config can change it with `mudpuppy.leader`.
         let leader: Leader = Rc::new(RefCell::new(KeyChord::plain(Key::Char(' '))));
+        let prompts: Prompts = Rc::new(RefCell::new(Vec::new()));
+        // Automatic update checks are on unless the user config disables them.
+        let update_checks: UpdateChecks = Rc::new(RefCell::new(true));
         let status: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
         // Redirect `print` to the status buffer — the TUI owns the screen, so a
@@ -144,6 +166,7 @@ impl LuaEngine {
             events.clone(),
             commands.clone(),
             leader.clone(),
+            update_checks.clone(),
         )
         .map_err(|e| anyhow!("building the mudpuppy table: {e}"))?;
         lua.globals()
@@ -169,6 +192,8 @@ impl LuaEngine {
             events,
             commands,
             leader,
+            prompts,
+            update_checks,
             config_path,
             status,
         };
@@ -220,6 +245,10 @@ impl LuaEngine {
         // The leader is config-set too, so reset it before re-exec so a removed
         // `mudpuppy.leader` call reverts to the default.
         *self.leader.borrow_mut() = KeyChord::plain(Key::Char(' '));
+        // Same for the update-check flag: default on, then let the config disable
+        // it again if its skip line is still present.
+        *self.update_checks.borrow_mut() = true;
+        self.prompts.borrow_mut().clear();
         *self.status.borrow_mut() = None;
         self.load_scripts(false)
     }
@@ -333,9 +362,34 @@ impl LuaEngine {
         let cell = RefCell::new(app);
         let table = &self.mudpuppy;
         self.lua.scope(|scope| {
-            api::install_scoped(&self.lua, scope, table, &cell, &self.commands)?;
+            api::install_scoped(
+                &self.lua,
+                scope,
+                table,
+                &cell,
+                &self.commands,
+                &self.prompts,
+            )?;
             callback.call::<()>(())
         })
+    }
+
+    /// Run the callback for the option the user chose in an open prompt (the
+    /// index [`App::handle_prompt_key`] returned), then clear the stored
+    /// callbacks. Runs in the same scoped machinery as a command, so the option
+    /// can drive the app (release the turn, quit, open another prompt, trigger an
+    /// update). An out-of-range index or a faulty callback is surfaced, not
+    /// propagated.
+    pub(crate) fn run_prompt(&self, app: &mut App, index: usize) -> Result<()> {
+        let callback = self.prompts.borrow().get(index).cloned();
+        // The choice is consumed regardless; a fresh prompt reseeds the registry.
+        self.prompts.borrow_mut().clear();
+        if let Some(callback) = callback {
+            if let Err(e) = self.run_in_scope(app, &callback) {
+                self.set_status(format!("prompt error: {e}"));
+            }
+        }
+        Ok(())
     }
 
     /// Fire `startup` (no payload).
@@ -379,6 +433,23 @@ impl LuaEngine {
         })
     }
 
+    /// Fire `update_check{version=…}` after the launch-time check found a newer
+    /// release. `core.luau` handles the prompt; the event loop did the fetch.
+    pub(crate) fn fire_update_check(&self, app: &mut App, version: &str) -> Result<()> {
+        let version = version.to_string();
+        self.fire(app, EventKind::UpdateCheck, move |lua, _| {
+            let t = lua.create_table()?;
+            t.set("version", version)?;
+            Ok(t)
+        })
+    }
+
+    /// Whether automatic update checks are enabled (the shared flag a config can
+    /// turn off). The event loop reads this before launching the check.
+    pub(crate) fn update_checks_enabled(&self) -> bool {
+        *self.update_checks.borrow()
+    }
+
     /// Run every handler for `kind` in a fresh scope (so handlers can call action
     /// verbs without a re-entrant borrow). `build` produces the payload table; it
     /// runs while a shared `&App` borrow is held, which is released before the
@@ -397,7 +468,14 @@ impl LuaEngine {
         let cell = RefCell::new(app);
         let table = &self.mudpuppy;
         let result = self.lua.scope(|scope| {
-            api::install_scoped(&self.lua, scope, table, &cell, &self.commands)?;
+            api::install_scoped(
+                &self.lua,
+                scope,
+                table,
+                &cell,
+                &self.commands,
+                &self.prompts,
+            )?;
             // Build the payload, then drop the read borrow before calling the
             // handlers (which may take a write borrow via an action verb).
             let payload = {
@@ -580,6 +658,7 @@ Actions (call these from inside a binding or hook):
   mudpuppy.edit_comment()        edit your annotation on the cursor line
   mudpuppy.delete_comment()      delete your annotation (confirm with y)
   mudpuppy.cycle_status()        open → resolved → wontfix for the cursor line
+  mudpuppy.prompt(msg, options)  open a modal question (see Prompts below)
 
 The count-aware verbs multiply/repeat by the pending count (see Counts below);
 the absolute verbs (select_file, set_scroll, set_cursor, cursor_to_*) ignore it.
@@ -646,7 +725,35 @@ The :command palette
 --------------------
 Press ":" to open a fuzzy command palette over every name registered with
 `mudpuppy.command(name, fn)`. Type to filter, Tab to autocomplete to the top
-match, Enter to run, Esc to cancel.
+match, Enter to run, Esc to cancel. The built-in `check-updates` command checks
+GitHub for a newer release on demand.
+
+Prompts
+-------
+`mudpuppy.prompt(message, options)` opens a modal question. `options` is an
+ordered array; each option is either a `{ "Label", function() ... end }` pair or
+a `{ label = "Label", action = function() ... end }` table. The labels render as
+numbered chips; ←/→ (or h/l, j/k) move the highlight, 1-9 pick directly, Enter
+confirms the highlighted option and runs its function, Esc dismisses without
+running anything. It is a general primitive — the auto-update flow is one user.
+
+Updates
+-------
+Once per launch mudpuppy checks for a newer release (by reading the published
+release manifest over HTTPS — no `gh` needed) and, when one exists, prompts you
+to install it, ignore it for now, or skip (stop checking — this writes a line to
+your config). The same primitives are scriptable:
+  mudpuppy.updates.check()              -> a "vX.Y.Z" string if a newer release
+                                           exists, else nil (does a blocking
+                                           fetch; the launch check runs off-thread)
+  mudpuppy.updates.update(version)      install `version`; it must be a strict
+                                           "vMAJOR.MINOR.PATCH" tag (validated
+                                           before anything is run)
+  mudpuppy.updates.check_enabled()      -> whether automatic checks are on
+  mudpuppy.updates.set_check_enabled(b) turn automatic checks on/off (memory only)
+  mudpuppy.updates.disable()            stop checking and persist that to config
+Set MUDPUPPY_NO_UPDATE_CHECK in the environment to disable the launch check
+without touching your config.
 
 Events
 ------
@@ -658,6 +765,8 @@ Events
                     payload: { annotation = { ... } }
   turn_change       when the turn's owner or seq changes
                     payload: { turn = { ... } }
+  update_check      once per launch, when the check found a newer release
+                    payload: { version = "vX.Y.Z" }  (the default handler prompts)
 
 Examples
 --------
@@ -689,6 +798,14 @@ React to events — notice when the agent is waiting on you:
 
   mudpuppy.on("file_open", function(ev)
     print("viewing " .. ev.file.path)
+  end)
+
+Ask a question with a modal prompt:
+  mudpuppy.command("quit?", function()
+    mudpuppy.prompt("Quit mudpuppy?", {
+      { "Yes", function() mudpuppy.quit() end },
+      { "No",  function() end },
+    })
   end)
 
 Every built-in binding is written against this same API, so the default keymap
@@ -1047,6 +1164,121 @@ index 333..444 100644
         engine.fire_turn_change(&mut a).unwrap();
         // A fresh turn belongs to the agent.
         assert_eq!(engine.status_message().as_deref(), Some("agent"));
+    }
+
+    #[test]
+    fn prompt_opens_an_overlay_and_runs_the_chosen_options_callback() {
+        // A command opens a two-option prompt; running each option fires its own
+        // callback through the engine's scoped machinery.
+        let (_dir, path) = config(
+            "mudpuppy.command(\"ask\", function()\n\
+               mudpuppy.prompt(\"pick one\", {\n\
+                 { \"first\", function() print(\"chose-first\") end },\n\
+                 { \"second\", function() mudpuppy.quit() end },\n\
+               })\n\
+             end)\n",
+        );
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+
+        engine.run_command(&mut a, "ask").unwrap();
+        let prompt = a.prompt.as_ref().expect("the prompt is open");
+        assert_eq!(prompt.message, "pick one");
+        assert_eq!(
+            prompt.options,
+            vec!["first".to_string(), "second".to_string()]
+        );
+
+        // Option 0 runs its callback (a print, surfaced in the status bar).
+        engine.run_prompt(&mut a, 0).unwrap();
+        assert_eq!(engine.status_message().as_deref(), Some("chose-first"));
+        assert!(!a.should_quit);
+
+        // Re-open and pick option 1, which quits.
+        engine.run_command(&mut a, "ask").unwrap();
+        engine.run_prompt(&mut a, 1).unwrap();
+        assert!(a.should_quit);
+    }
+
+    #[test]
+    fn prompt_accepts_the_keyed_option_form() {
+        let (_dir, path) = config(
+            "mudpuppy.command(\"ask\", function()\n\
+               mudpuppy.prompt(\"q\", { { label = \"only\", action = function() end } })\n\
+             end)\n",
+        );
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        engine.run_command(&mut a, "ask").unwrap();
+        assert_eq!(
+            a.prompt.as_ref().map(|p| p.options.clone()),
+            Some(vec!["only".to_string()])
+        );
+    }
+
+    #[test]
+    fn prompt_with_no_options_is_an_error_and_opens_nothing() {
+        let (_dir, path) =
+            config("mudpuppy.command(\"ask\", function() mudpuppy.prompt(\"empty\", {}) end)");
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        engine.run_command(&mut a, "ask").unwrap();
+        assert!(a.prompt.is_none(), "an empty prompt must not open");
+        assert!(engine
+            .status_message()
+            .is_some_and(|m| m.contains("at least one option")));
+    }
+
+    #[test]
+    fn run_prompt_with_an_out_of_range_index_is_a_noop() {
+        let (_dir, path) = config(
+            "mudpuppy.command(\"ask\", function()\n\
+               mudpuppy.prompt(\"q\", { { \"only\", function() mudpuppy.quit() end } })\n\
+             end)\n",
+        );
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        engine.run_command(&mut a, "ask").unwrap();
+        engine.run_prompt(&mut a, 9).unwrap();
+        assert!(!a.should_quit, "no callback for a bad index");
+    }
+
+    #[test]
+    fn update_checks_flag_defaults_on_and_a_config_line_disables_it() {
+        // Default: checks enabled.
+        let (_dir, path) = config(
+            "mudpuppy.command(\"flag\", function() print(tostring(mudpuppy.updates.check_enabled())) end)",
+        );
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        engine.run_command(&mut a, "flag").unwrap();
+        assert_eq!(engine.status_message().as_deref(), Some("true"));
+
+        // The line the skip action persists turns it off on load.
+        let (_dir, path) = config(
+            "mudpuppy.updates.set_check_enabled(false)\n\
+             mudpuppy.command(\"flag\", function() print(tostring(mudpuppy.updates.check_enabled())) end)\n",
+        );
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        engine.run_command(&mut a, "flag").unwrap();
+        assert_eq!(engine.status_message().as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn updates_update_rejects_a_malicious_version_without_spawning() {
+        // `update` validates before it would ever spawn `cargo`; a funky version
+        // raises, which pcall catches as a `false` first return.
+        let (_dir, path) = config(
+            "mudpuppy.command(\"bad\", function()\n\
+               local ok = pcall(function() mudpuppy.updates.update(\"v1.2.3; rm -rf /\") end)\n\
+               print(tostring(ok))\n\
+             end)\n",
+        );
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        engine.run_command(&mut a, "bad").unwrap();
+        assert_eq!(engine.status_message().as_deref(), Some("false"));
     }
 
     #[test]

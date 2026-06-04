@@ -44,6 +44,57 @@ fn diff_pane_focused_and_cursor_moved() {
 }
 
 #[test]
+fn prompt_overlay_shows_message_and_options() {
+    // The modal prompt (opened from Lua via `mudpuppy.prompt`) draws the question
+    // and a row of numbered option chips on top of the panes.
+    let mut a = app();
+    a.open_prompt(
+        "mudpuppy v9.9.9 is available. Update now?".to_string(),
+        vec![
+            "Install".to_string(),
+            "Ignore for now".to_string(),
+            "Skip".to_string(),
+        ],
+    );
+    let term = drive(&mut a, 100, 24, &[]);
+    let s = screen(&term);
+    assert!(s.contains("v9.9.9 is available"));
+    assert!(s.contains("Install"));
+    assert!(s.contains("Skip"));
+    insta::assert_snapshot!(s);
+}
+
+#[test]
+fn prompt_navigation_moves_and_commits_the_selection() {
+    let mut a = app();
+    a.open_prompt(
+        "pick".to_string(),
+        vec!["a".to_string(), "b".to_string(), "c".to_string()],
+    );
+    // Right/l advances; clamps at the last option.
+    a.handle_key(key(KeyCode::Right));
+    assert_eq!(a.prompt.as_ref().unwrap().selected, 1);
+    a.handle_key(key(KeyCode::Char('l')));
+    a.handle_key(key(KeyCode::Char('l')));
+    assert_eq!(a.prompt.as_ref().unwrap().selected, 2, "clamped at the end");
+    // Left walks back.
+    a.handle_key(key(KeyCode::Left));
+    assert_eq!(a.prompt.as_ref().unwrap().selected, 1);
+    // Enter on the highlighted option closes the prompt (the callback is run by
+    // the engine in the real loop; here we only see that it dismisses).
+    a.handle_key(key(KeyCode::Enter));
+    assert!(a.prompt.is_none(), "Enter commits and closes");
+}
+
+#[test]
+fn prompt_esc_dismisses_without_choosing() {
+    let mut a = app();
+    a.open_prompt("q".to_string(), vec!["only".to_string()]);
+    a.handle_key(key(KeyCode::Esc));
+    assert!(a.prompt.is_none());
+}
+
+#[test]
 fn status_bar_shows_bottom() {
     // G in the diff pane pins to the last row; status reads BOT.
     let mut a = app();
