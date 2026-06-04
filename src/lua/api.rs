@@ -118,16 +118,20 @@ const DISABLE_MARKER: &str = "-- Added by mudpuppy: stop checking for updates.";
 fn build_updates_table(lua: &Lua, update_checks: UpdateChecks) -> Result<Table> {
     let updates = lua.create_table()?;
 
-    // `check()` -> a `vX.Y.Z` string if GitHub has a newer release, else nil.
-    // A failure to reach `gh` is logged and reported as "no update" so a missing
-    // CLI never throws into a script.
+    // `check()` -> `(version, changelog)`: a `vX.Y.Z` string if a newer release
+    // exists (else nil), and its changelog as a Markdown string (or nil). A failed
+    // fetch is logged and reported as "no update" so a transient error never throws
+    // into a script. Scripts that only want the version take the first return value.
     updates.set(
         "check",
-        lua.create_function(|_, ()| match crate::update::check() {
-            Ok(found) => Ok(found),
-            Err(e) => {
-                crate::log_warn!("update check failed: {e}");
-                Ok(None)
+        lua.create_function(|_, ()| -> mlua::Result<(Option<String>, Option<String>)> {
+            match crate::update::check() {
+                Ok(Some(update)) => Ok((Some(update.version), update.changelog)),
+                Ok(None) => Ok((None, None)),
+                Err(e) => {
+                    crate::log_warn!("update check failed: {e}");
+                    Ok((None, None))
+                }
             }
         })?,
     )?;
@@ -376,37 +380,44 @@ pub fn install_scoped<'scope>(
     )?;
 
     // Open a modal prompt: a question plus an ordered list of `{label, callback}`
-    // options. The labels render in the overlay; the callbacks are stashed in the
-    // shared `prompts` registry (cleared first so a re-prompt doesn't keep stale
-    // options) and run by `LuaEngine::run_prompt` when the user chooses. Each
-    // option is a 2-element array `{ "Label", function() ... end }`, or a table
+    // options, and an optional third argument — a body string shown in a scrollable
+    // help-style region above the options (the update flow passes the changelog).
+    // The labels render in the overlay; the callbacks are stashed in the shared
+    // `prompts` registry (cleared first so a re-prompt doesn't keep stale options)
+    // and run by `LuaEngine::run_prompt` when the user chooses. Each option is a
+    // 2-element array `{ "Label", function() ... end }`, or a table
     // `{ label = "Label", action = function() ... end }`.
     let pr = prompts.clone();
     table.set(
         "prompt",
-        scope.create_function(move |_, (message, options): (String, Table)| {
-            let mut labels: Vec<String> = Vec::new();
-            let mut callbacks: Vec<Function> = Vec::new();
-            for option in options.sequence_values::<Table>() {
-                let option = option?;
-                let label: String = option
-                    .get("label")
-                    .or_else(|_| option.get(1))
-                    .map_err(|_| mlua::Error::runtime("prompt option needs a string label"))?;
-                let action: Function = option
-                    .get("action")
-                    .or_else(|_| option.get(2))
-                    .map_err(|_| mlua::Error::runtime("prompt option needs a function"))?;
-                labels.push(label);
-                callbacks.push(action);
-            }
-            if labels.is_empty() {
-                return Err(mlua::Error::runtime("prompt requires at least one option"));
-            }
-            *pr.borrow_mut() = callbacks;
-            cell.borrow_mut().open_prompt(message, labels);
-            Ok(())
-        })?,
+        scope.create_function(
+            move |_, (message, options, body): (String, Table, Option<String>)| {
+                let mut labels: Vec<String> = Vec::new();
+                let mut callbacks: Vec<Function> = Vec::new();
+                for option in options.sequence_values::<Table>() {
+                    let option = option?;
+                    let label: String = option
+                        .get("label")
+                        .or_else(|_| option.get(1))
+                        .map_err(|_| mlua::Error::runtime("prompt option needs a string label"))?;
+                    let action: Function = option
+                        .get("action")
+                        .or_else(|_| option.get(2))
+                        .map_err(|_| mlua::Error::runtime("prompt option needs a function"))?;
+                    labels.push(label);
+                    callbacks.push(action);
+                }
+                if labels.is_empty() {
+                    return Err(mlua::Error::runtime("prompt requires at least one option"));
+                }
+                *pr.borrow_mut() = callbacks;
+                // A blank body is treated as none so the prompt stays compact.
+                let body = body.filter(|b| !b.trim().is_empty());
+                cell.borrow_mut()
+                    .open_prompt_with_body(message, labels, body);
+                Ok(())
+            },
+        )?,
     )?;
 
     // --- cursor, visual selection, and authoring ----------------------------

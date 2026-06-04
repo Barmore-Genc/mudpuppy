@@ -103,7 +103,7 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     }
     // A modal prompt sits on top of everything (only one overlay is open at a
     // time in practice, but draw it last so it is unambiguously topmost).
-    if let Some(prompt) = app.prompt.as_ref() {
+    if let Some(prompt) = app.prompt.as_mut() {
         let area = frame.area();
         render_prompt(frame, area, prompt);
     }
@@ -113,19 +113,43 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
 /// above a row of labelled option chips, the highlighted one styled like a button.
 /// A footer spells out the keys. The matching callbacks run in the scripting
 /// engine when the user confirms.
-fn render_prompt(frame: &mut Frame, area: Rect, prompt: &super::prompt::Prompt) {
+fn render_prompt(frame: &mut Frame, area: Rect, prompt: &mut super::prompt::Prompt) {
+    // A prompt with a scrollable body (e.g. an update changelog) renders help-sized
+    // so the notes have room; a plain prompt stays compact.
+    if prompt.body.is_some() {
+        render_prompt_with_body(frame, area, prompt);
+        return;
+    }
+
     let area = centered_rect(64, (area.height * 4 / 10).max(7), area);
     let block = bordered(" mudpuppy ", true);
 
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        prompt.message.clone(),
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::raw(""));
+    let lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            prompt.message.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(option_chips(prompt)),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "←/→ choose  ·  1-9 pick  ·  Enter confirm  ·  Esc dismiss",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
 
-    // One chip per option, numbered (`1`–) so a digit key picks it directly. The
-    // highlighted option reads as a button; the rest are dim.
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// The option row: one numbered chip per option, the highlighted one styled like a
+/// button. Shared by the compact and bodied prompt layouts.
+fn option_chips(prompt: &super::prompt::Prompt) -> Vec<Span<'static>> {
     let mut chips: Vec<Span> = Vec::new();
     for (i, label) in prompt.options.iter().enumerate() {
         if i > 0 {
@@ -142,20 +166,114 @@ fn render_prompt(frame: &mut Frame, area: Rect, prompt: &super::prompt::Prompt) 
         };
         chips.push(Span::styled(text, style));
     }
-    lines.push(Line::from(chips));
+    chips
+}
 
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        "←/→ choose  ·  1-9 pick  ·  Enter confirm  ·  Esc dismiss",
-        Style::default().fg(Color::DarkGray),
-    )));
+/// A prompt with a scrollable body: the question headline, the body (e.g. a
+/// changelog) in a help-style scroll region with a "press j or scroll" hint, then
+/// the option chips and a key footer.
+fn render_prompt_with_body(frame: &mut Frame, area: Rect, prompt: &mut super::prompt::Prompt) {
+    // Match the help overlay's sizing so the overlay family feels uniform.
+    let height = (area.height * 7 / 10).max(10);
+    let outer = centered_rect(72, height, area);
 
-    frame.render_widget(Clear, area);
+    let body_lines: Vec<Line> = prompt
+        .body
+        .as_deref()
+        .unwrap_or("")
+        .split('\n')
+        .map(|t| Line::raw(t.to_string()))
+        .collect();
+    prompt.body_total = body_lines.len();
+
+    // Fixed rows around the scrollable body: headline + blank on top, blank + chips
+    // + footer below. The body gets the rest, less one row for the scroll hint when
+    // there is more content than fits.
+    const FIXED_ROWS: u16 = 5;
+    let inner_height = outer.height.saturating_sub(2);
+    let body_room = inner_height.saturating_sub(FIXED_ROWS).max(1) as usize;
+    let has_more_hint = prompt.body_total > body_room;
+    prompt.body_height = if has_more_hint {
+        body_room.saturating_sub(1).max(1)
+    } else {
+        body_room
+    };
+    if prompt.body_scroll > prompt.max_body_scroll() {
+        prompt.body_scroll = prompt.max_body_scroll();
+    }
+
+    let max_scroll = prompt.max_body_scroll();
+    let at_bottom = prompt.body_scroll >= max_scroll;
+    let pct = if max_scroll == 0 {
+        "ALL".to_string()
+    } else if prompt.body_scroll == 0 {
+        "TOP".to_string()
+    } else if at_bottom {
+        "BOT".to_string()
+    } else {
+        format!("{}%", prompt.body_scroll * 100 / max_scroll)
+    };
+    let title = format!(" mudpuppy · {pct} · j/k scroll ");
+    let block = bordered(&title, true);
+    let inner = block.inner(outer);
+    frame.render_widget(Clear, outer);
+    frame.render_widget(block, outer);
+
+    let body_constraint = prompt.body_height as u16 + u16::from(has_more_hint);
+    let [headline, _gap, body_area, blank, chips_area, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(body_constraint),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    let _ = blank;
+
     frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        area,
+        Paragraph::new(Line::from(Span::styled(
+            prompt.message.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )))
+        .wrap(Wrap { trim: false }),
+        headline,
+    );
+
+    if has_more_hint && !at_bottom {
+        let [content, hint] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(body_area);
+        frame.render_widget(
+            Paragraph::new(body_lines)
+                .wrap(Wrap { trim: false })
+                .scroll((prompt.body_scroll as u16, 0)),
+            content,
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "  ↓ press j or scroll for more ",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ))),
+            hint,
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(body_lines)
+                .wrap(Wrap { trim: false })
+                .scroll((prompt.body_scroll as u16, 0)),
+            body_area,
+        );
+    }
+
+    frame.render_widget(Paragraph::new(Line::from(option_chips(prompt))), chips_area);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "←/→ choose · 1-9 pick · Enter confirm · j/k scroll · Esc dismiss",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        footer,
     );
 }
 

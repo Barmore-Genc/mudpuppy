@@ -48,13 +48,14 @@ fn prompt_overlay_shows_message_and_options() {
     // The modal prompt (opened from Lua via `mudpuppy.prompt`) draws the question
     // and a row of numbered option chips on top of the panes.
     let mut a = app();
-    a.open_prompt(
+    a.open_prompt_with_body(
         "mudpuppy v9.9.9 is available. Update now?".to_string(),
         vec![
             "Install".to_string(),
             "Ignore for now".to_string(),
             "Skip".to_string(),
         ],
+        None,
     );
     let term = drive(&mut a, 100, 24, &[]);
     let s = screen(&term);
@@ -67,9 +68,10 @@ fn prompt_overlay_shows_message_and_options() {
 #[test]
 fn prompt_navigation_moves_and_commits_the_selection() {
     let mut a = app();
-    a.open_prompt(
+    a.open_prompt_with_body(
         "pick".to_string(),
         vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        None,
     );
     // Right/l advances; clamps at the last option.
     a.handle_key(key(KeyCode::Right));
@@ -87,9 +89,43 @@ fn prompt_navigation_moves_and_commits_the_selection() {
 }
 
 #[test]
+fn prompt_with_body_shows_a_scrollable_changelog() {
+    // A prompt opened with a body (the update flow passes the changelog) renders
+    // help-style: the question, the scrollable notes, and a "scroll for more" hint
+    // when they overflow.
+    let mut a = app();
+    let changelog = (1..=40)
+        .map(|n| format!("- change number {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    a.open_prompt_with_body(
+        "mudpuppy v9.9.9 is available. Update now?".to_string(),
+        vec!["Install".to_string(), "Skip".to_string()],
+        Some(changelog),
+    );
+    let term = drive(&mut a, 100, 24, &[]);
+    let s = screen(&term);
+    assert!(s.contains("v9.9.9 is available"));
+    assert!(s.contains("change number 1"));
+    assert!(s.contains("scroll for more"), "overflow hint is shown");
+    insta::assert_snapshot!(s);
+
+    // `j` scrolls the body, not the option selection (which stays on the first).
+    a.handle_key(key(KeyCode::Char('j')));
+    a.handle_key(key(KeyCode::Char('j')));
+    let p = a.prompt.as_ref().unwrap();
+    assert_eq!(p.body_scroll, 2, "j scrolled the changelog");
+    assert_eq!(p.selected, 0, "options didn't move");
+
+    // Arrows still move between options.
+    a.handle_key(key(KeyCode::Right));
+    assert_eq!(a.prompt.as_ref().unwrap().selected, 1);
+}
+
+#[test]
 fn prompt_esc_dismisses_without_choosing() {
     let mut a = app();
-    a.open_prompt("q".to_string(), vec!["only".to_string()]);
+    a.open_prompt_with_body("q".to_string(), vec!["only".to_string()], None);
     a.handle_key(key(KeyCode::Esc));
     assert!(a.prompt.is_none());
 }

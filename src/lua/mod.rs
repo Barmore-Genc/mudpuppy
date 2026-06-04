@@ -433,13 +433,20 @@ impl LuaEngine {
         })
     }
 
-    /// Fire `update_check{version=…}` after the launch-time check found a newer
-    /// release. `core.luau` handles the prompt; the event loop did the fetch.
-    pub(crate) fn fire_update_check(&self, app: &mut App, version: &str) -> Result<()> {
-        let version = version.to_string();
+    /// Fire `update_check{version=…, changelog=…}` after the launch-time check
+    /// found a newer release. `core.luau` handles the prompt; the event loop did
+    /// the fetch. `changelog` is nil when the manifest carried no release notes.
+    pub(crate) fn fire_update_check(
+        &self,
+        app: &mut App,
+        update: &crate::update::Update,
+    ) -> Result<()> {
+        let version = update.version.clone();
+        let changelog = update.changelog.clone();
         self.fire(app, EventKind::UpdateCheck, move |lua, _| {
             let t = lua.create_table()?;
             t.set("version", version)?;
+            t.set("changelog", changelog)?;
             Ok(t)
         })
     }
@@ -744,8 +751,10 @@ release manifest over HTTPS — no `gh` needed) and, when one exists, prompts yo
 to install it, ignore it for now, or skip (stop checking — this writes a line to
 your config). The same primitives are scriptable:
   mudpuppy.updates.check()              -> a "vX.Y.Z" string if a newer release
-                                           exists, else nil (does a blocking
-                                           fetch; the launch check runs off-thread)
+                                           exists (else nil) plus its changelog as
+                                           a second return value (Markdown or nil);
+                                           does a blocking fetch (the launch check
+                                           runs off-thread)
   mudpuppy.updates.update(version)      install `version`; it must be a strict
                                            "vMAJOR.MINOR.PATCH" tag (validated
                                            before anything is run)
@@ -766,7 +775,8 @@ Events
   turn_change       when the turn's owner or seq changes
                     payload: { turn = { ... } }
   update_check      once per launch, when the check found a newer release
-                    payload: { version = "vX.Y.Z" }  (the default handler prompts)
+                    payload: { version = "vX.Y.Z", changelog = "..."|nil }
+                    (the default handler prompts, showing the changelog)
 
 Examples
 --------

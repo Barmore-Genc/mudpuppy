@@ -15,6 +15,13 @@
 //! (never a shell string) this keeps a version value, even one that reached us
 //! from a script or the network, from smuggling extra arguments or shell
 //! metacharacters into the subprocess.
+//!
+//! **Download integrity.** We never fetch a release binary ourselves, so there is
+//! no separately downloaded artifact for us to checksum. [`install`] delegates to
+//! `cargo install --locked`, and cargo verifies the SHA-256 of the crate it pulls
+//! from crates.io against the registry index (over TLS) before building. The
+//! manifest we read for the version check carries per-artifact hashes too, but
+//! since the install path is the verified crates.io source those go unused.
 
 use std::process::Command;
 use std::time::Duration;
@@ -63,11 +70,22 @@ pub fn manifest_url() -> Option<String> {
     ))
 }
 
-/// Check for a newer release. Returns `Some(tag)` (e.g. `"v1.2.3"`) when the
-/// published manifest names a version newer than this build, else `None`. Errors
-/// only when the network fetch or the manifest parse fails — the TUI's Lua wrapper
-/// turns those into "no update" so a transient failure never disturbs a session.
-pub fn check() -> Result<Option<String>> {
+/// A newer release on offer: the version tag and, when the manifest carries one,
+/// the changelog (release notes) for it as a Markdown string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Update {
+    /// The release tag, e.g. `"v1.2.3"`.
+    pub version: String,
+    /// The release's changelog body, trimmed; `None` when the manifest names none.
+    pub changelog: Option<String>,
+}
+
+/// Check for a newer release. Returns `Some(update)` (carrying the tag and, when
+/// published, its changelog) when the manifest names a version newer than this
+/// build, else `None`. Errors only when the network fetch or the manifest parse
+/// fails — the TUI's Lua wrapper turns those into "no update" so a transient
+/// failure never disturbs a session.
+pub fn check() -> Result<Option<Update>> {
     check_with(http_get)
 }
 
@@ -75,21 +93,36 @@ pub fn check() -> Result<Option<String>> {
 /// parse the result, and compare against the running version. `fetch` is the seam
 /// tests mock — they pass a closure returning canned manifest JSON (or an error)
 /// instead of hitting the network.
-fn check_with(fetch: impl FnOnce(&str) -> Result<String>) -> Result<Option<String>> {
+fn check_with(fetch: impl FnOnce(&str) -> Result<String>) -> Result<Option<Update>> {
     let Some(url) = manifest_url() else {
         return Ok(None);
     };
     let body = fetch(&url)?;
-    let latest = version_from_manifest(&body)?;
-    Ok(latest.filter(|tag| is_newer(tag, current_version())))
+    let manifest: DistManifest =
+        serde_json::from_str(&body).context("parsing dist-manifest.json")?;
+    let Some(version) = version_from_manifest(&manifest) else {
+        return Ok(None);
+    };
+    if !is_newer(&version, current_version()) {
+        return Ok(None);
+    }
+    let changelog = manifest
+        .announcement_changelog
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty());
+    Ok(Some(Update { version, changelog }))
 }
 
-/// The slice of a dist `dist-manifest.json` we read: the announcement tag and the
-/// per-app releases. Everything else (artifacts, hashes, …) is ignored.
+/// The slice of a dist `dist-manifest.json` we read: the announcement tag, its
+/// changelog, and the per-app releases. Everything else (artifacts, hashes, …) is
+/// ignored.
 #[derive(Deserialize)]
 struct DistManifest {
     #[serde(default)]
     announcement_tag: Option<String>,
+    /// The announced release's changelog body, populated by dist from `CHANGELOG.md`.
+    #[serde(default)]
+    announcement_changelog: Option<String>,
     #[serde(default)]
     releases: Vec<ManifestRelease>,
 }
@@ -100,24 +133,24 @@ struct ManifestRelease {
     app_version: String,
 }
 
-/// Pull the released version (as a `vX.Y.Z` tag) out of a `dist-manifest.json`.
+/// Pull the released version (as a `vX.Y.Z` tag) out of a parsed `dist-manifest.json`.
 /// Prefers the manifest's `announcement_tag`; falls back to the `app_version` of
 /// the release matching this crate (or the first release). `None` if the manifest
 /// names no version.
-fn version_from_manifest(json: &str) -> Result<Option<String>> {
-    let manifest: DistManifest =
-        serde_json::from_str(json).context("parsing dist-manifest.json")?;
-
-    if let Some(tag) = manifest.announcement_tag.filter(|t| !t.trim().is_empty()) {
-        return Ok(Some(normalize_tag(tag.trim())));
+fn version_from_manifest(manifest: &DistManifest) -> Option<String> {
+    if let Some(tag) = manifest
+        .announcement_tag
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+    {
+        return Some(normalize_tag(tag.trim()));
     }
-    let version = manifest
+    manifest
         .releases
         .iter()
         .find(|r| r.app_name == env!("CARGO_PKG_NAME"))
         .or_else(|| manifest.releases.first())
-        .map(|r| normalize_tag(r.app_version.trim()));
-    Ok(version)
+        .map(|r| normalize_tag(r.app_version.trim()))
 }
 
 /// Ensure a version string carries the leading `v` the rest of the module (and
@@ -225,6 +258,12 @@ mod tests {
         format!(r#"{{ "announcement_tag": "{tag}", "releases": [] }}"#)
     }
 
+    /// Parse a manifest string the way [`check_with`] does, for the version/changelog
+    /// extraction tests.
+    fn parse(json: &str) -> DistManifest {
+        serde_json::from_str(json).expect("valid manifest json")
+    }
+
     #[test]
     fn semver_ordering() {
         assert!(is_newer("v1.2.4", "1.2.3"));
@@ -299,7 +338,7 @@ mod tests {
     fn version_from_manifest_prefers_the_announcement_tag() {
         let json = manifest_with_tag("v2.3.4");
         assert_eq!(
-            version_from_manifest(&json).unwrap().as_deref(),
+            version_from_manifest(&parse(&json)).as_deref(),
             Some("v2.3.4")
         );
     }
@@ -308,7 +347,7 @@ mod tests {
     fn version_from_manifest_falls_back_to_app_version_and_adds_v() {
         let json = r#"{ "releases": [ { "app_name": "mudpuppy", "app_version": "3.1.0" } ] }"#;
         assert_eq!(
-            version_from_manifest(json).unwrap().as_deref(),
+            version_from_manifest(&parse(json)).as_deref(),
             Some("v3.1.0"),
             "bare app_version is normalized with a leading v"
         );
@@ -317,14 +356,14 @@ mod tests {
     #[test]
     fn version_from_manifest_is_none_when_no_version_is_named() {
         let json = r#"{ "releases": [] }"#;
-        assert_eq!(version_from_manifest(json).unwrap(), None);
+        assert_eq!(version_from_manifest(&parse(json)), None);
     }
 
     #[test]
     fn check_with_offers_only_a_strictly_newer_version() {
         // A far-future manifest → an update is offered.
         let newer = check_with(|_url| Ok(manifest_with_tag("v9.9.9"))).unwrap();
-        assert_eq!(newer.as_deref(), Some("v9.9.9"));
+        assert_eq!(newer.map(|u| u.version).as_deref(), Some("v9.9.9"));
 
         // The running version itself → nothing to offer.
         let same = check_with(|_url| Ok(manifest_with_tag(current_version()))).unwrap();
@@ -333,6 +372,39 @@ mod tests {
         // An older version → nothing to offer.
         let older = check_with(|_url| Ok(manifest_with_tag("v0.0.0"))).unwrap();
         assert_eq!(older, None);
+    }
+
+    #[test]
+    fn check_with_carries_the_changelog_when_the_manifest_has_one() {
+        let json = "{ \"announcement_tag\": \"v9.9.9\", \
+                      \"announcement_changelog\": \"## v9.9.9\\n\\n- Did a thing\\n\", \
+                      \"releases\": [] }";
+        let update = check_with(|_url| Ok(json.to_string()))
+            .unwrap()
+            .expect("an update");
+        assert_eq!(update.version, "v9.9.9");
+        assert_eq!(
+            update.changelog.as_deref(),
+            Some("## v9.9.9\n\n- Did a thing")
+        );
+    }
+
+    #[test]
+    fn check_with_changelog_is_none_when_blank_or_absent() {
+        // Absent entirely.
+        let update = check_with(|_url| Ok(manifest_with_tag("v9.9.9")))
+            .unwrap()
+            .expect("an update");
+        assert_eq!(update.changelog, None);
+
+        // Present but whitespace-only → treated as none.
+        let json = "{ \"announcement_tag\": \"v9.9.9\", \
+                      \"announcement_changelog\": \"   \\n\", \
+                      \"releases\": [] }";
+        let update = check_with(|_url| Ok(json.to_string()))
+            .unwrap()
+            .expect("an update");
+        assert_eq!(update.changelog, None);
     }
 
     #[test]

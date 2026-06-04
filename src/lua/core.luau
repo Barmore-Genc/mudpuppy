@@ -151,13 +151,15 @@ m.map("help", "q", function() m.toggle_help() end)
 --
 -- The policy lives here, built on three primitives: `m.prompt` (a modal question
 -- with labelled callbacks), `m.updates.check()` (returns a newer version string
--- or nil), and `m.updates.update(version)` (installs a validated vX.Y.Z). The
--- event loop runs one check at launch (off-thread) and fires `update_check` with
--- the found version; the `:check-updates` command runs a check on demand.
+-- and its changelog, or nil), and `m.updates.update(version)` (installs a
+-- validated vX.Y.Z). The event loop runs one check at launch (off-thread) and
+-- fires `update_check` with the found version and changelog; the `:check-updates`
+-- command runs a check on demand.
 
 -- Offer to install `version`. "Install" updates now; "Ignore" dismisses until the
--- next launch; "Skip" stops checking and records that in the user config.
-local function offer_update(version)
+-- next launch; "Skip" stops checking and records that in the user config. The
+-- changelog, when published, is passed as the prompt's scrollable body.
+local function offer_update(version, changelog)
   m.prompt("mudpuppy " .. version .. " is available. Update now?", {
     { "Install", function()
         m.updates.update(version)
@@ -165,20 +167,20 @@ local function offer_update(version)
       end },
     { "Ignore for now", function() end },
     { "Skip", function() m.updates.disable() end },
-  })
+  }, changelog)
 end
 
 -- Launch-time check: the event loop already did the (off-thread) fetch and only
 -- fires this when a newer release exists, passing it in the payload.
 m.on("update_check", function(ev)
-  if ev.version then offer_update(ev.version) end
+  if ev.version then offer_update(ev.version, ev.changelog) end
 end)
 
 -- Manual check from the `:` palette; reports when already current.
 m.command("check-updates", function()
-  local version = m.updates.check()
+  local version, changelog = m.updates.check()
   if version then
-    offer_update(version)
+    offer_update(version, changelog)
   else
     print("mudpuppy is up to date.")
   end

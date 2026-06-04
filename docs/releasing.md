@@ -7,8 +7,11 @@ to a GitHub Release. No local toolchain or manual upload is involved.
 ## Cut a release
 
 ```sh
-# 1. Bump `version` in Cargo.toml, commit, and merge to main.
-# 2. Tag the merge commit and push the tag:
+# 1. Bump `version` in Cargo.toml.
+# 2. In CHANGELOG.md, rename the `## Unreleased` section to the new version
+#    (e.g. `## 0.2.0`) and add a fresh empty `## Unreleased` above it.
+# 3. Commit and merge to main.
+# 4. Tag the merge commit and push the tag:
 git tag v0.2.0
 git push origin v0.2.0
 ```
@@ -16,6 +19,19 @@ git push origin v0.2.0
 The tag push triggers `.github/workflows/release.yml`, which builds every target,
 generates the installers, and publishes the GitHub Release. Tags with a
 prerelease suffix (e.g. `v0.2.0-rc.1`) are marked as GitHub pre-releases.
+
+## Changelog
+
+Every release **must** have a matching section in [CHANGELOG.md](../CHANGELOG.md).
+The heading has to match the tag's version (`## 0.2.0` for tag `v0.2.0`) — `dist`
+extracts that section into the published `dist-manifest.json` as the release notes,
+and mudpuppy's in-app update prompt reads them from there to show users what
+changed. A missing or mis-titled section means an empty changelog in the prompt.
+
+Write the entry as you go: keep a running `## Unreleased` section at the top of
+`CHANGELOG.md` and add a bullet under it (grouped `Added`/`Changed`/`Fixed`) with
+every user-visible change, then rename it to the version when cutting the release.
+This applies whether a human or an AI agent prepares the release.
 
 ## Targets
 

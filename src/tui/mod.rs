@@ -165,12 +165,13 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
         // an `update_check` event so `core.luau` can prompt. Skipped entirely when
         // `MUDPUPPY_NO_UPDATE_CHECK` is set (the e2e harness sets it) or the user
         // disabled checks in their config.
-        let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (update_tx, mut update_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::update::Update>();
         if std::env::var_os(NO_UPDATE_CHECK_ENV).is_none() && engine.update_checks_enabled() {
             let tx = update_tx.clone();
             tokio::task::spawn_blocking(move || {
-                if let Ok(Some(version)) = crate::update::check() {
-                    let _ = tx.send(version);
+                if let Ok(Some(update)) = crate::update::check() {
+                    let _ = tx.send(update);
                 }
             });
         }
@@ -316,9 +317,9 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                 // The launch-time update check found a newer release. Fire
                 // `update_check` so `core.luau` can prompt; its callbacks can
                 // release the turn or quit, so snapshot around it.
-                Some(version) = update_rx.recv() => {
+                Some(update) = update_rx.recv() => {
                     let before = Snapshot::of(app);
-                    engine.fire_update_check(app, &version)?;
+                    engine.fire_update_check(app, &update)?;
                     if app.should_quit {
                         return Ok(());
                     }

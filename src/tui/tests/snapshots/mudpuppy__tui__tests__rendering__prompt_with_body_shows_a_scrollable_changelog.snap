@@ -1,0 +1,28 @@
+---
+source: src/tui/tests/rendering.rs
+expression: s
+---
+"┌ Files (7) │ Annotations ─┐┌ src/alpha.rs [modified] 1/7 ─────────────────────────────────────────┐"
+"│M src/alpha.rs  +3 -2     ││@@ -1,4 +1,5 @@ fn alpha() {                                          │"
+"│M src/long.rs  +4 -2      ││    1     1   use std::io;                                            │"
+"│M README.md  +1 -1        ││    2       - let x = 1;                                              │"
+"│A src/new_mod┌ mudpuppy · TOP · j/k scroll ─────────────────────────────────────────┐             │"
+"│D old.txt  +0│mudpuppy v9.9.9 is available. Update now?                             │             │"
+"│A assets/logo│                                                                      │             │"
+"│R src/relocat│- change number 1                                                     │             │"
+"│             │- change number 2                                                     │             │"
+"│             │- change number 3                                                     │             │"
+"│             │- change number 4                                                     │             │"
+"│             │- change number 5                                                     │             │"
+"│             │- change number 6                                                     │             │"
+"│             │- change number 7                                                     │             │"
+"│             │- change number 8                                                     │             │"
+"│             │  ↓ press j or scroll for more                                        │             │"
+"│             │                                                                      │             │"
+"│             │ 1 Install    2 Skip                                                  │             │"
+"│             │←/→ choose · 1-9 pick · Enter confirm · j/k scroll · Esc dismiss      │             │"
+"│             └──────────────────────────────────────────────────────────────────────┘             │"
+"│                          ││                                                                      │"
+"│                          ││                                                                      │"
+"└──────────────────────────┘└──────────────────────────────────────────────────────────────────────┘"
+" local vs main  ·  file 1/7  ·  +3 -2  ·  [tree] ALL  ? help  q quit                                "

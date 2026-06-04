@@ -29,6 +29,7 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
     only use the bracket form when the target is public and you want a real
     clickable link (`` [`crate::highlight`] ``).
 - **File size:** Avoid code files of length 1000+ lines. If a file gets too long, try to split it logically into multiple files, creating additional folders if needed.
+- **Changelog:** user-visible changes get a bullet under `## Unreleased` in `CHANGELOG.md` (grouped `Added`/`Changed`/`Fixed`). `dist` turns the released section into the in-app update notes; see `docs/releasing.md`.
 
 ## Where the code lives
 
@@ -45,7 +46,7 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 - `highlight.rs`: syntect syntax highlighting for the diff pane.
 - `store.rs`: load / merge-by-id / atomic+locked save of the annotation store.
 - `session.rs`: repo + target resolution and store-path derivation (resume).
-- `update.rs`: self-update — release check by HTTPS GET of the GitHub Pages `dist-manifest.json` (no `gh` needed), semver comparison, and version-validated (`vX.Y.Z` only) `cargo install`; surfaced to Lua as `mudpuppy.updates` and driven by `core.luau`'s update prompt.
+- `update.rs`: self-update — release check by HTTPS GET of the GitHub Pages `dist-manifest.json` (no `gh` needed), semver comparison, the release changelog, and version-validated (`vX.Y.Z` only) `cargo install`; surfaced to Lua as `mudpuppy.updates` and driven by `core.luau`'s update prompt.
 - `tui/`: the ratatui app — file tree, diff pane, gutter marks, panels, turn release; key presses route through the Lua engine.
 - `picker.rs`: fuzzy-find file picker state + subsequence matcher for the "add any file" overlay.
 - `command.rs`: the `:command` palette state — fuzzy filtering over registered command names (reuses the picker's matcher).
