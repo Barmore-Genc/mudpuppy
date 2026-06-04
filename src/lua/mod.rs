@@ -82,6 +82,7 @@ pub enum EventKind {
     TurnChange,
     /// A newer release was found by the launch-time check. Payload: `{ version }`.
     /// `core.luau` subscribes to it to prompt the user.
+    #[cfg(feature = "auto-update")]
     UpdateCheck,
 }
 
@@ -93,6 +94,7 @@ impl EventKind {
             "reload" => EventKind::Reload,
             "annotation_added" => EventKind::AnnotationAdded,
             "turn_change" => EventKind::TurnChange,
+            #[cfg(feature = "auto-update")]
             "update_check" => EventKind::UpdateCheck,
             _ => return None,
         })
@@ -114,6 +116,8 @@ pub struct LuaEngine {
     /// Callbacks for the currently-open prompt, indexed by option.
     prompts: Prompts,
     /// Whether automatic update checks are on (default true, reset on reload).
+    /// Only consulted with the `auto-update` feature; harmless otherwise.
+    #[cfg_attr(not(feature = "auto-update"), allow(dead_code))]
     update_checks: UpdateChecks,
     /// Where the user config lives (if anywhere). `None` disables user config —
     /// used by tests so the default keymap is exercised in isolation.
@@ -436,6 +440,7 @@ impl LuaEngine {
     /// Fire `update_check{version=…, changelog=…}` after the launch-time check
     /// found a newer release. `core.luau` handles the prompt; the event loop did
     /// the fetch. `changelog` is nil when the manifest carried no release notes.
+    #[cfg(feature = "auto-update")]
     pub(crate) fn fire_update_check(
         &self,
         app: &mut App,
@@ -453,6 +458,7 @@ impl LuaEngine {
 
     /// Whether automatic update checks are enabled (the shared flag a config can
     /// turn off). The event loop reads this before launching the check.
+    #[cfg(feature = "auto-update")]
     pub(crate) fn update_checks_enabled(&self) -> bool {
         *self.update_checks.borrow()
     }
@@ -744,12 +750,14 @@ numbered chips; ←/→ (or h/l, j/k) move the highlight, 1-9 pick directly, Ent
 confirms the highlighted option and runs its function, Esc dismisses without
 running anything. It is a general primitive — the auto-update flow is one user.
 
-Updates
+Updates  (only in builds with the `auto-update` feature — our prebuilt binaries)
 -------
 Once per launch mudpuppy checks for a newer release (by reading the published
 release manifest over HTTPS — no `gh` needed) and, when one exists, prompts you
 to install it, ignore it for now, or skip (stop checking — this writes a line to
-your config). The same primitives are scriptable:
+your config). Installing downloads the prebuilt binary for your platform and
+verifies its checksum. The same primitives are scriptable (absent without the
+feature, so guard with `if mudpuppy.updates then`):
   mudpuppy.updates.check()              -> a "vX.Y.Z" string if a newer release
                                            exists (else nil) plus its changelog as
                                            a second return value (Markdown or nil);
@@ -1253,6 +1261,7 @@ index 333..444 100644
         assert!(!a.should_quit, "no callback for a bad index");
     }
 
+    #[cfg(feature = "auto-update")]
     #[test]
     fn update_checks_flag_defaults_on_and_a_config_line_disables_it() {
         // Default: checks enabled.
@@ -1275,9 +1284,10 @@ index 333..444 100644
         assert_eq!(engine.status_message().as_deref(), Some("false"));
     }
 
+    #[cfg(feature = "auto-update")]
     #[test]
     fn updates_update_rejects_a_malicious_version_without_spawning() {
-        // `update` validates before it would ever spawn `cargo`; a funky version
+        // `update` validates the version before doing anything; a funky version
         // raises, which pcall catches as a `false` first return.
         let (_dir, path) = config(
             "mudpuppy.command(\"bad\", function()\n\

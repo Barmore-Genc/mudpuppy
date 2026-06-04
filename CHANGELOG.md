@@ -16,6 +16,15 @@ release notes. See [docs/releasing.md](docs/releasing.md) for the release flow.
   help-style panel (`j`/`k`/`PgUp`/`PgDn`/`g`/`G`). The notes are read from the
   published release manifest, so no extra fetch is needed.
 
+### Changed
+
+- Self-update is now gated behind the off-by-default `auto-update` build feature.
+  Our prebuilt release binaries enable it; a source `cargo install` or a distro
+  package builds without it and updates through its own channel.
+- Updating now downloads the prebuilt binary for your platform and verifies its
+  checksum (via `axoupdater`) instead of recompiling from source with
+  `cargo install` — no Rust toolchain required.
+
 ## 0.1.1
 
 ### Added

@@ -1,5 +1,10 @@
 //! Self-update support: ask whether a newer release exists, and install it.
 //!
+//! Gated behind the off-by-default `auto-update` Cargo feature: only our prebuilt
+//! release binaries (built with the feature; see `dist-workspace.toml`) carry the
+//! updater. A source `cargo install` or a distro package builds without it and has
+//! no self-update — it updates through whatever channel installed it.
+//!
 //! The version check reads the release `dist-manifest.json` that the project
 //! publishes to GitHub Pages (`pages.yml`), over a single plain HTTPS GET — so it
 //! needs no `gh` (the GitHub CLI is *not* a hard dependency of mudpuppy). The
@@ -9,21 +14,15 @@
 //! drive the parse + comparison with a mocked fetcher instead of touching the
 //! network.
 //!
-//! Installing still shells out to `cargo`. Security: [`install`] only ever runs
-//! after [`is_valid_version_tag`] accepts the argument — a strict
-//! `vMAJOR.MINOR.PATCH` shape, digits only. Combined with arg-separated spawning
-//! (never a shell string) this keeps a version value, even one that reached us
-//! from a script or the network, from smuggling extra arguments or shell
-//! metacharacters into the subprocess.
-//!
-//! **Download integrity.** We never fetch a release binary ourselves, so there is
-//! no separately downloaded artifact for us to checksum. [`install`] delegates to
-//! `cargo install --locked`, and cargo verifies the SHA-256 of the crate it pulls
-//! from crates.io against the registry index (over TLS) before building. The
-//! manifest we read for the version check carries per-artifact hashes too, but
-//! since the install path is the verified crates.io source those go unused.
+//! **Installing & download integrity.** [`install`] hands the download to
+//! `axoupdater` (cargo-dist's self-updater): it reads the install receipt the
+//! cargo-dist installer wrote, fetches the **prebuilt artifact built for this
+//! platform** from the GitHub Release, **verifies its checksum**, and replaces the
+//! running binary in place. No toolchain, recompilation, or crates.io build is
+//! involved — the user gets the same prebuilt binary kind they originally
+//! installed. [`install`] still validates the version with [`is_valid_version_tag`]
+//! before acting.
 
-use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -176,40 +175,61 @@ fn http_get(url: &str) -> Result<String> {
     Ok(body)
 }
 
-/// Install `version` (a `vMAJOR.MINOR.PATCH` tag), replacing the current binary.
+/// Install `version` (a `vMAJOR.MINOR.PATCH` tag), replacing the current binary
+/// with the matching prebuilt release artifact.
 ///
-/// The version is validated by [`is_valid_version_tag`] before it reaches the
-/// subprocess; an invalid value is refused outright. Shells out to
-/// `cargo install mudpuppy --locked --version <semver>` (crates.io is the
-/// canonical published source). The running process keeps executing the old code
-/// until it is restarted.
+/// `version` is validated by [`is_valid_version_tag`] first and refused if
+/// malformed. The download/verify/replace is delegated to `axoupdater`
+/// (cargo-dist's self-updater): it reads the install receipt the cargo-dist
+/// installer wrote, fetches the artifact built for this platform from the GitHub
+/// Release, **verifies its checksum**, and swaps it in place. No toolchain or
+/// recompilation is involved — only the prebuilt binary the user originally
+/// installed. The running process keeps executing the old code until it restarts.
+///
+/// axoupdater always targets the latest release; the detected `version` is the
+/// latest by construction (the check that produced it read the same release's
+/// manifest), so it is validated and logged rather than passed through.
 pub fn install(version: &str) -> Result<()> {
     if !is_valid_version_tag(version) {
         bail!("refusing to update to {version:?}: not a vMAJOR.MINOR.PATCH version tag");
     }
-    // Safe: `is_valid_version_tag` guaranteed the leading `v`.
-    let semver = version.strip_prefix('v').unwrap();
-    let status = Command::new("cargo")
-        .args([
-            "install",
-            env!("CARGO_PKG_NAME"),
-            "--locked",
-            "--version",
-            semver,
-        ])
-        .status()
-        .context("running `cargo install` to update mudpuppy")?;
-    if !status.success() {
-        bail!("`cargo install` exited unsuccessfully ({status})");
+
+    // `axoupdater`'s blocking `run_sync` spins up its own current-thread tokio
+    // runtime; calling it from the TUI's runtime thread would panic ("cannot start
+    // a runtime from within a runtime"), so run it on a dedicated OS thread.
+    let version = version.to_string();
+    std::thread::scope(|s| {
+        s.spawn(|| install_blocking(&version))
+            .join()
+            .map_err(|_| anyhow::anyhow!("the update thread panicked"))?
+    })
+}
+
+/// The off-runtime body of [`install`]: drive `axoupdater` to swap in the latest
+/// prebuilt release. Errors if no cargo-dist install receipt is present (e.g. a
+/// source build that nonetheless enabled this feature) or the install fails.
+fn install_blocking(version: &str) -> Result<()> {
+    use axoupdater::AxoUpdater;
+
+    let mut updater = AxoUpdater::new_for(env!("CARGO_PKG_NAME"));
+    updater
+        .load_receipt()
+        .context("reading the install receipt (was mudpuppy installed from a release?)")?;
+    let outcome = updater
+        .run_sync()
+        .with_context(|| format!("installing mudpuppy {version}"))?;
+    match outcome {
+        Some(_) => Ok(()),
+        // axoupdater reports "already up to date" as `None`; treat it as success.
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Whether `tag` is a release tag we will pass to [`install`]: exactly
 /// `v<digits>.<digits>.<digits>`. Rejects anything with extra components, missing
-/// parts, non-digits, or stray characters (slashes, shell metacharacters, version
-/// ranges) — the validation boundary keeping a version value from becoming an
-/// argument- or shell-injection vector.
+/// parts, non-digits, or stray characters (slashes, metacharacters, version
+/// ranges) — a sanity boundary so only a well-formed version value, even one that
+/// reached us from a script or the network, ever drives an install.
 pub fn is_valid_version_tag(tag: &str) -> bool {
     let Some(rest) = tag.strip_prefix('v') else {
         return false;
@@ -309,8 +329,9 @@ mod tests {
     }
 
     #[test]
-    fn install_refuses_invalid_versions_without_spawning() {
-        // The guard fires before any subprocess; the error names the offender.
+    fn install_refuses_invalid_versions_before_downloading() {
+        // The guard fires before any download/install work; the error names the
+        // offender (no receipt or network is touched).
         let err = install("v1.2.3; rm -rf /").unwrap_err();
         assert!(err.to_string().contains("refusing to update"));
     }

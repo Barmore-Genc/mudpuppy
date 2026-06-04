@@ -9,6 +9,11 @@ cargo-dist-version = "0.32.0"
 ci = "github"
 # The installers to generate for each app
 installers = ["shell", "powershell"]
+# Build the prebuilt binaries with self-update support. This is the only place the
+# off-by-default `auto-update` feature is turned on, so a `cargo install` or distro
+# build stays updater-free while our released binaries can update themselves. The
+# in-app updater relies on the install receipt these installers write.
+features = ["auto-update"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = [
     "aarch64-apple-darwin",

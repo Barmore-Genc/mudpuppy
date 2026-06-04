@@ -67,7 +67,9 @@ use crate::{source, store};
 
 /// Environment variable that, when set, disables the launch-time update check.
 /// The e2e harness sets it so tests never reach the network; users can set it to
-/// opt out without editing their config.
+/// opt out without editing their config. Only meaningful with the `auto-update`
+/// feature (without it there is no check to disable).
+#[cfg(feature = "auto-update")]
 pub const NO_UPDATE_CHECK_ENV: &str = "MUDPUPPY_NO_UPDATE_CHECK";
 
 /// Launch the interactive review UI.
@@ -157,21 +159,26 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
 
         let mut events = EventStream::new();
 
-        // One-shot, launch-time update check. Reviews are short-lived and opened
-        // afresh, so a single check per launch is plenty — no timer (and never
-        // more than once a session). The blocking HTTP fetch runs on a
-        // `spawn_blocking` thread so it never stalls the loop; its result (a newer
-        // version tag, if any) arrives on `update_rx`, and the loop turns that into
-        // an `update_check` event so `core.luau` can prompt. Skipped entirely when
+        // One-shot, launch-time update check (only with the `auto-update` feature;
+        // a source/distro build never spawns it, so `update_rx` simply never fires).
+        // Reviews are short-lived and opened afresh, so a single check per launch is
+        // plenty — no timer (and never more than once a session). The blocking HTTP
+        // fetch runs on a `spawn_blocking` thread so it never stalls the loop; its
+        // result (version + changelog) arrives on `update_rx`, and the loop turns
+        // that into an `update_check` event so `core.luau` can prompt. Skipped when
         // `MUDPUPPY_NO_UPDATE_CHECK` is set (the e2e harness sets it) or the user
-        // disabled checks in their config.
+        // disabled checks in their config. The channel item is a plain tuple so its
+        // type doesn't depend on the feature-gated `update` module (tokio::select!
+        // won't accept a `#[cfg]` on a branch, so the branch is always compiled).
+        #[cfg_attr(not(feature = "auto-update"), allow(unused_variables))]
         let (update_tx, mut update_rx) =
-            tokio::sync::mpsc::unbounded_channel::<crate::update::Update>();
+            tokio::sync::mpsc::unbounded_channel::<(String, Option<String>)>();
+        #[cfg(feature = "auto-update")]
         if std::env::var_os(NO_UPDATE_CHECK_ENV).is_none() && engine.update_checks_enabled() {
             let tx = update_tx.clone();
             tokio::task::spawn_blocking(move || {
                 if let Ok(Some(update)) = crate::update::check() {
-                    let _ = tx.send(update);
+                    let _ = tx.send((update.version, update.changelog));
                 }
             });
         }
@@ -316,15 +323,22 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                 }
                 // The launch-time update check found a newer release. Fire
                 // `update_check` so `core.luau` can prompt; its callbacks can
-                // release the turn or quit, so snapshot around it.
-                Some(update) = update_rx.recv() => {
-                    let before = Snapshot::of(app);
-                    engine.fire_update_check(app, &update)?;
-                    if app.should_quit {
-                        return Ok(());
+                // release the turn or quit, so snapshot around it. Without the
+                // `auto-update` feature nothing is ever sent, so this never fires.
+                Some(payload) = update_rx.recv() => {
+                    let _ = &payload;
+                    #[cfg(feature = "auto-update")]
+                    {
+                        let (version, changelog) = payload;
+                        let update = crate::update::Update { version, changelog };
+                        let before = Snapshot::of(app);
+                        engine.fire_update_check(app, &update)?;
+                        if app.should_quit {
+                            return Ok(());
+                        }
+                        let after = Snapshot::of(app);
+                        fire_changes(&engine, app, &before, &after)?;
                     }
-                    let after = Snapshot::of(app);
-                    fire_changes(&engine, app, &before, &after)?;
                 }
             }
         }

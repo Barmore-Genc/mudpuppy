@@ -4,6 +4,18 @@ Distribution is handled by [cargo-dist](https://opensource.axo.dev/cargo-dist/).
 Pushing a version tag builds prebuilt binaries and installers and publishes them
 to a GitHub Release. No local toolchain or manual upload is involved.
 
+## Self-update
+
+The released binaries are built with the `auto-update` Cargo feature (set via
+`features` in `dist-workspace.toml`), which is **off by default** so a `cargo
+install` or a downstream distro package carries no updater and stays within its
+own ecosystem. With the feature on, mudpuppy checks the published manifest at
+launch and can update itself: it downloads the prebuilt artifact for the user's
+platform from the GitHub Release, verifies its checksum, and replaces the binary
+in place (via `axoupdater`). This relies on the **install receipt** the cargo-dist
+shell/PowerShell installers write — users who install some other way won't get
+in-app updates.
+
 ## Cut a release
 
 ```sh

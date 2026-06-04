@@ -102,19 +102,27 @@ pub fn build_table(
         })?,
     )?;
 
+    // `mudpuppy.updates` only exists in builds with the `auto-update` feature; a
+    // source/distro build has no updater, so `core.luau` guards with
+    // `if mudpuppy.updates then`.
+    #[cfg(feature = "auto-update")]
     table.set("updates", build_updates_table(lua, update_checks)?)?;
+    #[cfg(not(feature = "auto-update"))]
+    let _ = update_checks;
 
     Ok(table)
 }
 
 /// The marker comment the skip action writes above its config line, so a repeated
 /// skip doesn't append duplicates.
+#[cfg(feature = "auto-update")]
 const DISABLE_MARKER: &str = "-- Added by mudpuppy: stop checking for updates.";
 
 /// Build the persistent `mudpuppy.updates` sub-table: `check()`, `update(version)`,
 /// and the auto-check toggle (`check_enabled`/`set_check_enabled`/`disable`). These
 /// are persistent (always available), not per-dispatch scoped: `core.luau` calls
 /// them from commands, event handlers, and prompt callbacks alike.
+#[cfg(feature = "auto-update")]
 fn build_updates_table(lua: &Lua, update_checks: UpdateChecks) -> Result<Table> {
     let updates = lua.create_table()?;
 
@@ -184,6 +192,7 @@ fn build_updates_table(lua: &Lua, update_checks: UpdateChecks) -> Result<Table> 
 /// stay off across restarts. Idempotent: a no-op if the marker is already there.
 /// Creates the config directory if needed. A missing config path (no resolvable
 /// home) is reported as an error the caller surfaces.
+#[cfg(feature = "auto-update")]
 fn persist_disable() -> anyhow::Result<()> {
     use std::io::Write;
 

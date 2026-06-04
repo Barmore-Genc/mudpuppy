@@ -50,4 +50,5 @@ pub mod session;
 pub mod source;
 pub mod store;
 pub mod tui;
+#[cfg(feature = "auto-update")]
 pub mod update;

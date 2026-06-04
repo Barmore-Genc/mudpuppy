@@ -59,6 +59,23 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
+  # The `auto-update` feature is off by default, so `--all-features` above never
+  # exercises the source/distro build. Lint + test that default build too, so we
+  # don't regress the path a plain `cargo install` takes.
+  default-build:
+    name: clippy + test (default features)
+    needs: detect
+    if: needs.detect.outputs.has_cargo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --verbose
+
   test:
     name: test (${{ matrix.os }})
     needs: detect

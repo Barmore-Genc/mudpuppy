@@ -90,12 +90,25 @@ syntect = { version = "5", default-features = false, features = ["default-fancy"
 # loaded on top. The interpreter is sandboxed: no io/os/network/subprocess.
 mlua = { version = "0.10", features = ["luau", "vendored"] }
 
-# Update check (update.rs). A tiny blocking HTTP+TLS client used for the single
-# launch-time GET of the release `dist-manifest.json` published to GitHub Pages —
-# so the check needs no `gh` (not a hard dependency of mudpuppy). The fetch runs on
-# a `tokio::task::spawn_blocking` thread so it never stalls the event loop; rustls
-# (ureq's default) keeps the TLS stack pure-Rust and toolchain-light.
-ureq = "2"
+# Self-update (update.rs), gated behind the off-by-default `auto-update` feature so
+# only our prebuilt release binaries opt in (a source `cargo install` or a distro
+# package builds without it and updates through its own channel). `ureq` is a tiny
+# blocking HTTP+TLS client for the single launch-time GET of the release
+# `dist-manifest.json` published to GitHub Pages — version + changelog detection
+# with no `gh`. `axoupdater` (cargo-dist's self-updater) does the actual install:
+# it downloads the right prebuilt artifact for the platform, verifies its checksum,
+# and replaces the running binary in place — no recompilation, no toolchain needed.
+ureq = { version = "2", optional = true }
+axoupdater = { version = "0.10", default-features = false, features = [
+    "github_releases",
+    "blocking",
+], optional = true }
+
+[features]
+default = []
+# Built into our release binaries (see dist-workspace.toml) and exercised in CI
+# via `--all-features`. Off by default so a source/distro build carries no updater.
+auto-update = ["dep:ureq", "dep:axoupdater"]
 
 [dev-dependencies]
 serde_json = "1"
