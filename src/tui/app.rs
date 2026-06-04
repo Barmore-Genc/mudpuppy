@@ -51,6 +51,14 @@ pub(crate) struct Hits {
     pub(crate) composer_outer: Option<Rect>,
     pub(crate) picker_outer: Option<Rect>,
     pub(crate) palette_outer: Option<Rect>,
+    /// Inner rect of the picker overlay (inside the border). Click row =
+    /// (y - inner.y - 1) + `picker_offset`, since the first inner row hosts
+    /// the query input.
+    pub(crate) picker_inner: Option<Rect>,
+    pub(crate) picker_offset: usize,
+    /// Same for the `:command` palette.
+    pub(crate) palette_inner: Option<Rect>,
+    pub(crate) palette_offset: usize,
     /// Number of header lines drawn at the top of the diff inner area before the
     /// first row of `view.rows` (currently 0 or 1 for the file-level banner).
     pub(crate) diff_header_rows: u16,
@@ -412,6 +420,11 @@ pub(crate) struct App {
     /// click on the same target within [`DOUBLE_CLICK_WINDOW`] is recognised
     /// as a double click on `Up` (where the action fires).
     last_click: Option<MousePress>,
+    /// A command name a palette mouse-click chose, picked up by `run_loop` to
+    /// dispatch through the Lua engine on the next turn. The keyboard path
+    /// already returns the name from `handle_palette_key`; mouse stashes here
+    /// because `handle_mouse_event` returns only a bool.
+    pending_command: Option<String>,
 }
 
 impl App {
@@ -459,7 +472,14 @@ impl App {
             hits: Hits::default(),
             last_press: None,
             last_click: None,
+            pending_command: None,
         }
+    }
+
+    /// Consume a palette command name set by a mouse click, if any. The
+    /// equivalent of what `handle_palette_key` returns on Enter.
+    pub(crate) fn take_pending_command(&mut self) -> Option<String> {
+        self.pending_command.take()
     }
 
     /// The pending count prefix, defaulting to 1 — the multiplier count-aware
@@ -1070,7 +1090,7 @@ impl App {
 
     /// Pull the highlighted path into the file list (selecting it if already
     /// present) and close the picker.
-    fn confirm_picker(&mut self) {
+    pub(crate) fn confirm_picker(&mut self) {
         let path = self
             .picker
             .as_ref()
@@ -1377,7 +1397,9 @@ impl App {
         row == y && col >= x0 && col < x1
     }
 
-    /// Composer-only clicks: the save / cancel footer labels.
+    /// Overlay clicks: composer save/cancel footer labels, and a picker /
+    /// palette row click (which both selects and confirms — matching the
+    /// "single click chooses" idiom every other fuzzy picker UI uses).
     fn handle_overlay_click(&mut self, col: u16, row: u16) -> bool {
         if let Some(span) = self.hits.composer_save_span {
             if Self::in_span(span, col, row) {
@@ -1391,7 +1413,61 @@ impl App {
                 return true;
             }
         }
+        // File picker: rows live below the query input. A click on a row
+        // selects + confirms it (opens the file).
+        if let Some(idx) = self.picker_row_at(col, row) {
+            if let Some(p) = self.picker.as_mut() {
+                p.selected = idx;
+            }
+            self.confirm_picker();
+            return true;
+        }
+        // Command palette: same shape — set selection, stash the command name
+        // for `run_loop` to dispatch through the engine.
+        if let Some(idx) = self.palette_row_at(col, row) {
+            if let Some(p) = self.palette.as_mut() {
+                p.selected = idx;
+                if let Some(name) = p.current_name().map(str::to_owned) {
+                    self.palette = None;
+                    self.pending_command = Some(name);
+                    return true;
+                }
+            }
+        }
         false
+    }
+
+    /// Picker result-row index under `(col, row)`, accounting for the query
+    /// input row and the current scroll offset. `None` outside the picker or
+    /// on the query row.
+    fn picker_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        let inner = self.hits.picker_inner?;
+        let p = self.picker.as_ref()?;
+        if !contains(inner, col, row) {
+            return None;
+        }
+        // First inner row is the query input — clicks there do nothing.
+        let local = row.saturating_sub(inner.y);
+        if local == 0 {
+            return None;
+        }
+        let idx = self.hits.picker_offset + (local - 1) as usize;
+        (idx < p.filtered.len()).then_some(idx)
+    }
+
+    /// Command-palette row index under `(col, row)`, parallel to `picker_row_at`.
+    fn palette_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        let inner = self.hits.palette_inner?;
+        let p = self.palette.as_ref()?;
+        if !contains(inner, col, row) {
+            return None;
+        }
+        let local = row.saturating_sub(inner.y);
+        if local == 0 {
+            return None;
+        }
+        let idx = self.hits.palette_offset + (local - 1) as usize;
+        (idx < p.filtered.len()).then_some(idx)
     }
 
     /// Drive a composer save from a mouse click — synthesises the same `Ctrl-S`

@@ -235,6 +235,15 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                         let before = Snapshot::of(app);
                         app.notice = None;
                         let changed = app.handle_mouse_event(me);
+                        // A click on a `:command` palette row routes the
+                        // chosen command back through the engine, mirroring
+                        // what `handle_palette_key` returns on Enter.
+                        if let Some(name) = app.take_pending_command() {
+                            engine.run_command(app, &name)?;
+                            if app.should_quit {
+                                return Ok(());
+                            }
+                        }
                         if changed {
                             let after = Snapshot::of(app);
                             fire_changes(&engine, app, &before, &after)?;

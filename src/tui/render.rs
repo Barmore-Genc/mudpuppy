@@ -82,13 +82,17 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     }
     if let Some(picker) = app.picker.as_ref() {
         let area = frame.area();
-        let rect = render_picker(frame, area, picker);
+        let (rect, inner, offset) = render_picker(frame, area, picker);
         app.hits.picker_outer = Some(rect);
+        app.hits.picker_inner = Some(inner);
+        app.hits.picker_offset = offset;
     }
     if let Some(palette) = app.palette.as_ref() {
         let area = frame.area();
-        let rect = render_palette(frame, area, palette);
+        let (rect, inner, offset) = render_palette(frame, area, palette);
         app.hits.palette_outer = Some(rect);
+        app.hits.palette_inner = Some(inner);
+        app.hits.palette_offset = offset;
     }
     if let Some(composer) = app.composer.as_ref() {
         let area = frame.area();
@@ -483,7 +487,7 @@ fn render_status(frame: &mut Frame, area: Rect, app: &mut App) {
 /// Modal overlay for the "add any file" picker: a query input line atop a
 /// scrollable, fuzzy-ranked result list. Matched characters and the cursor row
 /// are highlighted; the list scrolls to keep the selection visible.
-fn render_picker(frame: &mut Frame, area: Rect, picker: &Picker) -> Rect {
+fn render_picker(frame: &mut Frame, area: Rect, picker: &Picker) -> (Rect, Rect, usize) {
     let area = centered_rect(70, (area.height * 7 / 10).max(6), area);
     let block = bordered(" Add file ", true);
     let inner = block.inner(area);
@@ -515,7 +519,7 @@ fn render_picker(frame: &mut Frame, area: Rect, picker: &Picker) -> Rect {
 
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(lines).block(block), area);
-    area
+    (area, inner, offset)
 }
 
 /// One picker result row: bold the fuzzy-matched characters; highlight the whole
@@ -551,7 +555,7 @@ fn picker_row(path: &str, positions: &[usize], selected: bool) -> Line<'static> 
 /// fuzzy-ranked list of command names. Mirrors [`render_picker`]; matched
 /// characters and the cursor row are highlighted, and the list scrolls to keep
 /// the selection visible.
-fn render_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) -> Rect {
+fn render_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) -> (Rect, Rect, usize) {
     let area = centered_rect(60, (area.height * 6 / 10).max(6), area);
     let block = bordered(" Command ", true);
     let inner = block.inner(area);
@@ -581,7 +585,7 @@ fn render_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) -> Re
 
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(lines).block(block), area);
-    area
+    (area, inner, offset)
 }
 
 /// The modal comment composer: the target anchor, severity + tag chips, the
@@ -659,15 +663,48 @@ fn render_composer(
     }
 
     lines.push(Line::raw(""));
-    let footer = match composer.mode {
-        Mode::Insert => "Esc normal  ·  Enter newline  ·  Ctrl-S save  ·  Ctrl-E severity  ·  Ctrl-T tag",
-        Mode::Normal => "Enter save  ·  i/a/o insert  ·  x/dd delete  ·  Esc cancel  ·  Ctrl-E severity  ·  Ctrl-T tag",
+    // The save / cancel labels are styled as button-like chips (green/red on
+    // black, bold) so they read as something clickable rather than just an
+    // informational footer (issue #29). The rest of the footer keeps the
+    // existing dim hint look. Layout below the chips records their column
+    // ranges so the mouse can hit them.
+    let dim = Style::default().fg(Color::DarkGray);
+    let save_chip_text = " save ";
+    let cancel_chip_text = " cancel ";
+    let save_chip_style = Style::default()
+        .bg(Color::Green)
+        .fg(Color::Black)
+        .add_modifier(Modifier::BOLD);
+    let cancel_chip_style = Style::default()
+        .bg(Color::Red)
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    let save_hint = match composer.mode {
+        Mode::Insert => " (Ctrl-S)",
+        Mode::Normal => " (Enter)",
     };
     let footer_line_idx = lines.len();
-    lines.push(Line::from(Span::styled(
-        footer,
-        Style::default().fg(Color::DarkGray),
-    )));
+    let inner_x = area.x + 1;
+    let footer_y = area.y + 1 + footer_line_idx as u16;
+    let save_x0 = inner_x;
+    let save_x1 = save_x0 + save_chip_text.chars().count() as u16;
+    let hint_after_save = save_x1 + save_hint.chars().count() as u16;
+    let pad = "  ";
+    let cancel_x0 = hint_after_save + pad.chars().count() as u16;
+    let cancel_x1 = cancel_x0 + cancel_chip_text.chars().count() as u16;
+    let cancel_hint = match composer.mode {
+        Mode::Insert => " (Esc → normal)",
+        Mode::Normal => " (Esc)",
+    };
+    lines.push(Line::from(vec![
+        Span::styled(save_chip_text, save_chip_style),
+        Span::styled(save_hint, dim),
+        Span::raw(pad),
+        Span::styled(cancel_chip_text, cancel_chip_style),
+        Span::styled(cancel_hint, dim),
+        Span::raw(pad),
+        Span::styled("Ctrl-E severity  ·  Ctrl-T tag  ·  Ctrl-J newline", dim),
+    ]));
 
     frame.render_widget(Clear, area);
     frame.render_widget(
@@ -677,27 +714,9 @@ fn render_composer(
         area,
     );
 
-    // Hit regions for the footer's save / cancel labels (issue #29). Assumes
-    // none of the lines above the footer wrapped — true when the body fits in
-    // the composer's 72-column inner width, which it nearly always does for the
-    // short messages this UI is for. A wrapped body just misses; the keyboard
-    // shortcuts still work.
-    let inner_x = area.x + 1;
-    let footer_y = area.y + 1 + footer_line_idx as u16;
-    let (save_word, cancel_word) = match composer.mode {
-        Mode::Insert => ("Ctrl-S save", "Esc normal"),
-        Mode::Normal => ("Enter save", "Esc cancel"),
-    };
-    let span_for = |needle: &str| -> super::app::Hitspan {
-        match footer.find(needle) {
-            Some(off) => {
-                let x0 = inner_x + off as u16;
-                (footer_y, x0, x0 + needle.chars().count() as u16)
-            }
-            None => (footer_y, inner_x, inner_x),
-        }
-    };
-    (area, span_for(save_word), span_for(cancel_word))
+    let save_span: super::app::Hitspan = (footer_y, save_x0, save_x1);
+    let cancel_span: super::app::Hitspan = (footer_y, cancel_x0, cancel_x1);
+    (area, save_span, cancel_span)
 }
 
 /// The centered help overlay listing every keybinding. The overlay is
@@ -761,39 +780,72 @@ fn render_help(frame: &mut Frame, area: Rect, app: &mut App) -> Rect {
         Line::raw("  ? / q / Esc   close"),
     ];
 
-    // The help overlay grows tall enough to nearly fill the screen so big
-    // terminals show as much at once as possible; small terminals just scroll.
-    let inner_height_target = (area.height.saturating_sub(4)).max(8);
-    let height = inner_height_target.min(text.len() as u16 + 2);
+    // Match the picker's vertical sizing so the overlay family feels uniform
+    // — 70% of the terminal height, floored at 8 rows. Width stays at 64 so
+    // the keymap lines (built to fit there) don't wrap.
+    let height = ((area.height * 7 / 10).max(8)).min(text.len() as u16 + 2);
     let outer = centered_rect(64, height, area);
     let inner_height = outer.height.saturating_sub(2) as usize;
 
-    // Record metrics so the key handler can clamp/page correctly.
+    // Record metrics so the key handler can clamp/page correctly. When there's
+    // more content below the viewport we steal the last row for a "scroll for
+    // more" hint, so the effective viewport (the height clamping uses) shrinks
+    // by one.
     app.help_total = text.len();
-    app.help_height = inner_height.max(1);
+    let has_more_hint_reserved = text.len() > inner_height;
+    let effective_height = if has_more_hint_reserved {
+        inner_height.saturating_sub(1).max(1)
+    } else {
+        inner_height
+    };
+    app.help_height = effective_height;
     if app.help_scroll > app.max_help_scroll() {
         app.help_scroll = app.max_help_scroll();
     }
+
+    let at_bottom = app.help_scroll >= app.max_help_scroll();
+    let show_more_hint = has_more_hint_reserved && !at_bottom;
 
     let pct = if app.max_help_scroll() == 0 {
         "ALL".to_string()
     } else if app.help_scroll == 0 {
         "TOP".to_string()
-    } else if app.help_scroll >= app.max_help_scroll() {
+    } else if at_bottom {
         "BOT".to_string()
     } else {
         format!("{}%", app.help_scroll * 100 / app.max_help_scroll())
     };
     let title = format!(" Help · {pct} · j/k · ? close ");
 
+    let block = bordered(&title, true);
+    let inner_area = block.inner(outer);
     frame.render_widget(Clear, outer);
-    frame.render_widget(
-        Paragraph::new(text)
-            .block(bordered(&title, true))
-            .wrap(Wrap { trim: false })
-            .scroll((app.help_scroll as u16, 0)),
-        outer,
-    );
+    frame.render_widget(block, outer);
+
+    if show_more_hint {
+        let [content_area, hint_area] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner_area);
+        frame.render_widget(
+            Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .scroll((app.help_scroll as u16, 0)),
+            content_area,
+        );
+        let hint = Line::from(Span::styled(
+            "  ↓ press j or scroll for more ",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ));
+        frame.render_widget(Paragraph::new(hint), hint_area);
+    } else {
+        frame.render_widget(
+            Paragraph::new(text)
+                .wrap(Wrap { trim: false })
+                .scroll((app.help_scroll as u16, 0)),
+            inner_area,
+        );
+    }
     outer
 }
 

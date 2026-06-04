@@ -133,6 +133,80 @@ fn wheel_over_the_help_overlay_scrolls_it_not_the_panes_below() {
 }
 
 #[test]
+fn clicking_save_in_the_composer_submits_the_annotation() {
+    // Open the composer on a content line, type a body, click the green
+    // `save` chip in the footer — the annotation must be created in the
+    // store (no Ctrl-S key needed).
+    use crate::store;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let dir = tempfile::tempdir().unwrap();
+    let store_path = dir.path().join("annotations.json");
+    let mut a = app();
+    a.attach_store(store_path.clone(), None);
+    // Focus diff, move cursor to a content line, open composer on it.
+    a.handle_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+    a.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+    leader(&mut a, "cc");
+    assert!(a.composer.is_some());
+    // Type a body so the save isn't discarded as empty.
+    for ch in "looks good".chars() {
+        a.handle_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+    }
+    // Render so the footer's save-chip span is populated.
+    let _term = render_once(&mut a, 100, 24);
+    let (y, x0, x1) = a
+        .hits
+        .composer_save_span
+        .expect("composer save chip rendered");
+    assert!(click(&mut a, (x0 + x1) / 2, y));
+    assert!(a.composer.is_none(), "save click closes the composer");
+    let state = store::load(&store_path).unwrap().expect("store written");
+    assert_eq!(state.annotations.len(), 1);
+    assert_eq!(state.annotations[0].body, "looks good");
+}
+
+#[test]
+fn clicking_a_picker_row_opens_that_file() {
+    let mut a = app();
+    // Open the picker with a small canned universe so the rows are
+    // deterministic. `open_picker` needs a repo root; bypass it by setting
+    // the picker directly.
+    a.picker = Some(crate::picker::Picker::new(vec![
+        "alpha.rs".to_string(),
+        "beta.rs".to_string(),
+        "gamma.rs".to_string(),
+    ]));
+    let _term = render_once(&mut a, 100, 24);
+    let inner = a.hits.picker_inner.expect("picker rendered");
+    // Click the second result (row offset 1 below the query input).
+    assert!(click(&mut a, inner.x + 2, inner.y + 2));
+    assert!(a.picker.is_none(), "click confirms and closes the picker");
+    // The picker is supposed to select / add the chosen path into the file
+    // tree. Confirm by checking the current file matches.
+    assert_eq!(a.current().display_path(), "beta.rs");
+}
+
+#[test]
+fn clicking_a_palette_row_stashes_the_command_to_run() {
+    let mut a = app();
+    a.open_palette(vec![
+        "quit".to_string(),
+        "release-turn".to_string(),
+        "toggle-help".to_string(),
+    ]);
+    let _term = render_once(&mut a, 100, 24);
+    let inner = a.hits.palette_inner.expect("palette rendered");
+    // Click the third command row.
+    assert!(click(&mut a, inner.x + 2, inner.y + 3));
+    assert!(a.palette.is_none(), "click closes the palette");
+    assert_eq!(
+        a.take_pending_command().as_deref(),
+        Some("toggle-help"),
+        "the chosen command name is stashed for the engine"
+    );
+}
+
+#[test]
 fn status_bar_release_click_releases_the_turn_when_an_agent_is_waiting() {
     let mut a = app();
     a.turn = Turn {
