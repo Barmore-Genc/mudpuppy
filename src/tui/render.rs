@@ -76,7 +76,9 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     render_status(frame, status, app);
 
     if app.show_help {
-        render_help(frame, frame.area());
+        let area = frame.area();
+        let outer = render_help(frame, area, app);
+        app.hits.help_outer = Some(outer);
     }
     if let Some(picker) = app.picker.as_ref() {
         let area = frame.area();
@@ -698,20 +700,28 @@ fn render_composer(
     (area, span_for(save_word), span_for(cancel_word))
 }
 
-/// The centered help overlay listing every keybinding.
+/// The centered help overlay listing every keybinding. The overlay is
+/// scrollable (issue #29): the body that doesn't fit in the viewport can be
+/// paged with `j`/`k`/`PageUp`/`PageDown`/`g`/`G` or the mouse wheel, and the
+/// title shows the current scroll-position percentage so the user knows there's
+/// more below.
 ///
-/// Kept compact (cyan section headers, no blank separators) so the whole list —
-/// including the closing hint — fits within a short, 24-row terminal.
+/// Returns the outer rect so the caller can record it for mouse hit-testing.
 ///
 /// TODO: this list is hand-written and only describes the *default* keymap, so it
 /// silently drifts once a user rebinds anything in their config. We need to
 /// generate it from the live binding registry instead — likely by attaching an
 /// optional description to each `m.map`/`m.command` and rendering those. Labelled
 /// "default keymap" in the meantime so it doesn't claim to be authoritative.
-fn render_help(frame: &mut Frame, area: Rect) {
+fn render_help(frame: &mut Frame, area: Rect, app: &mut App) -> Rect {
     let section =
         |name: &'static str| Line::from(Span::styled(name, Style::default().fg(Color::Cyan)));
     let text = vec![
+        Line::from(Span::styled(
+            "mudpuppy — default keymap",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
         section("Navigation"),
         Line::raw("  j / k         move cursor (diff) / selection (tree)"),
         Line::raw("  ctrl-d/u/f/b  half / full page down / up"),
@@ -719,34 +729,72 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::raw("  ]h / [h  } {  next / prev hunk"),
         Line::raw("  J / K         next / prev file (from the diff pane)"),
         Line::raw("  5j  100G      a number prefixes a count"),
+        Line::raw(""),
         section("Focus"),
         Line::raw("  Tab / l / h   toggle · tree → diff · diff → tree"),
+        Line::raw(""),
         section("Annotations  (Space is the leader)"),
         Line::raw("  Space a       annotations tab (all files) ↔ file tree"),
         Line::raw("  v / V  Esc    whole-line selection (diff) · clear"),
         Line::raw("  Space c c/f/r comment line/selection · file · reply"),
         Line::raw("  Space c e/d/s edit · delete (confirm y) · cycle status"),
+        Line::raw(""),
         section("More"),
         Line::raw("  Space t r     release the turn; first release approves"),
         Line::raw("  Space f       add any file · Space e    expand context"),
         Line::raw("  :             command palette"),
         Line::raw("  ? q Ctrl-c    help · quit"),
+        Line::raw(""),
         section("Mouse"),
-        Line::raw("  wheel scroll · click focus · drag select · dbl to comment"),
-        Line::from(Span::styled(
-            "press ?, q, or Esc to close",
-            Style::default().fg(Color::DarkGray),
-        )),
+        Line::raw("  wheel         scroll the pane / overlay under the cursor"),
+        Line::raw("  click         focus a pane; pick a file / annotation row"),
+        Line::raw("  click title   switch sidebar tabs (Files ↔ Annotations)"),
+        Line::raw("  click r       release / approve the turn (status bar)"),
+        Line::raw("  drag (diff)   enter visual mode and select lines"),
+        Line::raw("  dbl-click     open file (tree) · comment line (diff)"),
+        Line::raw(""),
+        section("Help overlay"),
+        Line::raw("  j / k         scroll down / up one line"),
+        Line::raw("  PgDn / PgUp   page down / up"),
+        Line::raw("  ctrl-d / u    half-page down / up"),
+        Line::raw("  g / G         jump to top / bottom"),
+        Line::raw("  ? / q / Esc   close"),
     ];
 
-    let area = centered_rect(64, text.len() as u16 + 2, area);
-    frame.render_widget(Clear, area);
+    // The help overlay grows tall enough to nearly fill the screen so big
+    // terminals show as much at once as possible; small terminals just scroll.
+    let inner_height_target = (area.height.saturating_sub(4)).max(8);
+    let height = inner_height_target.min(text.len() as u16 + 2);
+    let outer = centered_rect(64, height, area);
+    let inner_height = outer.height.saturating_sub(2) as usize;
+
+    // Record metrics so the key handler can clamp/page correctly.
+    app.help_total = text.len();
+    app.help_height = inner_height.max(1);
+    if app.help_scroll > app.max_help_scroll() {
+        app.help_scroll = app.max_help_scroll();
+    }
+
+    let pct = if app.max_help_scroll() == 0 {
+        "ALL".to_string()
+    } else if app.help_scroll == 0 {
+        "TOP".to_string()
+    } else if app.help_scroll >= app.max_help_scroll() {
+        "BOT".to_string()
+    } else {
+        format!("{}%", app.help_scroll * 100 / app.max_help_scroll())
+    };
+    let title = format!(" Help · {pct} · j/k · ? close ");
+
+    frame.render_widget(Clear, outer);
     frame.render_widget(
         Paragraph::new(text)
-            .block(bordered(" Help ", true))
-            .wrap(Wrap { trim: false }),
-        area,
+            .block(bordered(&title, true))
+            .wrap(Wrap { trim: false })
+            .scroll((app.help_scroll as u16, 0)),
+        outer,
     );
+    outer
 }
 
 /// Turn one diff row into a styled line. `gutter` reserves the annotation-mark

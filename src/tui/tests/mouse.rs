@@ -122,6 +122,17 @@ fn clicking_a_sidebar_tab_chip_switches_to_that_tab() {
 }
 
 #[test]
+fn wheel_over_the_help_overlay_scrolls_it_not_the_panes_below() {
+    let mut a = app();
+    a.show_help = true;
+    let _term = render_once(&mut a, 100, 24);
+    let outer = a.hits.help_outer.expect("help rendered");
+    a.handle_mouse_event(mouse(MouseEventKind::ScrollDown, outer.x + 5, outer.y + 5));
+    assert!(a.help_scroll > 0, "wheel should scroll the help");
+    assert_eq!(a.scroll, 0, "wheel over help must not scroll the diff");
+}
+
+#[test]
 fn status_bar_release_click_releases_the_turn_when_an_agent_is_waiting() {
     let mut a = app();
     a.turn = Turn {

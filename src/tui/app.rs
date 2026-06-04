@@ -47,6 +47,7 @@ pub(crate) struct Hits {
     pub(crate) diff_outer: Option<Rect>,
     pub(crate) diff_inner: Option<Rect>,
     pub(crate) status: Option<Rect>,
+    pub(crate) help_outer: Option<Rect>,
     pub(crate) composer_outer: Option<Rect>,
     pub(crate) picker_outer: Option<Rect>,
     pub(crate) palette_outer: Option<Rect>,
@@ -340,6 +341,13 @@ pub(crate) struct App {
     /// Top visible file row of the tree, so the selection stays on screen.
     pub(crate) tree_scroll: usize,
     pub(crate) show_help: bool,
+    /// First visible line of the help overlay, so a long help can be paged
+    /// through (issue #29). Reset whenever the overlay is opened/closed.
+    pub(crate) help_scroll: usize,
+    /// Total help lines and inner viewport height from the last render — used
+    /// to clamp `help_scroll` and to detect when the bottom is reached.
+    pub(crate) help_total: usize,
+    pub(crate) help_height: usize,
     /// Which tab the left sidebar shows: the file tree or the all-annotations list.
     pub(crate) sidebar: Sidebar,
     /// Selected row in the annotations tab (index into [`App::annotation_list`]).
@@ -425,6 +433,9 @@ impl App {
             composer: None,
             tree_scroll: 0,
             show_help: false,
+            help_scroll: 0,
+            help_total: 0,
+            help_height: 1,
             sidebar: Sidebar::Files,
             annotation_selected: 0,
             annotation_scroll: 0,
@@ -740,9 +751,58 @@ impl App {
         }
     }
 
-    /// Toggle the help overlay.
+    /// Toggle the help overlay. Resets the scroll so a re-open lands at the top.
     pub(crate) fn toggle_help(&mut self) {
         self.show_help = !self.show_help;
+        self.help_scroll = 0;
+    }
+
+    /// Maximum scroll for the help overlay — the last starting row that still
+    /// leaves a full viewport of content visible.
+    pub(crate) fn max_help_scroll(&self) -> usize {
+        self.help_total.saturating_sub(self.help_height)
+    }
+
+    /// Scroll the help overlay by `delta` lines, clamped to the content.
+    pub(crate) fn scroll_help(&mut self, delta: isize) {
+        let next = self.help_scroll as isize + delta;
+        self.help_scroll = next.clamp(0, self.max_help_scroll() as isize) as usize;
+    }
+
+    /// Feed one key event to the open help overlay. Returns `true` if the
+    /// overlay was open (i.e. the key has been consumed) — mirrors the modal
+    /// precedence the composer/picker/palette use. Closes on `?`/`q`/`Esc`;
+    /// `j`/`k`/`Up`/`Down`/`PageUp`/`PageDown`/`g`/`G` scroll.
+    pub(crate) fn handle_help_key(&mut self, ev: KeyEvent) -> bool {
+        if !self.show_help {
+            return false;
+        }
+        let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
+        match ev.code {
+            KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc => self.toggle_help(),
+            KeyCode::Char('j') | KeyCode::Down => self.scroll_help(1),
+            KeyCode::Char('k') | KeyCode::Up => self.scroll_help(-1),
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                let h = self.help_height as isize;
+                self.scroll_help(h);
+            }
+            KeyCode::PageUp => {
+                let h = self.help_height as isize;
+                self.scroll_help(-h);
+            }
+            KeyCode::Char('d') if ctrl => {
+                let h = (self.help_height / 2) as isize;
+                self.scroll_help(h);
+            }
+            KeyCode::Char('u') if ctrl => {
+                let h = (self.help_height / 2) as isize;
+                self.scroll_help(-h);
+            }
+            KeyCode::Char('g') => self.help_scroll = 0,
+            KeyCode::Char('G') => self.help_scroll = self.max_help_scroll(),
+            _ => {}
+        }
+        true
     }
 
     /// Flip the left sidebar between the file tree and the all-annotations list.
@@ -1282,11 +1342,21 @@ impl App {
             .find_map(|(i, &s)| (s <= local && local <= s + 1).then_some(i))
     }
 
-    /// Scroll-wheel dispatch by hovered pane: diff scrolls its view, the tree
-    /// moves the file selection, the annotations tab moves its selection.
+    /// Scroll-wheel dispatch by hovered pane: the help overlay (when open) wins
+    /// over the panes underneath; otherwise the diff scrolls its view, the
+    /// tree moves the file selection, the annotations tab moves its selection.
     fn scroll_under(&mut self, col: u16, row: u16, delta: isize) {
         if self.composer.is_some() {
             return;
+        }
+        // Help is modal, so a wheel anywhere over it (or while it's open)
+        // scrolls the help rather than the pane underneath. Honour the rect
+        // first; fall through to the panes only when the cursor is outside.
+        if let Some(outer) = self.hits.help_outer {
+            if contains(outer, col, row) {
+                self.scroll_help(delta);
+                return;
+            }
         }
         if let Some(inner) = self.hits.diff_inner {
             if contains(inner, col, row) {
@@ -1521,8 +1591,12 @@ impl App {
     /// living in `core.luau`) rather than a hand-coded match. A fresh engine per
     /// call keeps each press independent and is cheap enough for these tests.
     pub(crate) fn handle_key(&mut self, ev: KeyEvent) -> bool {
-        // Mirror `run_loop`: the composer, a pending delete-confirm, and the
-        // picker each capture keys before they reach Lua.
+        // Mirror `run_loop`: the help overlay, composer, a pending
+        // delete-confirm, and the picker each capture keys before they reach
+        // Lua.
+        if self.handle_help_key(ev) {
+            return self.should_quit;
+        }
         if self.composer.is_some() || self.pending_delete.is_some() {
             let _ = self.handle_composer_key(ev) || self.handle_pending_delete_key(ev);
             return self.should_quit;

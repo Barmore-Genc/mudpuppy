@@ -139,8 +139,35 @@ fn help_overlay_swallows_navigation() {
     a.handle_key(key(KeyCode::Char('l'))); // focus diff
     a.handle_key(key(KeyCode::Char('?'))); // open help
     assert!(a.show_help);
-    a.handle_key(key(KeyCode::Char('j'))); // swallowed
+    a.handle_key(key(KeyCode::Char('j'))); // swallowed (scrolls help, not diff)
     assert_eq!(a.scroll, 0, "help eats navigation keys");
     a.handle_key(key(KeyCode::Esc)); // Esc closes it
     assert!(!a.show_help);
+}
+
+#[test]
+fn help_overlay_scrolls_with_j_k_and_g() {
+    // The overlay is taller than the body of a short terminal, so `j`
+    // advances and `g` jumps back. `?` reopens at the top (toggle resets
+    // scroll).
+    let mut a = app();
+    let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    term.draw(|f| render(f, &mut a)).unwrap();
+    a.handle_key(key(KeyCode::Char('?')));
+    term.draw(|f| render(f, &mut a)).unwrap();
+    assert_eq!(a.help_scroll, 0);
+    a.handle_key(key(KeyCode::Char('j')));
+    term.draw(|f| render(f, &mut a)).unwrap();
+    assert_eq!(a.help_scroll, 1);
+    a.handle_key(key(KeyCode::Char('G')));
+    term.draw(|f| render(f, &mut a)).unwrap();
+    assert_eq!(a.help_scroll, a.max_help_scroll());
+    a.handle_key(key(KeyCode::Char('g')));
+    assert_eq!(a.help_scroll, 0);
+    // Close + reopen lands back at the top.
+    a.handle_key(key(KeyCode::Char('G')));
+    a.handle_key(key(KeyCode::Char('?')));
+    a.handle_key(key(KeyCode::Char('?')));
+    assert!(a.show_help);
+    assert_eq!(a.help_scroll, 0);
 }

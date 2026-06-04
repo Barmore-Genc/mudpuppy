@@ -177,6 +177,12 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                         // and the hardwired Ctrl-C above. A capture can still
                         // create/remove annotations (composer save, delete), so
                         // diff snapshots around it and fire the change events.
+                        // The help overlay captures keys before Lua so it can
+                        // be scrolled / dismissed without touching the keymap.
+                        // Same precedence as the composer and modal overlays.
+                        if app.handle_help_key(key) {
+                            continue;
+                        }
                         if app.composer.is_some() || app.pending_delete.is_some() {
                             let before = Snapshot::of(app);
                             app.notice = None;
