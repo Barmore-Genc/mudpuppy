@@ -99,7 +99,7 @@ fn drag_in_the_diff_enters_visual_mode_anchored_at_press_row() {
 }
 
 #[test]
-fn clicking_the_sidebar_title_row_toggles_the_sidebar_tab() {
+fn clicking_a_sidebar_tab_chip_switches_to_that_tab() {
     let mut a = annotated_app(vec![note(
         "n1",
         Author::User,
@@ -109,14 +109,15 @@ fn clicking_the_sidebar_title_row_toggles_the_sidebar_tab() {
         Severity::Info,
     )]);
     let _term = render_once(&mut a, 100, 24);
-    let outer = a.hits.sidebar_outer.expect("sidebar rendered");
-    // Click the top border row (the title).
-    assert!(click(&mut a, outer.x + 4, outer.y));
+    // The Annotations chip is the inactive one in Files mode; clicking it
+    // switches.
+    let (y, x0, x1) = a.hits.tab_annot_span.expect("annotations chip rendered");
+    assert!(click(&mut a, (x0 + x1) / 2, y));
     assert_eq!(a.sidebar, Sidebar::Annotations);
-    // Re-render so the new tab's hits land, then click again to flip back.
+    // Re-render: now Files is the inactive chip. Click it to flip back.
     let _term = render_once(&mut a, 100, 24);
-    let outer = a.hits.sidebar_outer.expect("sidebar rendered");
-    assert!(click(&mut a, outer.x + 4, outer.y));
+    let (y, x0, x1) = a.hits.tab_files_span.expect("files chip rendered");
+    assert!(click(&mut a, (x0 + x1) / 2, y));
     assert_eq!(a.sidebar, Sidebar::Files);
 }
 

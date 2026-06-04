@@ -146,8 +146,8 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
         lines.push(line);
     }
 
-    let title = format!(" Files ({}) ", app.files.len());
-    frame.render_widget(Paragraph::new(lines).block(bordered(&title, focused)), area);
+    let block = sidebar_tabs_block(area, app, focused);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// The center diff pane: only the visible window of rows is built into spans.
@@ -242,10 +242,8 @@ fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
         ));
-        frame.render_widget(
-            Paragraph::new(line).block(bordered(" Annotations (0) ", focused)),
-            area,
-        );
+        let block = sidebar_tabs_block(area, app, focused);
+        frame.render_widget(Paragraph::new(line).block(block), area);
         return;
     }
 
@@ -323,11 +321,8 @@ fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
     let visible = lines.split_off(scroll);
     let visible: Vec<Line> = visible.into_iter().take(height).collect();
 
-    let title = format!(" Annotations ({total}) ");
-    frame.render_widget(
-        Paragraph::new(visible).block(bordered(&title, focused)),
-        area,
-    );
+    let block = sidebar_tabs_block(area, app, focused);
+    frame.render_widget(Paragraph::new(visible).block(block), area);
 }
 
 /// The first-contact approval banner (PLAN.md §6): a full-width highlighted row
@@ -717,10 +712,6 @@ fn render_help(frame: &mut Frame, area: Rect) {
     let section =
         |name: &'static str| Line::from(Span::styled(name, Style::default().fg(Color::Cyan)));
     let text = vec![
-        Line::from(Span::styled(
-            "mudpuppy — default keymap",
-            Style::default().add_modifier(Modifier::BOLD),
-        )),
         section("Navigation"),
         Line::raw("  j / k         move cursor (diff) / selection (tree)"),
         Line::raw("  ctrl-d/u/f/b  half / full page down / up"),
@@ -740,6 +731,8 @@ fn render_help(frame: &mut Frame, area: Rect) {
         Line::raw("  Space f       add any file · Space e    expand context"),
         Line::raw("  :             command palette"),
         Line::raw("  ? q Ctrl-c    help · quit"),
+        section("Mouse"),
+        Line::raw("  wheel scroll · click focus · drag select · dbl to comment"),
         Line::from(Span::styled(
             "press ?, q, or Esc to close",
             Style::default().fg(Color::DarkGray),
@@ -862,6 +855,65 @@ fn diff_line(
         }
     }
     Line::from(spans)
+}
+
+/// Build the sidebar's bordered block with a two-tab title strip — `Files (N)`
+/// and `Annotations (M)` separated by `│`, the active tab styled as a chip and
+/// the inactive one dimmed. Records each chip's hit span on `app.hits` so a
+/// mouse click on either tab switches to it directly (issue #29). Only the
+/// active tab carries its count, keeping the strip narrow enough to fit inside
+/// the 28-column sidebar of the Files mode.
+fn sidebar_tabs_block(area: Rect, app: &mut App, focused: bool) -> Block<'static> {
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    let active = Style::default()
+        .fg(Color::Black)
+        .bg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let inactive = Style::default().fg(Color::DarkGray);
+    let sep = Style::default().fg(Color::DarkGray);
+
+    let files_text = match app.sidebar {
+        Sidebar::Files => format!(" Files ({}) ", app.files.len()),
+        Sidebar::Annotations => " Files ".to_string(),
+    };
+    let annot_text = match app.sidebar {
+        Sidebar::Files => " Annotations ".to_string(),
+        Sidebar::Annotations => format!(" Annotations ({}) ", app.annotations.len()),
+    };
+
+    let (files_style, annot_style) = match app.sidebar {
+        Sidebar::Files => (active, inactive),
+        Sidebar::Annotations => (inactive, active),
+    };
+
+    // Title text is left-aligned just after the top-left corner glyph at
+    // `area.x`. Compute each chip's column span as we lay it out so the hit
+    // tester lands exactly on what the user sees.
+    let title_y = area.y;
+    let files_x0 = area.x + 1;
+    let files_x1 = files_x0 + files_text.chars().count() as u16;
+    let sep_x1 = files_x1 + 1; // single `│` cell
+    let annot_x0 = sep_x1;
+    let annot_x1 = annot_x0 + annot_text.chars().count() as u16;
+
+    app.hits.tab_files_span = Some((title_y, files_x0, files_x1));
+    app.hits.tab_annot_span = Some((title_y, annot_x0, annot_x1));
+
+    let title = Line::from(vec![
+        Span::styled(files_text, files_style),
+        Span::styled("│", sep),
+        Span::styled(annot_text, annot_style),
+    ]);
+
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title)
 }
 
 /// A bordered block whose border brightens when its pane is focused.

@@ -60,6 +60,10 @@ pub(crate) struct Hits {
     pub(crate) annotation_scroll: usize,
     /// Status-bar span of the clickable `release`/`approve` word, when shown.
     pub(crate) release_span: Option<Hitspan>,
+    /// Sidebar title chip for the Files tab (always shown).
+    pub(crate) tab_files_span: Option<Hitspan>,
+    /// Sidebar title chip for the Annotations tab (always shown).
+    pub(crate) tab_annot_span: Option<Hitspan>,
     /// Composer footer's `Ctrl-S save` (or `Enter save`) span, when the composer
     /// is open.
     pub(crate) composer_save_span: Option<Hitspan>,
@@ -1411,9 +1415,29 @@ impl App {
     /// landed (no slop across panes) — a click that started inside the diff but
     /// released on the sidebar acts only at the release point's pane.
     fn dispatch_click(&mut self, press: &MousePress, release: &MousePress, double: bool) -> bool {
-        // Click on the sidebar title row (the top border): cycle the sidebar
-        // tab. The only other thing on that row is the title text, and there's
-        // nothing else useful to click there.
+        // Sidebar tab chips, each pointing directly at a tab — preferred over
+        // the title-row fallback below so the inactive chip switches *to* its
+        // tab rather than toggling away from it.
+        if let Some(span) = self.hits.tab_files_span {
+            if Self::in_span(span, release.col, release.row) {
+                if self.sidebar != Sidebar::Files {
+                    self.toggle_annotations();
+                }
+                self.focus = Focus::Tree;
+                return true;
+            }
+        }
+        if let Some(span) = self.hits.tab_annot_span {
+            if Self::in_span(span, release.col, release.row) {
+                if self.sidebar != Sidebar::Annotations {
+                    self.toggle_annotations();
+                }
+                self.focus = Focus::Tree;
+                return true;
+            }
+        }
+        // Anywhere else on the sidebar's top border still toggles, so a click
+        // between chips doesn't feel dead.
         if let Some(outer) = self.hits.sidebar_outer {
             if release.row == outer.y && contains(outer, release.col, release.row) {
                 self.toggle_annotations();

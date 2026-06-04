@@ -2,7 +2,7 @@
 source: src/tui/tests/annotations.rs
 expression: text
 ---
-"┌ Annotations (3) ─────────────────────┐┌ README.md [modified] 3/7  ●1 ────────────────────────────┐"
+"┌ Files │ Annotations (3) ─────────────┐┌ README.md [modified] 3/7  ●1 ────────────────────────────┐"
 "│README.md                             ││ @@ -1,2 +1,2 @@                                          │"
 "│● L1 user  open                       ││     1       - # Old Title                                │"
 "│  body for rdm00003                   ││●          1 + # New Title                                │"
