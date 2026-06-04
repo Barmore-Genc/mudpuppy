@@ -5,8 +5,9 @@
 //! needs no `gh` (the GitHub CLI is *not* a hard dependency of mudpuppy). The
 //! fetch is a blocking [`ureq`] call; callers in the TUI run it on a
 //! `tokio::task::spawn_blocking` thread so the event loop never stalls.
-//! [`check`] is split from [`check_with`] precisely so tests can drive the parse +
-//! comparison with a mocked fetcher instead of touching the network.
+//! [`check`] is split from a private `check_with` helper precisely so tests can
+//! drive the parse + comparison with a mocked fetcher instead of touching the
+//! network.
 //!
 //! Installing still shells out to `cargo`. Security: [`install`] only ever runs
 //! after [`is_valid_version_tag`] accepts the argument — a strict
