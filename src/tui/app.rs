@@ -346,6 +346,10 @@ pub(crate) struct App {
     pub(crate) pending_delete: Option<String>,
     /// The modal comment composer; `Some` while open, capturing key input.
     pub(crate) composer: Option<Composer>,
+    /// A modal question overlay opened from Lua via `mudpuppy.prompt`; `Some`
+    /// while open, capturing key input ahead of the keymap. The matching option
+    /// callbacks live in the scripting engine, keyed by option index.
+    pub(crate) prompt: Option<super::prompt::Prompt>,
     /// Top visible file row of the tree, so the selection stays on screen.
     pub(crate) tree_scroll: usize,
     pub(crate) show_help: bool,
@@ -444,6 +448,7 @@ impl App {
             selection_anchor: None,
             pending_delete: None,
             composer: None,
+            prompt: None,
             tree_scroll: 0,
             show_help: false,
             help_scroll: 0,
@@ -1675,6 +1680,14 @@ impl App {
         }
         if self.composer.is_some() || self.pending_delete.is_some() {
             let _ = self.handle_composer_key(ev) || self.handle_pending_delete_key(ev);
+            return self.should_quit;
+        }
+        // A modal prompt captures keys here too. The chosen option's callback
+        // lives in the engine that opened the prompt; this per-call throwaway
+        // engine can't run it, so layer-1 tests exercise prompt navigation/
+        // dismissal only — the callback path is covered by the lua engine tests.
+        if self.prompt.is_some() {
+            let _ = self.handle_prompt_key(ev);
             return self.should_quit;
         }
         if self.handle_picker_key(ev) {

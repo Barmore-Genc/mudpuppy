@@ -4,8 +4,10 @@
 //! This crate is the testable core behind the `mudpuppy` binary. The binary
 //! (`src/main.rs`) is a thin shell that parses the [`cli`] command tree and
 //! dispatches into these modules. There is deliberately **no AI** anywhere in
-//! here and **no network** beyond shelling out to `git` (local diffs) and `gh`
-//! (read-only PR diffs); see [`AGENTS.md`] for the hard requirements.
+//! here and **no network** of our own: the only outward calls shell out to
+//! `git` (local diffs), `gh` (read-only PR diffs and the release check in
+//! [`update`]), and `cargo` (installing a self-update); see [`AGENTS.md`] for the
+//! hard requirements.
 //!
 //! [`AGENTS.md`]: https://github.com/kaangenc/mudpuppy/blob/main/AGENTS.md
 //!
@@ -25,6 +27,7 @@
 //! - [`lua`] — embedded Luau sandbox: the configurable keymap and event hooks.
 //! - [`store`] — load / merge-by-id / atomic+locked save; the turn protocol.
 //! - [`session`] — repo + target resolution, store-path derivation, resume.
+//! - [`update`] — self-update: GitHub release check + version-validated install.
 //! - [`tui`] — the ratatui application.
 //! - [`agent`] — implementation of the `agent` subcommands.
 //! - [`install`] — `install claude`: writes Claude Code skills to disk.
@@ -46,3 +49,4 @@ pub mod session;
 pub mod source;
 pub mod store;
 pub mod tui;
+pub mod update;

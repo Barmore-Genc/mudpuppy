@@ -36,6 +36,7 @@
 mod annotate;
 mod app;
 mod composer;
+mod prompt;
 mod render;
 #[cfg(test)]
 mod tests;
@@ -45,6 +46,7 @@ use render::{render, target_desc};
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -63,6 +65,18 @@ use crate::lua::keys::KeyChord;
 use crate::lua::{self, LuaEngine};
 use crate::session::Session;
 use crate::{source, store};
+
+/// Environment variable that, when set, disables the periodic update-check timer.
+/// The e2e harness sets it so tests never shell out to `gh`; users can set it to
+/// opt out without editing their config.
+pub const NO_UPDATE_CHECK_ENV: &str = "MUDPUPPY_NO_UPDATE_CHECK";
+
+/// How long after launch the first update check fires — long enough to stay off
+/// the opening render's critical path.
+const UPDATE_CHECK_DELAY: Duration = Duration::from_secs(2);
+
+/// How often the update check repeats while the TUI stays open.
+const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Launch the interactive review UI.
 ///
@@ -151,6 +165,20 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
 
         let mut events = EventStream::new();
 
+        // Periodic update-check pump. The cadence and the actual GitHub query live
+        // in `core.luau` (it subscribes to `update_check` and calls
+        // `mudpuppy.updates.check()`); the loop just fires the event on a timer.
+        // The first tick is delayed a couple of seconds so it never blocks the
+        // opening render, then it repeats on a long interval. `MUDPUPPY_NO_UPDATE_CHECK`
+        // disables the timer entirely — set by the e2e harness so tests never shell
+        // out to `gh` or pop an update prompt over a baseline.
+        let mut update_timer = if std::env::var_os(NO_UPDATE_CHECK_ENV).is_none() {
+            let start = tokio::time::Instant::now() + UPDATE_CHECK_DELAY;
+            Some(tokio::time::interval_at(start, UPDATE_CHECK_INTERVAL))
+        } else {
+            None
+        };
+
         // Initial events: `startup` once, then `file_open` for the file the
         // viewer opens on.
         engine.fire_startup(app)?;
@@ -188,6 +216,24 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                             app.notice = None;
                             let _ = app.handle_composer_key(key)
                                 || app.handle_pending_delete_key(key);
+                            let after = Snapshot::of(app);
+                            fire_changes(&engine, app, &before, &after)?;
+                            continue;
+                        }
+                        // A modal prompt (opened by `mudpuppy.prompt`) captures
+                        // keys ahead of the keymap, like the picker and palette.
+                        // Choosing an option runs its Lua callback through the
+                        // engine's scoped machinery, which can release the turn,
+                        // open another prompt, or quit — so snapshot around it.
+                        if app.prompt.is_some() {
+                            let before = Snapshot::of(app);
+                            app.notice = None;
+                            if let Some(index) = app.handle_prompt_key(key) {
+                                engine.run_prompt(app, index)?;
+                                if app.should_quit {
+                                    return Ok(());
+                                }
+                            }
                             let after = Snapshot::of(app);
                             fire_changes(&engine, app, &before, &after)?;
                             continue;
@@ -270,6 +316,20 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                 // Errors are non-fatal and surface in the status bar.
                 Some(()) = cfg_rx.recv() => {
                     let _ = engine.reload_config();
+                }
+                // Time to check for a newer release. Disabled (the branch's guard
+                // is false) when no timer was set up. The handler may open a
+                // prompt; running its callbacks can release the turn, so snapshot.
+                _ = async { update_timer.as_mut().unwrap().tick().await },
+                    if update_timer.is_some() =>
+                {
+                    let before = Snapshot::of(app);
+                    engine.fire_update_check(app)?;
+                    if app.should_quit {
+                        return Ok(());
+                    }
+                    let after = Snapshot::of(app);
+                    fire_changes(&engine, app, &before, &after)?;
                 }
             }
         }

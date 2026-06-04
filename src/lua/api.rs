@@ -28,7 +28,7 @@ use mlua::{Function, Lua, Result, Scope, Table, Value};
 
 use super::keys::{KeyChord, KeySeq, Mode};
 use super::views;
-use super::{Bindings, Commands, EventKind, Events, Leader};
+use super::{Bindings, Commands, EventKind, Events, Leader, Prompts, UpdateChecks};
 use crate::tui::App;
 
 /// Build the persistent `mudpuppy` table with the `map`/`unmap`/`on`/`command`/
@@ -39,6 +39,7 @@ pub fn build_table(
     events: Events,
     commands: Commands,
     leader: Leader,
+    update_checks: UpdateChecks,
 ) -> Result<Table> {
     let table = lua.create_table()?;
 
@@ -101,7 +102,109 @@ pub fn build_table(
         })?,
     )?;
 
+    table.set("updates", build_updates_table(lua, update_checks)?)?;
+
     Ok(table)
+}
+
+/// The marker comment the skip action writes above its config line, so a repeated
+/// skip doesn't append duplicates.
+const DISABLE_MARKER: &str = "-- Added by mudpuppy: stop checking for updates.";
+
+/// Build the persistent `mudpuppy.updates` sub-table: `check()`, `update(version)`,
+/// and the auto-check toggle (`check_enabled`/`set_check_enabled`/`disable`). These
+/// are persistent (always available), not per-dispatch scoped: `core.luau` calls
+/// them from commands, event handlers, and prompt callbacks alike.
+fn build_updates_table(lua: &Lua, update_checks: UpdateChecks) -> Result<Table> {
+    let updates = lua.create_table()?;
+
+    // `check()` -> a `vX.Y.Z` string if GitHub has a newer release, else nil.
+    // A failure to reach `gh` is logged and reported as "no update" so a missing
+    // CLI never throws into a script.
+    updates.set(
+        "check",
+        lua.create_function(|_, ()| match crate::update::check() {
+            Ok(found) => Ok(found),
+            Err(e) => {
+                crate::log_warn!("update check failed: {e}");
+                Ok(None)
+            }
+        })?,
+    )?;
+
+    // `update(version)` installs `version`, which must be a strict `vX.Y.Z` tag —
+    // the validation boundary lives in `update::install`, which refuses anything
+    // else before spawning. Raises a Lua error on an invalid version or a failed
+    // install so the script (and status bar) sees it.
+    updates.set(
+        "update",
+        lua.create_function(|_, version: String| {
+            crate::update::install(&version).map_err(|e| mlua::Error::runtime(e.to_string()))?;
+            Ok(true)
+        })?,
+    )?;
+
+    let flag = update_checks.clone();
+    updates.set(
+        "check_enabled",
+        lua.create_function(move |_, ()| Ok(*flag.borrow()))?,
+    )?;
+
+    // Set the in-memory flag without touching the config — this is what the line
+    // the skip action writes calls on the next load.
+    let flag = update_checks.clone();
+    updates.set(
+        "set_check_enabled",
+        lua.create_function(move |_, enabled: bool| {
+            *flag.borrow_mut() = enabled;
+            Ok(())
+        })?,
+    )?;
+
+    // `disable()` is the prompt's "skip" action: persist the opt-out by appending
+    // a line to the user config, and flip the flag now so this session stops too.
+    let flag = update_checks;
+    updates.set(
+        "disable",
+        lua.create_function(move |_, ()| {
+            *flag.borrow_mut() = false;
+            persist_disable().map_err(|e| mlua::Error::runtime(e.to_string()))?;
+            Ok(())
+        })?,
+    )?;
+
+    Ok(updates)
+}
+
+/// Append a `set_check_enabled(false)` line to the user config so update checks
+/// stay off across restarts. Idempotent: a no-op if the marker is already there.
+/// Creates the config directory if needed. A missing config path (no resolvable
+/// home) is reported as an error the caller surfaces.
+fn persist_disable() -> anyhow::Result<()> {
+    use std::io::Write;
+
+    let path = super::config_path()
+        .ok_or_else(|| anyhow::anyhow!("no config path to write (no home directory found)"))?;
+
+    // Don't duplicate the line if the user has already skipped before.
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        if existing.contains(DISABLE_MARKER) {
+            return Ok(());
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)?;
+    writeln!(
+        file,
+        "\n{DISABLE_MARKER}\nmudpuppy.updates.set_check_enabled(false)"
+    )?;
+    Ok(())
 }
 
 /// Install the scoped action and reader functions onto `table` for one dispatch,
@@ -113,6 +216,7 @@ pub fn install_scoped<'scope>(
     table: &Table,
     cell: &'scope RefCell<&mut App>,
     commands: &Commands,
+    prompts: &Prompts,
 ) -> Result<()> {
     // --- mutating actions ---------------------------------------------------
 
@@ -267,6 +371,40 @@ pub fn install_scoped<'scope>(
         "move_selection",
         scope.create_function(move |_, delta: i64| {
             cell.borrow_mut().move_selection(delta);
+            Ok(())
+        })?,
+    )?;
+
+    // Open a modal prompt: a question plus an ordered list of `{label, callback}`
+    // options. The labels render in the overlay; the callbacks are stashed in the
+    // shared `prompts` registry (cleared first so a re-prompt doesn't keep stale
+    // options) and run by `LuaEngine::run_prompt` when the user chooses. Each
+    // option is a 2-element array `{ "Label", function() ... end }`, or a table
+    // `{ label = "Label", action = function() ... end }`.
+    let pr = prompts.clone();
+    table.set(
+        "prompt",
+        scope.create_function(move |_, (message, options): (String, Table)| {
+            let mut labels: Vec<String> = Vec::new();
+            let mut callbacks: Vec<Function> = Vec::new();
+            for option in options.sequence_values::<Table>() {
+                let option = option?;
+                let label: String = option
+                    .get("label")
+                    .or_else(|_| option.get(1))
+                    .map_err(|_| mlua::Error::runtime("prompt option needs a string label"))?;
+                let action: Function = option
+                    .get("action")
+                    .or_else(|_| option.get(2))
+                    .map_err(|_| mlua::Error::runtime("prompt option needs a function"))?;
+                labels.push(label);
+                callbacks.push(action);
+            }
+            if labels.is_empty() {
+                return Err(mlua::Error::runtime("prompt requires at least one option"));
+            }
+            *pr.borrow_mut() = callbacks;
+            cell.borrow_mut().open_prompt(message, labels);
             Ok(())
         })?,
     )?;

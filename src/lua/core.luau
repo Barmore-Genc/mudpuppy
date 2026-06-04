@@ -146,3 +146,43 @@ m.map("diff", "<leader> c s", function() m.cycle_status() end)
 m.map("help", "?", function() m.toggle_help() end)
 m.map("help", "esc", function() m.toggle_help() end)
 m.map("help", "q", function() m.toggle_help() end)
+
+-- ---- Self-update: check GitHub for a newer release and offer to install ------
+--
+-- The whole policy lives here, built on three primitives: `m.prompt` (a modal
+-- question with labelled callbacks), `m.updates.check()` (returns a newer version
+-- string or nil), and `m.updates.update(version)` (installs a validated vX.Y.Z).
+-- The event loop fires `update_check` periodically; the `:check-updates` command
+-- runs the same flow on demand.
+
+-- Offer to install `version`. "Install" updates now; "Ignore" dismisses until the
+-- next check; "Skip" stops checking and records that in the user config.
+local function offer_update(version)
+  m.prompt("mudpuppy " .. version .. " is available. Update now?", {
+    { "Install", function()
+        m.updates.update(version)
+        print("Updated to " .. version .. " — restart mudpuppy to run it.")
+      end },
+    { "Ignore for now", function() end },
+    { "Skip", function() m.updates.disable() end },
+  })
+end
+
+-- Check, and prompt if a newer release exists. Returns the version (or nil).
+local function check_and_offer()
+  local version = m.updates.check()
+  if version then offer_update(version) end
+  return version
+end
+
+-- Periodic check: honour the user's opt-out (the skip action turns this off).
+m.on("update_check", function()
+  if m.updates.check_enabled() then check_and_offer() end
+end)
+
+-- Manual check from the `:` palette; reports when already current.
+m.command("check-updates", function()
+  if not check_and_offer() then
+    print("mudpuppy is up to date.")
+  end
+end)

@@ -101,6 +101,62 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
         app.hits.composer_save_span = Some(save);
         app.hits.composer_cancel_span = Some(cancel);
     }
+    // A modal prompt sits on top of everything (only one overlay is open at a
+    // time in practice, but draw it last so it is unambiguously topmost).
+    if let Some(prompt) = app.prompt.as_ref() {
+        let area = frame.area();
+        render_prompt(frame, area, prompt);
+    }
+}
+
+/// The modal prompt overlay (opened by `mudpuppy.prompt`): a wrapped question
+/// above a row of labelled option chips, the highlighted one styled like a button.
+/// A footer spells out the keys. The matching callbacks run in the scripting
+/// engine when the user confirms.
+fn render_prompt(frame: &mut Frame, area: Rect, prompt: &super::prompt::Prompt) {
+    let area = centered_rect(64, (area.height * 4 / 10).max(7), area);
+    let block = bordered(" mudpuppy ", true);
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        prompt.message.clone(),
+        Style::default().add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::raw(""));
+
+    // One chip per option, numbered (`1`–) so a digit key picks it directly. The
+    // highlighted option reads as a button; the rest are dim.
+    let mut chips: Vec<Span> = Vec::new();
+    for (i, label) in prompt.options.iter().enumerate() {
+        if i > 0 {
+            chips.push(Span::raw("  "));
+        }
+        let text = format!(" {} {} ", i + 1, label);
+        let style = if i == prompt.selected {
+            Style::default()
+                .bg(Color::Cyan)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray).add_modifier(Modifier::DIM)
+        };
+        chips.push(Span::styled(text, style));
+    }
+    lines.push(Line::from(chips));
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "←/→ choose  ·  1-9 pick  ·  Enter confirm  ·  Esc dismiss",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 /// The left-hand file tree, with status markers and `+`/`-` counts.

@@ -70,6 +70,9 @@ impl Session {
         cmd.env("TERM", "xterm-256color");
         cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
         cmd.env("GIT_CONFIG_SYSTEM", "/dev/null");
+        // Never let the periodic update check shell out to `gh` (or pop a prompt
+        // over a baseline) during tests; the timer is suppressed when this is set.
+        cmd.env("MUDPUPPY_NO_UPDATE_CHECK", "1");
         for (key, value) in extra_env {
             cmd.env(key, value);
         }
