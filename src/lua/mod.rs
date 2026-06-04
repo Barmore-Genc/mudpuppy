@@ -80,8 +80,8 @@ pub enum EventKind {
     AnnotationAdded,
     /// The turn's `seq` or `owner` changed.
     TurnChange,
-    /// Time to check for a newer release (fired periodically by the event loop).
-    /// `core.luau` subscribes to it and runs the actual `updates.check()`.
+    /// A newer release was found by the launch-time check. Payload: `{ version }`.
+    /// `core.luau` subscribes to it to prompt the user.
     UpdateCheck,
 }
 
@@ -433,10 +433,21 @@ impl LuaEngine {
         })
     }
 
-    /// Fire `update_check` (no payload). `core.luau` handles the actual GitHub
-    /// query and prompt; the event loop only schedules it.
-    pub(crate) fn fire_update_check(&self, app: &mut App) -> Result<()> {
-        self.fire(app, EventKind::UpdateCheck, |lua, _| lua.create_table())
+    /// Fire `update_check{version=…}` after the launch-time check found a newer
+    /// release. `core.luau` handles the prompt; the event loop did the fetch.
+    pub(crate) fn fire_update_check(&self, app: &mut App, version: &str) -> Result<()> {
+        let version = version.to_string();
+        self.fire(app, EventKind::UpdateCheck, move |lua, _| {
+            let t = lua.create_table()?;
+            t.set("version", version)?;
+            Ok(t)
+        })
+    }
+
+    /// Whether automatic update checks are enabled (the shared flag a config can
+    /// turn off). The event loop reads this before launching the check.
+    pub(crate) fn update_checks_enabled(&self) -> bool {
+        *self.update_checks.borrow()
     }
 
     /// Run every handler for `kind` in a fresh scope (so handlers can call action
@@ -728,18 +739,20 @@ running anything. It is a general primitive — the auto-update flow is one user
 
 Updates
 -------
-mudpuppy checks GitHub for a newer release periodically and, when one exists,
-prompts you to install it, ignore it for now, or skip (stop checking — this
-writes a line to your config). The same primitives are scriptable:
+Once per launch mudpuppy checks for a newer release (by reading the published
+release manifest over HTTPS — no `gh` needed) and, when one exists, prompts you
+to install it, ignore it for now, or skip (stop checking — this writes a line to
+your config). The same primitives are scriptable:
   mudpuppy.updates.check()              -> a "vX.Y.Z" string if a newer release
-                                           exists, else nil
+                                           exists, else nil (does a blocking
+                                           fetch; the launch check runs off-thread)
   mudpuppy.updates.update(version)      install `version`; it must be a strict
                                            "vMAJOR.MINOR.PATCH" tag (validated
                                            before anything is run)
   mudpuppy.updates.check_enabled()      -> whether automatic checks are on
   mudpuppy.updates.set_check_enabled(b) turn automatic checks on/off (memory only)
   mudpuppy.updates.disable()            stop checking and persist that to config
-Set MUDPUPPY_NO_UPDATE_CHECK in the environment to disable the periodic check
+Set MUDPUPPY_NO_UPDATE_CHECK in the environment to disable the launch check
 without touching your config.
 
 Events
@@ -752,8 +765,8 @@ Events
                     payload: { annotation = { ... } }
   turn_change       when the turn's owner or seq changes
                     payload: { turn = { ... } }
-  update_check      periodically, when it's time to check for a newer release
-                    (the default handler runs updates.check() and prompts)
+  update_check      once per launch, when the check found a newer release
+                    payload: { version = "vX.Y.Z" }  (the default handler prompts)
 
 Examples
 --------

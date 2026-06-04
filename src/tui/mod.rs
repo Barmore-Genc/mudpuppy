@@ -46,7 +46,6 @@ use render::{render, target_desc};
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -66,17 +65,10 @@ use crate::lua::{self, LuaEngine};
 use crate::session::Session;
 use crate::{source, store};
 
-/// Environment variable that, when set, disables the periodic update-check timer.
-/// The e2e harness sets it so tests never shell out to `gh`; users can set it to
+/// Environment variable that, when set, disables the launch-time update check.
+/// The e2e harness sets it so tests never reach the network; users can set it to
 /// opt out without editing their config.
 pub const NO_UPDATE_CHECK_ENV: &str = "MUDPUPPY_NO_UPDATE_CHECK";
-
-/// How long after launch the first update check fires — long enough to stay off
-/// the opening render's critical path.
-const UPDATE_CHECK_DELAY: Duration = Duration::from_secs(2);
-
-/// How often the update check repeats while the TUI stays open.
-const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
 /// Launch the interactive review UI.
 ///
@@ -165,19 +157,23 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
 
         let mut events = EventStream::new();
 
-        // Periodic update-check pump. The cadence and the actual GitHub query live
-        // in `core.luau` (it subscribes to `update_check` and calls
-        // `mudpuppy.updates.check()`); the loop just fires the event on a timer.
-        // The first tick is delayed a couple of seconds so it never blocks the
-        // opening render, then it repeats on a long interval. `MUDPUPPY_NO_UPDATE_CHECK`
-        // disables the timer entirely — set by the e2e harness so tests never shell
-        // out to `gh` or pop an update prompt over a baseline.
-        let mut update_timer = if std::env::var_os(NO_UPDATE_CHECK_ENV).is_none() {
-            let start = tokio::time::Instant::now() + UPDATE_CHECK_DELAY;
-            Some(tokio::time::interval_at(start, UPDATE_CHECK_INTERVAL))
-        } else {
-            None
-        };
+        // One-shot, launch-time update check. Reviews are short-lived and opened
+        // afresh, so a single check per launch is plenty — no timer (and never
+        // more than once a session). The blocking HTTP fetch runs on a
+        // `spawn_blocking` thread so it never stalls the loop; its result (a newer
+        // version tag, if any) arrives on `update_rx`, and the loop turns that into
+        // an `update_check` event so `core.luau` can prompt. Skipped entirely when
+        // `MUDPUPPY_NO_UPDATE_CHECK` is set (the e2e harness sets it) or the user
+        // disabled checks in their config.
+        let (update_tx, mut update_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        if std::env::var_os(NO_UPDATE_CHECK_ENV).is_none() && engine.update_checks_enabled() {
+            let tx = update_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Ok(Some(version)) = crate::update::check() {
+                    let _ = tx.send(version);
+                }
+            });
+        }
 
         // Initial events: `startup` once, then `file_open` for the file the
         // viewer opens on.
@@ -317,14 +313,12 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                 Some(()) = cfg_rx.recv() => {
                     let _ = engine.reload_config();
                 }
-                // Time to check for a newer release. Disabled (the branch's guard
-                // is false) when no timer was set up. The handler may open a
-                // prompt; running its callbacks can release the turn, so snapshot.
-                _ = async { update_timer.as_mut().unwrap().tick().await },
-                    if update_timer.is_some() =>
-                {
+                // The launch-time update check found a newer release. Fire
+                // `update_check` so `core.luau` can prompt; its callbacks can
+                // release the turn or quit, so snapshot around it.
+                Some(version) = update_rx.recv() => {
                     let before = Snapshot::of(app);
-                    engine.fire_update_check(app)?;
+                    engine.fire_update_check(app, &version)?;
                     if app.should_quit {
                         return Ok(());
                     }
