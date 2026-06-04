@@ -11,8 +11,12 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::Rect;
 
 use crate::blob::{self, BlobSide};
 use crate::command::CommandPalette;
@@ -23,6 +27,69 @@ use crate::lua::keys::KeyChord;
 use crate::picker::Picker;
 use crate::tui::composer::Composer;
 use crate::{source, store};
+
+/// A horizontal span on a known row: `(y, x_start, x_end_exclusive)`. Used to
+/// hit-test mouse clicks against inline "button" labels (a sidebar tab name, the
+/// status-bar `release` word, the composer footer's save/cancel labels).
+pub(crate) type Hitspan = (u16, u16, u16);
+
+/// Per-frame interactive regions, populated by [`crate::tui::render`] and
+/// consulted by [`App::handle_mouse_event`]. Layout-derived state only; the
+/// terminal has no notion of clickable widgets, so we record where each pane and
+/// in-line label landed during the last draw and map mouse coordinates against
+/// them on the next event.
+#[derive(Default, Clone)]
+pub(crate) struct Hits {
+    /// Outer rect (with border) of the sidebar — used to detect title-row clicks.
+    pub(crate) sidebar_outer: Option<Rect>,
+    /// Inner rect (inside the border) of the sidebar body — used for row hits.
+    pub(crate) sidebar_inner: Option<Rect>,
+    pub(crate) diff_outer: Option<Rect>,
+    pub(crate) diff_inner: Option<Rect>,
+    pub(crate) status: Option<Rect>,
+    pub(crate) composer_outer: Option<Rect>,
+    pub(crate) picker_outer: Option<Rect>,
+    pub(crate) palette_outer: Option<Rect>,
+    /// Number of header lines drawn at the top of the diff inner area before the
+    /// first row of `view.rows` (currently 0 or 1 for the file-level banner).
+    pub(crate) diff_header_rows: u16,
+    /// Annotation-tab line offset (within the rendered list, after scroll) where
+    /// annotation `i` begins. Empty in Files mode or on an empty annotations tab.
+    pub(crate) annotation_block_starts: Vec<usize>,
+    /// Scroll offset the annotation tab was rendered with.
+    pub(crate) annotation_scroll: usize,
+    /// Status-bar span of the clickable `release`/`approve` word, when shown.
+    pub(crate) release_span: Option<Hitspan>,
+    /// Composer footer's `Ctrl-S save` (or `Enter save`) span, when the composer
+    /// is open.
+    pub(crate) composer_save_span: Option<Hitspan>,
+    /// Composer footer's `Esc cancel`/`Esc normal` span, when the composer is open.
+    pub(crate) composer_cancel_span: Option<Hitspan>,
+}
+
+/// Press tracking for double-click detection and drag-to-visual-select: where the
+/// last left-button press landed, when, and what row index the diff cursor was on
+/// at that moment.
+#[derive(Clone)]
+struct MousePress {
+    at: Instant,
+    col: u16,
+    row: u16,
+    /// Where the diff cursor sat at press time, so a drag can re-anchor visual
+    /// mode there.
+    diff_row_idx: Option<usize>,
+    /// Tree file index at press time (for double-click "open file" gesture).
+    tree_idx: Option<usize>,
+    /// Annotation list index at press time.
+    annotation_idx: Option<usize>,
+    /// True once the press has produced a drag (so the eventual `Up` doesn't
+    /// fire a single-click action).
+    dragged: bool,
+}
+
+/// Window within which two consecutive presses count as a double click. Loose
+/// enough to be comfortable but tight enough not to chain unrelated clicks.
+const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(450);
 
 /// Which pane has keyboard focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +390,16 @@ pub(crate) struct App {
     /// The partial key sequence awaiting more keys (`g` waiting for `g g`).
     /// Surfaced in the status bar; cleared on resolution or miss.
     pub(crate) pending_seq: Vec<KeyChord>,
+    /// Hit-test regions populated by the renderer each frame so the next mouse
+    /// event can map a `(column, row)` back to a pane or in-line label.
+    pub(crate) hits: Hits,
+    /// Last left-button press; tracked across `Down`/`Drag`/`Up` to recognise
+    /// double clicks (open composer / open file) and drag-to-visual-select.
+    last_press: Option<MousePress>,
+    /// Last click that already committed an action, kept around so a second
+    /// click on the same target within [`DOUBLE_CLICK_WINDOW`] is recognised
+    /// as a double click on `Up` (where the action fires).
+    last_click: Option<MousePress>,
 }
 
 impl App {
@@ -364,6 +441,9 @@ impl App {
             palette: None,
             pending_count: None,
             pending_seq: Vec::new(),
+            hits: Hits::default(),
+            last_press: None,
+            last_click: None,
         }
     }
 
@@ -1083,6 +1163,327 @@ impl App {
     pub(crate) fn current(&self) -> &FileDiff {
         &self.files[self.selected]
     }
+
+    // --- Mouse ------------------------------------------------------------
+
+    /// Route a crossterm `MouseEvent` against the regions the renderer recorded
+    /// last frame. Returns `true` if the event changed state worth re-running
+    /// the engine's change-detection over (so `run_loop` can fire `file_open`,
+    /// `turn_change`, etc. just like a key dispatch). Mirrors the keyboard
+    /// precedence: an open composer/picker/palette captures clicks targeted at
+    /// its overlay; anything outside is treated as "outside the modal" and
+    /// ignored, so a stray click can't move the diff cursor underneath.
+    pub(crate) fn handle_mouse_event(&mut self, ev: MouseEvent) -> bool {
+        let col = ev.column;
+        let row = ev.row;
+
+        // While any overlay is open, the only mouse events we honour are clicks
+        // on its own affordances and wheel scrolls inside it. A click outside
+        // an overlay is treated like a stray key — ignored — rather than
+        // dismissing the modal, which would surprise users mid-edit.
+        let in_overlay = self.composer.is_some() || self.picker.is_some() || self.palette.is_some();
+
+        match ev.kind {
+            MouseEventKind::ScrollUp => self.scroll_under(col, row, -3),
+            MouseEventKind::ScrollDown => self.scroll_under(col, row, 3),
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.last_press = Some(self.press_at(col, row));
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if in_overlay {
+                    return false;
+                }
+                return self.handle_drag(col, row);
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if in_overlay {
+                    // Composer save/cancel labels are the only overlay buttons.
+                    return self.handle_overlay_click(col, row);
+                }
+                return self.handle_left_up(col, row);
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// Build a `MousePress` snapshotting what's under `(col, row)` right now:
+    /// which tree/annotation index it lands on and which diff row index. Stored
+    /// on `Down` so `Up`/`Drag` can act on the press origin (a drag from row 5
+    /// to row 12 should anchor visual mode at 5, not at the latest pointer
+    /// position).
+    fn press_at(&self, col: u16, row: u16) -> MousePress {
+        MousePress {
+            at: Instant::now(),
+            col,
+            row,
+            diff_row_idx: self.diff_row_at(col, row),
+            tree_idx: self.tree_index_at(col, row),
+            annotation_idx: self.annotation_index_at(col, row),
+            dragged: false,
+        }
+    }
+
+    /// Diff `view.rows` index under `(col, row)`, accounting for scroll and the
+    /// per-frame header banner. `None` if outside the diff inner area or past
+    /// the materialised rows.
+    fn diff_row_at(&self, col: u16, row: u16) -> Option<usize> {
+        let inner = self.hits.diff_inner?;
+        if !contains(inner, col, row) {
+            return None;
+        }
+        let local = row.saturating_sub(inner.y);
+        if local < self.hits.diff_header_rows {
+            return None;
+        }
+        let off = (local - self.hits.diff_header_rows) as usize;
+        let idx = self.scroll + off;
+        (idx < self.view.rows.len()).then_some(idx)
+    }
+
+    /// File-tree index under `(col, row)`, accounting for `tree_scroll`. `None`
+    /// outside the tree body or when the sidebar is showing annotations.
+    fn tree_index_at(&self, col: u16, row: u16) -> Option<usize> {
+        if self.sidebar != Sidebar::Files {
+            return None;
+        }
+        let inner = self.hits.sidebar_inner?;
+        if !contains(inner, col, row) {
+            return None;
+        }
+        let local = (row - inner.y) as usize;
+        let idx = self.tree_scroll + local;
+        (idx < self.files.len()).then_some(idx)
+    }
+
+    /// Annotation-list index under `(col, row)`, by matching the y offset
+    /// against the recorded per-annotation block starts. `None` outside the
+    /// annotations body or when the sidebar is showing files.
+    fn annotation_index_at(&self, col: u16, row: u16) -> Option<usize> {
+        if self.sidebar != Sidebar::Annotations {
+            return None;
+        }
+        let inner = self.hits.sidebar_inner?;
+        if !contains(inner, col, row) {
+            return None;
+        }
+        let local = (row - inner.y) as usize + self.hits.annotation_scroll;
+        // Each annotation occupies its block_start line and the next (preview).
+        // Walk in reverse so the latest start <= local wins.
+        self.hits
+            .annotation_block_starts
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, &s)| (s <= local && local <= s + 1).then_some(i))
+    }
+
+    /// Scroll-wheel dispatch by hovered pane: diff scrolls its view, the tree
+    /// moves the file selection, the annotations tab moves its selection.
+    fn scroll_under(&mut self, col: u16, row: u16, delta: isize) {
+        if self.composer.is_some() {
+            return;
+        }
+        if let Some(inner) = self.hits.diff_inner {
+            if contains(inner, col, row) {
+                self.scroll_by(delta);
+                return;
+            }
+        }
+        if let Some(inner) = self.hits.sidebar_inner {
+            if contains(inner, col, row) {
+                self.sidebar_move(delta as i64);
+            }
+        }
+    }
+
+    /// Was `(col, row)` inside `span` (a `(y, x_start, x_end_exclusive)`)?
+    fn in_span(span: Hitspan, col: u16, row: u16) -> bool {
+        let (y, x0, x1) = span;
+        row == y && col >= x0 && col < x1
+    }
+
+    /// Composer-only clicks: the save / cancel footer labels.
+    fn handle_overlay_click(&mut self, col: u16, row: u16) -> bool {
+        if let Some(span) = self.hits.composer_save_span {
+            if Self::in_span(span, col, row) {
+                self.composer_save_via_click();
+                return true;
+            }
+        }
+        if let Some(span) = self.hits.composer_cancel_span {
+            if Self::in_span(span, col, row) {
+                self.composer = None;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Drive a composer save from a mouse click — synthesises the same `Ctrl-S`
+    /// path as the keyboard so empty-body handling and target routing match.
+    fn composer_save_via_click(&mut self) {
+        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let _ = self.handle_composer_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+    }
+
+    /// Left-button drag: only meaningful in the diff body, where we promote a
+    /// click-and-hold into a visual selection anchored at the press origin and
+    /// extending to the pointer.
+    fn handle_drag(&mut self, col: u16, row: u16) -> bool {
+        let (anchor, already_dragged) = match self.last_press.as_ref() {
+            Some(p) => (p.diff_row_idx, p.dragged),
+            None => return false,
+        };
+        let Some(anchor) = anchor else {
+            return false;
+        };
+        let Some(now_idx) = self.diff_row_at(col, row) else {
+            return false;
+        };
+        if now_idx == anchor && !already_dragged {
+            // Still on the press row — wait for actual movement before
+            // committing to visual mode.
+            return false;
+        }
+        if let Some(p) = self.last_press.as_mut() {
+            p.dragged = true;
+        }
+        // Take focus on the first real drag so subsequent keys act on the diff.
+        self.focus = Focus::Diff;
+        self.selection_anchor = Some(anchor);
+        self.set_cursor(now_idx as i64);
+        true
+    }
+
+    /// Resolve a left-button release: a same-place release after a press counts
+    /// as a click; if a matching click landed recently on the same target, it
+    /// counts as a double click (open file / open composer). A release that
+    /// followed a drag commits the selection and fires no click action.
+    fn handle_left_up(&mut self, col: u16, row: u16) -> bool {
+        let press = match self.last_press.take() {
+            Some(p) => p,
+            None => return false,
+        };
+        if press.dragged {
+            // Drag already updated cursor/selection; nothing else to do.
+            self.last_click = None;
+            return true;
+        }
+        let release = self.press_at(col, row);
+        let double = self.is_double_click(&press, &release);
+        let acted = self.dispatch_click(&press, &release, double);
+        // Only single clicks are candidates for being the *first* of a future
+        // double click — a confirmed double click resets the chain.
+        self.last_click = if double { None } else { Some(release) };
+        acted
+    }
+
+    /// True when this click should pair with the last committed click as a
+    /// double click: same target (tree/diff/annotation index), within
+    /// [`DOUBLE_CLICK_WINDOW`].
+    fn is_double_click(&self, press: &MousePress, release: &MousePress) -> bool {
+        let Some(prev) = self.last_click.as_ref() else {
+            return false;
+        };
+        if release.at.duration_since(prev.at) > DOUBLE_CLICK_WINDOW {
+            return false;
+        }
+        // The same target was hit in both presses; `tree`/`annotation`/`diff`
+        // are mutually exclusive (only one is `Some` for a given click), so
+        // matching any one is enough.
+        match (
+            press.tree_idx.or(release.tree_idx),
+            prev.tree_idx,
+            press.annotation_idx.or(release.annotation_idx),
+            prev.annotation_idx,
+            press.diff_row_idx.or(release.diff_row_idx),
+            prev.diff_row_idx,
+        ) {
+            (Some(a), Some(b), _, _, _, _) if a == b => true,
+            (_, _, Some(a), Some(b), _, _) if a == b => true,
+            (_, _, _, _, Some(a), Some(b)) if a == b => true,
+            _ => false,
+        }
+    }
+
+    /// Single/double click dispatch. Press and release must agree on where they
+    /// landed (no slop across panes) — a click that started inside the diff but
+    /// released on the sidebar acts only at the release point's pane.
+    fn dispatch_click(&mut self, press: &MousePress, release: &MousePress, double: bool) -> bool {
+        // Click on the sidebar title row (the top border): cycle the sidebar
+        // tab. The only other thing on that row is the title text, and there's
+        // nothing else useful to click there.
+        if let Some(outer) = self.hits.sidebar_outer {
+            if release.row == outer.y && contains(outer, release.col, release.row) {
+                self.toggle_annotations();
+                return true;
+            }
+        }
+        // Diff-pane title (top border) just focuses the diff.
+        if let Some(outer) = self.hits.diff_outer {
+            if release.row == outer.y && contains(outer, release.col, release.row) {
+                self.focus = Focus::Diff;
+                return true;
+            }
+        }
+        // Status bar `release` / `approve` label, when shown.
+        if let Some(span) = self.hits.release_span {
+            if Self::in_span(span, release.col, release.row) {
+                self.release_turn();
+                return true;
+            }
+        }
+
+        // Body clicks — require press and release to share a target.
+        if let (Some(p), Some(r)) = (press.tree_idx, release.tree_idx) {
+            if p == r {
+                self.focus = Focus::Tree;
+                self.select(r);
+                if double {
+                    self.focus = Focus::Diff;
+                }
+                return true;
+            }
+        }
+        if let (Some(p), Some(r)) = (press.annotation_idx, release.annotation_idx) {
+            if p == r {
+                self.annotation_selected = r;
+                self.sidebar_confirm_preview();
+                if double {
+                    self.focus = Focus::Diff;
+                }
+                return true;
+            }
+        }
+        if let (Some(p), Some(r)) = (press.diff_row_idx, release.diff_row_idx) {
+            if p == r {
+                self.focus = Focus::Diff;
+                self.selection_anchor = None;
+                self.set_cursor(r as i64);
+                if double {
+                    self.add_comment();
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Preview the highlighted annotation in the diff without committing focus,
+    /// matching what the keyboard's annotation-tab nav does when the selection
+    /// moves. Used by mouse clicks on the annotations panel.
+    fn sidebar_confirm_preview(&mut self) {
+        // The keyboard path is `preview_selected_annotation`, which is private;
+        // route through `sidebar_move(0)` to reuse it without exposing.
+        self.move_annotation_selection(0);
+    }
+}
+
+/// Whether `rect` covers point `(col, row)` (half-open on the far edges, as
+/// ratatui rects are).
+fn contains(rect: Rect, col: u16, row: u16) -> bool {
+    col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
 }
 
 #[cfg(test)]
