@@ -93,9 +93,21 @@ mlua = { version = "0.10", features = ["luau", "vendored"] }
 # Update check (update.rs). A tiny blocking HTTP+TLS client used for the single
 # launch-time GET of the release `dist-manifest.json` published to GitHub Pages —
 # so the check needs no `gh` (not a hard dependency of mudpuppy). The fetch runs on
-# a `tokio::task::spawn_blocking` thread so it never stalls the event loop; rustls
-# (ureq's default) keeps the TLS stack pure-Rust and toolchain-light.
+# a `tokio::task::spawn_blocking` thread so it never stalls the event loop. The TLS
+# backend is split by platform (see the target tables below): rustls everywhere
+# except Windows, native-tls (SChannel) on Windows. See those tables for why.
+
+# Non-Windows: rustls keeps the TLS stack pure-Rust and toolchain-light.
+[target.'cfg(not(windows))'.dependencies]
 ureq = "2"
+
+# Windows: rustls pulls in `ring`, whose C/asm build fails to cross-compile for
+# aarch64-pc-windows-msvc under cargo-dist's cargo-xwin toolchain (`/imsvc` is
+# passed to plain clang, which rejects it). native-tls maps to SChannel on
+# Windows — pure-Rust bindings to the OS TLS, no C build — so it cross-compiles
+# cleanly. We keep `gzip` (the only other default feature we rely on).
+[target.'cfg(windows)'.dependencies]
+ureq = { version = "2", default-features = false, features = ["native-tls", "gzip"] }
 
 [dev-dependencies]
 serde_json = "1"
