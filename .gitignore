@@ -19,8 +19,10 @@
 # Local-only Claude Code instructions (personal, not shared with the team).
 CLAUDE.local.md
 
-# Claude Code local working dir (agent worktrees, local settings) — not shared.
-.claude/
+# Claude Code: keep personal/local bits out, but share skills (and project
+# settings) checked into the repo.
+.claude/worktrees/
+.claude/settings.local.json
 
 # Editor / OS cruft
 .DS_Store
