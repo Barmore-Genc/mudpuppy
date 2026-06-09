@@ -75,6 +75,27 @@ jobs:
       - run: cargo build --all-targets --all-features --verbose
       - run: cargo test --all-features --verbose
 
+  # The release pipeline (cargo-dist) pulls GitHub Release notes from the
+  # CHANGELOG.md section whose heading matches the crate version. Verify that
+  # section exists *before* tagging, using the same parser cargo-dist uses, so a
+  # version bump can't ship without notes.
+  changelog:
+    name: changelog
+    needs: detect
+    if: needs.detect.outputs.has_cargo == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@parse-changelog
+      - name: Ensure CHANGELOG.md has an entry for the Cargo.toml version
+        run: |
+          version="$(awk -F' *= *' '/^\[package\]/{p=1} p&&/^version *=/{gsub(/"/,"",$2);print $2;exit}' Cargo.toml)"
+          if ! parse-changelog CHANGELOG.md "$version" >/dev/null; then
+            echo "::error file=CHANGELOG.md::No CHANGELOG.md section for version $version (expected a heading like '## $version')"
+            exit 1
+          fi
+          echo "Found CHANGELOG.md entry for $version"
+
   docs:
     name: doc
     needs: detect
