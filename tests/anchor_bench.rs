@@ -70,7 +70,7 @@ fn edited_sig(sig: &AnchorSig) -> AnchorSig {
     s
 }
 
-fn profile(content: &str, params: &Params) {
+fn profile(label: &str, content: &str, params: &Params) {
     let line_count = content.lines().count();
     let anchor_lines = pick_anchor_lines(content, ANCHORS);
     let sigs: Vec<AnchorSig> = anchor_lines
@@ -115,8 +115,9 @@ fn profile(content: &str, params: &Params) {
     let t1_batch = prepare_once / 1e3 + tier1.as_secs_f64() * 1e3 / ITERS as f64;
 
     println!(
-        "{:>7} lines | prepare {:>7.1} µs | Tier0 {:>6.1} µs/anno ({:>6.1} ms/50) | Tier1 {:>8.1} µs/anno ({:>8.1} ms/50) | {:.0}x",
+        "{:>7} lines | {:<12} | prepare {:>7.1} µs | Tier0 {:>6.1} µs/anno ({:>6.1} ms/50) | Tier1 {:>8.1} µs/anno ({:>8.1} ms/50) | {:.0}x",
         line_count,
+        label,
         prepare_once,
         t0_us,
         t0_batch,
@@ -129,14 +130,21 @@ fn profile(content: &str, params: &Params) {
 #[test]
 #[ignore = "performance profile; run with --ignored --nocapture"]
 fn profile_relocation_tiers() {
-    let params = Params::default();
+    // Unbounded (whole-file fuzzy scan) vs. the shipped ±50-line window.
+    let unbounded = Params {
+        fuzzy_window: 0,
+        ..Params::default()
+    };
+    let windowed = Params::default(); // fuzzy_window = 50
     println!(
         "\n=== anchor relocation profile ({ANCHORS} annotations, {ITERS} iters, release) ===\n\
          PreparedFile built once per file; ms/50 = one prepare + all 50 relocations.\n\
-         Tier0 = exact (line unchanged); Tier1 = fuzzy full scan (every line edited)\n"
+         Tier0 = exact (line unchanged); Tier1 = fuzzy scan (every line edited)\n"
     );
     for min in [1000usize, 5000, 20000] {
-        profile(&corpus(min), &params);
+        let content = corpus(min);
+        profile("unbounded", &content, &unbounded);
+        profile("window=50", &content, &windowed);
     }
     println!();
 }
