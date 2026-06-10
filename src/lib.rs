@@ -19,6 +19,8 @@
 //! - [`domain`] — pure schema types ([`Annotation`](domain::Annotation),
 //!   [`StateFile`](domain::StateFile), and friends). The cross-process
 //!   contract; the most heavily tested module.
+//! - [`anchor`] — change-resilient location anchors: capture a line signature
+//!   and relocate it in an edited file (exact-then-fuzzy cascade).
 //! - [`source`] — diff-source providers (local `git`, PR `gh`).
 //! - [`blob`] — full file-content provider (working tree / `git show` / `gh api`).
 //! - `command` — the `:command` palette state + fuzzy filtering over names.
@@ -36,6 +38,7 @@
 //! - [`cli`] — the clap command tree and top-level dispatch.
 
 pub mod agent;
+pub mod anchor;
 pub mod blob;
 pub mod cli;
 mod command;

@@ -42,6 +42,7 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 - `source.rs`: diff-source providers — shells out to `git` (local) and `gh` (PR).
 - `blob.rs`: full file-content provider (working tree / `git show` / `gh api`) for context expansion and added/comment-only files.
 - `diff.rs`: hand-rolled unified-diff parser, lazy hunks, line ↔ side anchoring.
+- `anchor.rs`: change-resilient location anchors — capture a line+context signature and relocate it in an edited file (exact-then-fuzzy edit-distance cascade), else orphan.
 - `highlight.rs`: syntect syntax highlighting for the diff pane.
 - `store.rs`: load / merge-by-id / atomic+locked save of the annotation store.
 - `session.rs`: repo + target resolution and store-path derivation (resume).

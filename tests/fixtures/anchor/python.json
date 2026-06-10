@@ -1,0 +1,73 @@
+{
+  "language": "python",
+  "original": "import math\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Order:\n    item_id: str\n    quantity: int\n    unit_price: float\n\n\nclass Inventory:\n    def __init__(self, warehouse):\n        self.warehouse = warehouse\n        self.stock = {}\n        self.reserved = {}\n\n    def restock(self, item_id, amount):\n        current = self.stock.get(item_id, 0)\n        self.stock[item_id] = current + amount\n        return self.stock[item_id]\n\n    def available(self, item_id):\n        on_hand = self.stock.get(item_id, 0)\n        held = self.reserved.get(item_id, 0)\n        return on_hand - held\n\n\ndef compute_total(order, tax_rate):\n    subtotal = order.quantity * order.unit_price\n    tax = subtotal * tax_rate\n    shipping = 0.0 if subtotal > 50 else 5.99\n    return round(subtotal + tax + shipping, 2)\n\n\ndef apply_discount(total, code):\n    discounts = {\"SAVE10\": 0.10, \"SAVE20\": 0.20, \"HALF\": 0.50}\n    factor = discounts.get(code, 0.0)\n    return math.floor(total * (1 - factor) * 100) / 100\n",
+  "anchor_line": 30,
+  "anchor_text": "    subtotal = order.quantity * order.unit_price",
+  "anchor_desc": "Computes the line subtotal by multiplying order quantity by unit price.",
+  "cases": [
+    {
+      "name": "unrelated_line_changed",
+      "category": "survive",
+      "modified": "import math\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Order:\n    item_id: str\n    quantity: int\n    unit_price: float\n\n\nclass Inventory:\n    def __init__(self, warehouse):\n        self.warehouse = warehouse\n        self.stock = {}\n        self.reserved = {}\n\n    def restock(self, item_id, amount):\n        current = self.stock.get(item_id, 0)\n        self.stock[item_id] = current + amount\n        return self.stock[item_id]\n\n    def available(self, item_id):\n        on_hand = self.stock.get(item_id, 0)\n        held = self.reserved.get(item_id, 0)\n        return max(0, on_hand - held)\n\n\ndef compute_total(order, tax_rate):\n    subtotal = order.quantity * order.unit_price\n    tax = subtotal * tax_rate\n    shipping = 0.0 if subtotal > 50 else 5.99\n    return round(subtotal + tax + shipping, 2)\n\n\ndef apply_discount(total, code):\n    discounts = {\"SAVE10\": 0.10, \"SAVE20\": 0.20, \"HALF\": 0.50}\n    factor = discounts.get(code, 0.0)\n    return math.floor(total * (1 - factor) * 100) / 100\n",
+      "expect_line": 30,
+      "expect_text": "    subtotal = order.quantity * order.unit_price",
+      "note": "Edits an unrelated return line; the anchored line is byte-identical and barely shifts."
+    },
+    {
+      "name": "lines_inserted_above",
+      "category": "survive",
+      "modified": "import math\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Order:\n    item_id: str\n    quantity: int\n    unit_price: float\n\n\nclass Inventory:\n    def __init__(self, warehouse):\n        self.warehouse = warehouse\n        self.stock = {}\n        self.reserved = {}\n\n    def restock(self, item_id, amount):\n        current = self.stock.get(item_id, 0)\n        self.stock[item_id] = current + amount\n        return self.stock[item_id]\n\n    def available(self, item_id):\n        on_hand = self.stock.get(item_id, 0)\n        held = self.reserved.get(item_id, 0)\n        return on_hand - held\n\n\ndef compute_total(order, tax_rate):\n    if order.quantity <= 0:\n        raise ValueError(\"quantity must be positive\")\n    if tax_rate < 0:\n        raise ValueError(\"tax_rate must be non-negative\")\n    subtotal = order.quantity * order.unit_price\n    tax = subtotal * tax_rate\n    shipping = 0.0 if subtotal > 50 else 5.99\n    return round(subtotal + tax + shipping, 2)\n\n\ndef apply_discount(total, code):\n    discounts = {\"SAVE10\": 0.10, \"SAVE20\": 0.20, \"HALF\": 0.50}\n    factor = discounts.get(code, 0.0)\n    return math.floor(total * (1 - factor) * 100) / 100\n",
+      "expect_line": 34,
+      "expect_text": "    subtotal = order.quantity * order.unit_price",
+      "note": "Inserts four validation lines above the anchor; it shifts down but stays identical."
+    },
+    {
+      "name": "whitespace_change",
+      "category": "survive",
+      "modified": "import math\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Order:\n    item_id: str\n    quantity: int\n    unit_price: float\n\n\nclass Inventory:\n    def __init__(self, warehouse):\n        self.warehouse = warehouse\n        self.stock = {}\n        self.reserved = {}\n\n    def restock(self, item_id, amount):\n        current = self.stock.get(item_id, 0)\n        self.stock[item_id] = current + amount\n        return self.stock[item_id]\n\n    def available(self, item_id):\n        on_hand = self.stock.get(item_id, 0)\n        held = self.reserved.get(item_id, 0)\n        return on_hand - held\n\n\ndef compute_total(order, tax_rate):\n    subtotal = order.quantity*order.unit_price\n    tax = subtotal * tax_rate\n    shipping = 0.0 if subtotal > 50 else 5.99\n    return round(subtotal + tax + shipping, 2)\n\n\ndef apply_discount(total, code):\n    discounts = {\"SAVE10\": 0.10, \"SAVE20\": 0.20, \"HALF\": 0.50}\n    factor = discounts.get(code, 0.0)\n    return math.floor(total * (1 - factor) * 100) / 100\n",
+      "expect_line": 30,
+      "expect_text": "    subtotal = order.quantity*order.unit_price",
+      "note": "Removes the spaces around the multiplication operator; the tokens are unchanged."
+    },
+    {
+      "name": "trailing_punct_added",
+      "category": "survive",
+      "modified": "import math\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Order:\n    item_id: str\n    quantity: int\n    unit_price: float\n\n\nclass Inventory:\n    def __init__(self, warehouse):\n        self.warehouse = warehouse\n        self.stock = {}\n        self.reserved = {}\n\n    def restock(self, item_id, amount):\n        current = self.stock.get(item_id, 0)\n        self.stock[item_id] = current + amount\n        return self.stock[item_id]\n\n    def available(self, item_id):\n        on_hand = self.stock.get(item_id, 0)\n        held = self.reserved.get(item_id, 0)\n        return on_hand - held\n\n\ndef compute_total(order, tax_rate):\n    subtotal = order.quantity * order.unit_price  # base before tax\n    tax = subtotal * tax_rate\n    shipping = 0.0 if subtotal > 50 else 5.99\n    return round(subtotal + tax + shipping, 2)\n\n\ndef apply_discount(total, code):\n    discounts = {\"SAVE10\": 0.10, \"SAVE20\": 0.20, \"HALF\": 0.50}\n    factor = discounts.get(code, 0.0)\n    return math.floor(total * (1 - factor) * 100) / 100\n",
+      "expect_line": 30,
+      "expect_text": "    subtotal = order.quantity * order.unit_price  # base before tax",
+      "note": "Appends a trailing comment to the anchored line; the code expression is unchanged."
+    },
+    {
+      "name": "variable_renamed",
+      "category": "survive",
+      "modified": "import math\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Order:\n    item_id: str\n    quantity: int\n    unit_price: float\n\n\nclass Inventory:\n    def __init__(self, warehouse):\n        self.warehouse = warehouse\n        self.stock = {}\n        self.reserved = {}\n\n    def restock(self, item_id, amount):\n        current = self.stock.get(item_id, 0)\n        self.stock[item_id] = current + amount\n        return self.stock[item_id]\n\n    def available(self, item_id):\n        on_hand = self.stock.get(item_id, 0)\n        held = self.reserved.get(item_id, 0)\n        return on_hand - held\n\n\ndef compute_total(order, tax_rate):\n    base_amount = order.quantity * order.unit_price\n    tax = base_amount * tax_rate\n    shipping = 0.0 if base_amount > 50 else 5.99\n    return round(base_amount + tax + shipping, 2)\n\n\ndef apply_discount(total, code):\n    discounts = {\"SAVE10\": 0.10, \"SAVE20\": 0.20, \"HALF\": 0.50}\n    factor = discounts.get(code, 0.0)\n    return math.floor(total * (1 - factor) * 100) / 100\n",
+      "expect_line": 30,
+      "expect_text": "    base_amount = order.quantity * order.unit_price",
+      "note": "Renames the assigned variable subtotal to base_amount; the right-hand expression is identical."
+    },
+    {
+      "name": "rename_and_ops_changed",
+      "category": "survive",
+      "modified": "import math\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Order:\n    item_id: str\n    quantity: int\n    unit_price: float\n\n\nclass Inventory:\n    def __init__(self, warehouse):\n        self.warehouse = warehouse\n        self.stock = {}\n        self.reserved = {}\n\n    def restock(self, item_id, amount):\n        current = self.stock.get(item_id, 0)\n        self.stock[item_id] = current + amount\n        return self.stock[item_id]\n\n    def available(self, item_id):\n        on_hand = self.stock.get(item_id, 0)\n        held = self.reserved.get(item_id, 0)\n        return on_hand - held\n\n\ndef compute_total(order, tax_rate):\n    base_amount = order.quantity * order.unit_price * 1.0\n    tax = base_amount * tax_rate\n    shipping = 0.0 if base_amount > 50 else 5.99\n    return round(base_amount + tax + shipping, 2)\n\n\ndef apply_discount(total, code):\n    discounts = {\"SAVE10\": 0.10, \"SAVE20\": 0.20, \"HALF\": 0.50}\n    factor = discounts.get(code, 0.0)\n    return math.floor(total * (1 - factor) * 100) / 100\n",
+      "expect_line": 30,
+      "expect_text": "    base_amount = order.quantity * order.unit_price * 1.0",
+      "note": "Renames the variable and also adds an extra operand on the same line, a Type-3 near-miss."
+    },
+    {
+      "name": "anchor_line_deleted",
+      "category": "orphan",
+      "modified": "import math\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Order:\n    item_id: str\n    quantity: int\n    unit_price: float\n\n\nclass Inventory:\n    def __init__(self, warehouse):\n        self.warehouse = warehouse\n        self.stock = {}\n        self.reserved = {}\n\n    def restock(self, item_id, amount):\n        current = self.stock.get(item_id, 0)\n        self.stock[item_id] = current + amount\n        return self.stock[item_id]\n\n    def available(self, item_id):\n        on_hand = self.stock.get(item_id, 0)\n        held = self.reserved.get(item_id, 0)\n        return on_hand - held\n\n\ndef compute_total(order, tax_rate):\n    subtotal = order.get_subtotal()\n    tax = subtotal * tax_rate\n    shipping = 0.0 if subtotal > 50 else 5.99\n    return round(subtotal + tax + shipping, 2)\n\n\ndef apply_discount(total, code):\n    discounts = {\"SAVE10\": 0.10, \"SAVE20\": 0.20, \"HALF\": 0.50}\n    factor = discounts.get(code, 0.0)\n    return math.floor(total * (1 - factor) * 100) / 100\n",
+      "expect_line": null,
+      "expect_text": null,
+      "note": "Replaces the multiplication with a method call so the anchored computation no longer exists."
+    },
+    {
+      "name": "boilerplate_trap",
+      "category": "orphan",
+      "modified": "import math\nfrom dataclasses import dataclass\n\n\n@dataclass\nclass Order:\n    item_id: str\n    quantity: int\n    unit_price: float\n\n\nclass Inventory:\n    def __init__(self, warehouse):\n        self.warehouse = warehouse\n        self.stock = {}\n        self.reserved = {}\n\n    def restock(self, item_id, amount):\n        current = self.stock.get(item_id, 0)\n        self.stock[item_id] = current + amount\n        return self.stock[item_id]\n\n    def available(self, item_id):\n        on_hand = self.stock.get(item_id, 0)\n        held = self.reserved.get(item_id, 0)\n        return on_hand - held\n\n\ndef compute_total(order, tax_rate):\n    tax = subtotal * tax_rate\n    shipping = 0.0 if subtotal > 50 else 5.99\n    return round(subtotal + tax + shipping, 2)\n\n\ndef apply_discount(total, code):\n    discounts = {\"SAVE10\": 0.10, \"SAVE20\": 0.20, \"HALF\": 0.50}\n    factor = discounts.get(code, 0.0)\n    return math.floor(total * (1 - factor) * 100) / 100\n",
+      "expect_line": null,
+      "expect_text": null,
+      "note": "Deletes the anchored subtotal assignment while leaving the structurally similar lines that reference subtotal."
+    }
+  ]
+}

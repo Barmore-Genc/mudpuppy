@@ -1,0 +1,89 @@
+{
+  "language": "rust",
+  "original": "use std::collections::HashMap;\n\n/// A single tunable parameter for the renderer.\n#[derive(Debug, Clone)]\npub struct Setting {\n    pub key: String,\n    pub value: i64,\n}\n\n#[derive(Default)]\npub struct ConfigBuilder {\n    settings: Vec<Setting>,\n    verbose: bool,\n}\n\nimpl ConfigBuilder {\n    pub fn new() -> Self {\n        ConfigBuilder::default()\n    }\n\n    fn set(&mut self, key: &str, value: i64) -> &mut Self {\n        self.settings.push(Setting {\n            key: key.to_string(),\n            value,\n        });\n        self\n    }\n\n    pub fn defaults(&mut self) -> &mut Self {\n        self.set(\"width\", 800);\n        self.set(\"height\", 600);\n        self.set(\"max_fps\", 144);\n        self.set(\"cache_mb\", 256);\n        self\n    }\n\n    pub fn build(&self) -> HashMap<String, i64> {\n        let mut out = HashMap::new();\n        for setting in &self.settings {\n            out.insert(setting.key.clone(), setting.value);\n        }\n        out\n    }\n}\n",
+  "anchor_line": 32,
+  "anchor_text": "        self.set(\"max_fps\", 144);",
+  "anchor_desc": "Builder call that registers the max_fps setting with value 144, amid sibling .set() calls.",
+  "cases": [
+    {
+      "name": "unrelated_line_changed",
+      "category": "survive",
+      "modified": "use std::collections::HashMap;\n\n/// A single tunable parameter for the renderer.\n#[derive(Debug, Clone)]\npub struct Setting {\n    pub key: String,\n    pub value: i64,\n}\n\n#[derive(Default)]\npub struct ConfigBuilder {\n    settings: Vec<Setting>,\n    verbose: bool,\n}\n\nimpl ConfigBuilder {\n    pub fn new() -> Self {\n        ConfigBuilder::default()\n    }\n\n    fn set(&mut self, key: &str, value: i64) -> &mut Self {\n        self.settings.push(Setting {\n            key: key.to_string(),\n            value,\n        });\n        self\n    }\n\n    pub fn defaults(&mut self) -> &mut Self {\n        self.set(\"width\", 800);\n        self.set(\"height\", 600);\n        self.set(\"max_fps\", 144);\n        self.set(\"cache_mb\", 256);\n        self\n    }\n\n    pub fn build(&self) -> HashMap<String, i64> {\n        let mut out = HashMap::new();\n        for setting in &self.settings {\n            out.entry(setting.key.clone()).or_insert(setting.value);\n        }\n        out\n    }\n}\n",
+      "expect_line": 32,
+      "expect_text": "        self.set(\"max_fps\", 144);",
+      "note": "Edits an unrelated line in build(); the anchored builder call stays byte-identical."
+    },
+    {
+      "name": "lines_inserted_above",
+      "category": "survive",
+      "modified": "use std::collections::HashMap;\n\n/// A single tunable parameter for the renderer.\n#[derive(Debug, Clone)]\npub struct Setting {\n    pub key: String,\n    pub value: i64,\n}\n\n#[derive(Default)]\npub struct ConfigBuilder {\n    settings: Vec<Setting>,\n    verbose: bool,\n}\n\nimpl ConfigBuilder {\n    pub fn new() -> Self {\n        ConfigBuilder::default()\n    }\n\n    fn set(&mut self, key: &str, value: i64) -> &mut Self {\n        self.settings.push(Setting {\n            key: key.to_string(),\n            value,\n        });\n        self\n    }\n\n    pub fn defaults(&mut self) -> &mut Self {\n        // Establish the window geometry first.\n        self.set(\"width\", 800);\n        self.set(\"height\", 600);\n        self.verbose = true;\n        self.set(\"max_fps\", 144);\n        self.set(\"cache_mb\", 256);\n        self\n    }\n\n    pub fn build(&self) -> HashMap<String, i64> {\n        let mut out = HashMap::new();\n        for setting in &self.settings {\n            out.insert(setting.key.clone(), setting.value);\n        }\n        out\n    }\n}\n",
+      "expect_line": 34,
+      "expect_text": "        self.set(\"max_fps\", 144);",
+      "note": "Inserts new lines above the anchor; it shifts down but its text is identical."
+    },
+    {
+      "name": "whitespace_change",
+      "category": "survive",
+      "modified": "use std::collections::HashMap;\n\n/// A single tunable parameter for the renderer.\n#[derive(Debug, Clone)]\npub struct Setting {\n    pub key: String,\n    pub value: i64,\n}\n\n#[derive(Default)]\npub struct ConfigBuilder {\n    settings: Vec<Setting>,\n    verbose: bool,\n}\n\nimpl ConfigBuilder {\n    pub fn new() -> Self {\n        ConfigBuilder::default()\n    }\n\n    fn set(&mut self, key: &str, value: i64) -> &mut Self {\n        self.settings.push(Setting {\n            key: key.to_string(),\n            value,\n        });\n        self\n    }\n\n    pub fn defaults(&mut self) -> &mut Self {\n        self.set(\"width\", 800);\n        self.set(\"height\", 600);\n        self.set(\"max_fps\",  144);\n        self.set(\"cache_mb\", 256);\n        self\n    }\n\n    pub fn build(&self) -> HashMap<String, i64> {\n        let mut out = HashMap::new();\n        for setting in &self.settings {\n            out.insert(setting.key.clone(), setting.value);\n        }\n        out\n    }\n}\n",
+      "expect_line": 32,
+      "expect_text": "        self.set(\"max_fps\",  144);",
+      "note": "Only internal whitespace before the argument changes on the anchored line."
+    },
+    {
+      "name": "trailing_punct_added",
+      "category": "survive",
+      "modified": "use std::collections::HashMap;\n\n/// A single tunable parameter for the renderer.\n#[derive(Debug, Clone)]\npub struct Setting {\n    pub key: String,\n    pub value: i64,\n}\n\n#[derive(Default)]\npub struct ConfigBuilder {\n    settings: Vec<Setting>,\n    verbose: bool,\n}\n\nimpl ConfigBuilder {\n    pub fn new() -> Self {\n        ConfigBuilder::default()\n    }\n\n    fn set(&mut self, key: &str, value: i64) -> &mut Self {\n        self.settings.push(Setting {\n            key: key.to_string(),\n            value,\n        });\n        self\n    }\n\n    pub fn defaults(&mut self) -> &mut Self {\n        self.set(\"width\", 800);\n        self.set(\"height\", 600);\n        self.set(\n            \"max_fps\",\n            144,\n        );\n        self.set(\"cache_mb\", 256);\n        self\n    }\n\n    pub fn build(&self) -> HashMap<String, i64> {\n        let mut out = HashMap::new();\n        for setting in &self.settings {\n            out.insert(setting.key.clone(), setting.value);\n        }\n        out\n    }\n}\n",
+      "expect_line": 32,
+      "expect_text": "        self.set(",
+      "note": "Splits the call across lines and adds a trailing comma; relocation lands on the call head."
+    },
+    {
+      "name": "method_renamed",
+      "category": "survive",
+      "modified": "use std::collections::HashMap;\n\n/// A single tunable parameter for the renderer.\n#[derive(Debug, Clone)]\npub struct Setting {\n    pub key: String,\n    pub value: i64,\n}\n\n#[derive(Default)]\npub struct ConfigBuilder {\n    settings: Vec<Setting>,\n    verbose: bool,\n}\n\nimpl ConfigBuilder {\n    pub fn new() -> Self {\n        ConfigBuilder::default()\n    }\n\n    fn with(&mut self, key: &str, value: i64) -> &mut Self {\n        self.settings.push(Setting {\n            key: key.to_string(),\n            value,\n        });\n        self\n    }\n\n    pub fn defaults(&mut self) -> &mut Self {\n        self.with(\"width\", 800);\n        self.with(\"height\", 600);\n        self.with(\"max_fps\", 144);\n        self.with(\"cache_mb\", 256);\n        self\n    }\n\n    pub fn build(&self) -> HashMap<String, i64> {\n        let mut out = HashMap::new();\n        for setting in &self.settings {\n            out.insert(setting.key.clone(), setting.value);\n        }\n        out\n    }\n}\n",
+      "expect_line": 32,
+      "expect_text": "        self.with(\"max_fps\", 144);",
+      "note": "Renames the `set` builder method (decl + all call sites); the anchored line keeps its arguments."
+    },
+    {
+      "name": "rename_and_ops_changed",
+      "category": "survive",
+      "modified": "use std::collections::HashMap;\n\n/// A single tunable parameter for the renderer.\n#[derive(Debug, Clone)]\npub struct Setting {\n    pub key: String,\n    pub value: i64,\n}\n\n#[derive(Default)]\npub struct ConfigBuilder {\n    settings: Vec<Setting>,\n    verbose: bool,\n}\n\nimpl ConfigBuilder {\n    pub fn new() -> Self {\n        ConfigBuilder::default()\n    }\n\n    fn with(&mut self, key: &str, value: i64) -> &mut Self {\n        self.settings.push(Setting {\n            key: key.to_string(),\n            value,\n        });\n        self\n    }\n\n    pub fn defaults(&mut self) -> &mut Self {\n        self.with(\"width\", 800);\n        self.with(\"height\", 600);\n        self.with(\"max_fps\", 120);\n        self.with(\"cache_mb\", 256);\n        self\n    }\n\n    pub fn build(&self) -> HashMap<String, i64> {\n        let mut out = HashMap::new();\n        for setting in &self.settings {\n            out.insert(setting.key.clone(), setting.value);\n        }\n        out\n    }\n}\n",
+      "expect_line": 32,
+      "expect_text": "        self.with(\"max_fps\", 120);",
+      "note": "Renames the method and changes the numeric operand on the same line: a Type-3 near-miss."
+    },
+    {
+      "name": "anchor_line_deleted",
+      "category": "orphan",
+      "modified": "use std::collections::HashMap;\n\n/// A single tunable parameter for the renderer.\n#[derive(Debug, Clone)]\npub struct Setting {\n    pub key: String,\n    pub value: i64,\n}\n\n#[derive(Default)]\npub struct ConfigBuilder {\n    settings: Vec<Setting>,\n    verbose: bool,\n}\n\nimpl ConfigBuilder {\n    pub fn new() -> Self {\n        ConfigBuilder::default()\n    }\n\n    fn set(&mut self, key: &str, value: i64) -> &mut Self {\n        self.settings.push(Setting {\n            key: key.to_string(),\n            value,\n        });\n        self\n    }\n\n    pub fn defaults(&mut self) -> &mut Self {\n        self.set(\"width\", 800);\n        self.set(\"height\", 600);\n        self.set(\"cache_mb\", 256);\n        self\n    }\n\n    pub fn build(&self) -> HashMap<String, i64> {\n        let mut out = HashMap::new();\n        for setting in &self.settings {\n            out.insert(setting.key.clone(), setting.value);\n        }\n        out\n    }\n}\n",
+      "expect_line": null,
+      "expect_text": null,
+      "note": "Deletes the anchored line; remaining sibling .set() calls differ and must not be matched."
+    },
+    {
+      "name": "boilerplate_trap",
+      "category": "orphan",
+      "modified": "use std::collections::HashMap;\n\n/// A single tunable parameter for the renderer.\n#[derive(Debug, Clone)]\npub struct Setting {\n    pub key: String,\n    pub value: i64,\n}\n\n#[derive(Default)]\npub struct ConfigBuilder {\n    settings: Vec<Setting>,\n    verbose: bool,\n}\n\nimpl ConfigBuilder {\n    pub fn new() -> Self {\n        ConfigBuilder::default()\n    }\n\n    fn set(&mut self, key: &str, value: i64) -> &mut Self {\n        self.settings.push(Setting {\n            key: key.to_string(),\n            value,\n        });\n        self\n    }\n\n    pub fn defaults(&mut self) -> &mut Self {\n        self.set(\"width\", 800);\n        self.set(\"height\", 600);\n        self.set(\"cache_mb\", 256);\n        self.set(\"vsync\", 1);\n        self.set(\"msaa\", 4);\n        self\n    }\n\n    pub fn build(&self) -> HashMap<String, i64> {\n        let mut out = HashMap::new();\n        for setting in &self.settings {\n            out.insert(setting.key.clone(), setting.value);\n        }\n        out\n    }\n}\n",
+      "expect_line": null,
+      "expect_text": null,
+      "note": "Deletes the anchor while adding more near-identical .set() calls that could lure a wrong match."
+    },
+    {
+      "name": "anchor_reordered",
+      "category": "survive",
+      "modified": "use std::collections::HashMap;\n\n/// A single tunable parameter for the renderer.\n#[derive(Debug, Clone)]\npub struct Setting {\n    pub key: String,\n    pub value: i64,\n}\n\n#[derive(Default)]\npub struct ConfigBuilder {\n    settings: Vec<Setting>,\n    verbose: bool,\n}\n\nimpl ConfigBuilder {\n    pub fn new() -> Self {\n        ConfigBuilder::default()\n    }\n\n    fn set(&mut self, key: &str, value: i64) -> &mut Self {\n        self.settings.push(Setting {\n            key: key.to_string(),\n            value,\n        });\n        self\n    }\n\n    pub fn defaults(&mut self) -> &mut Self {\n        self.set(\"max_fps\", 144);\n        self.set(\"width\", 800);\n        self.set(\"height\", 600);\n        self.set(\"cache_mb\", 256);\n        self\n    }\n\n    pub fn build(&self) -> HashMap<String, i64> {\n        let mut out = HashMap::new();\n        for setting in &self.settings {\n            out.insert(setting.key.clone(), setting.value);\n        }\n        out\n    }\n}\n",
+      "expect_line": 30,
+      "expect_text": "        self.set(\"max_fps\", 144);",
+      "note": "Reorders sibling builder calls; the anchored line moves up but is byte-identical."
+    },
+    {
+      "name": "function_moved",
+      "category": "survive",
+      "modified": "use std::collections::HashMap;\n\n/// A single tunable parameter for the renderer.\n#[derive(Debug, Clone)]\npub struct Setting {\n    pub key: String,\n    pub value: i64,\n}\n\n#[derive(Default)]\npub struct ConfigBuilder {\n    settings: Vec<Setting>,\n    verbose: bool,\n}\n\nimpl ConfigBuilder {\n    pub fn new() -> Self {\n        ConfigBuilder::default()\n    }\n\n    fn set(&mut self, key: &str, value: i64) -> &mut Self {\n        self.settings.push(Setting {\n            key: key.to_string(),\n            value,\n        });\n        self\n    }\n\n    pub fn build(&self) -> HashMap<String, i64> {\n        let mut out = HashMap::new();\n        for setting in &self.settings {\n            out.insert(setting.key.clone(), setting.value);\n        }\n        out\n    }\n\n    pub fn defaults(&mut self) -> &mut Self {\n        self.set(\"width\", 800);\n        self.set(\"height\", 600);\n        self.set(\"max_fps\", 144);\n        self.set(\"cache_mb\", 256);\n        self\n    }\n}\n",
+      "expect_line": 40,
+      "expect_text": "        self.set(\"max_fps\", 144);",
+      "note": "Moves the entire defaults() method below build(); the anchored line is byte-identical at a new location."
+    }
+  ]
+}
