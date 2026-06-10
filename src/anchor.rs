@@ -43,6 +43,16 @@ pub struct Params {
     /// Minimum lead the best candidate must hold over the runner-up to be
     /// considered unambiguous; guards against boilerplate look-alikes.
     pub margin: f64,
+    /// How far the fuzzy (Tier 1) scan ranges around the anchor's original line,
+    /// to bound its cost on large files (an edited line rarely migrates far):
+    ///
+    /// * `> 0` — scan only candidates within ±N lines of the original position.
+    /// * `0`   — unbounded; scan the whole file.
+    /// * `< 0` — disable the fuzzy tier entirely (exact-match only; otherwise
+    ///   orphan).
+    ///
+    /// Configurable from Lua via `mudpuppy.anchor.set_window(n)`.
+    pub fuzzy_window: i64,
 }
 
 impl Default for Params {
@@ -56,6 +66,9 @@ impl Default for Params {
             // wrong match. Tuned against the fixture corpus (tests/anchor_eval).
             accept: 0.80,
             margin: 0.1,
+            // An edited line stays near where it was; ±50 keeps the fuzzy scan
+            // cheap on huge files without missing realistic moves.
+            fuzzy_window: 50,
         }
     }
 }
@@ -213,10 +226,25 @@ impl PreparedFile {
             });
         }
 
-        // Tier 1: fuzzy. The line was edited (or removed). Score every candidate.
+        // Tier 1: fuzzy. The line was edited (or removed). A negative window
+        // disables the fuzzy tier outright; otherwise bound the scan to a window
+        // around the original position (an edited line rarely moves far), with 0
+        // meaning the whole file.
+        if params.fuzzy_window < 0 {
+            return Outcome::Orphaned;
+        }
+        let len = self.tokens.len();
+        let (lo, hi) = if params.fuzzy_window == 0 {
+            (0, len)
+        } else {
+            let w = params.fuzzy_window as usize;
+            let center = (original_line.saturating_sub(1) as usize).min(len - 1);
+            (center.saturating_sub(w), (center + w + 1).min(len))
+        };
+
         let anchor_tokens = tokenize(&sig.line);
         let has_context = !sig.before.is_empty() || !sig.after.is_empty();
-        let mut scored: Vec<(usize, f64)> = (0..self.tokens.len())
+        let mut scored: Vec<(usize, f64)> = (lo..hi)
             .map(|i| {
                 let line_score = lev_ratio(&anchor_tokens, &self.tokens[i]);
                 let total = if has_context {
@@ -229,6 +257,9 @@ impl PreparedFile {
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
+        if scored.is_empty() {
+            return Outcome::Orphaned;
+        }
         let (best_i, best) = scored[0];
         let runner_up = scored.get(1).map(|&(_, s)| s).unwrap_or(0.0);
         if best >= params.accept && (best - runner_up) >= params.margin {
@@ -511,6 +542,45 @@ mod tests {
         let sig = AnchorSig::capture(orig, 2, &Params::default()).unwrap();
         let edited = "fn a() {}\nreturn done();";
         assert_eq!(relocate_in(&sig, edited, 2), Outcome::Orphaned);
+    }
+
+    #[test]
+    fn fuzzy_window_bounds_the_scan() {
+        // Two near-identical edited candidates: one near the original line, one
+        // far away. A tight window must only consider the near one.
+        let line = "let total = price * qty;";
+        let mut content = vec!["// header"];
+        content.push(line); // L2 (original anchor)
+        content.extend(std::iter::repeat_n("filler();", 200));
+        content.push("let total = price * qtys;"); // far edited copy (~L203)
+        let content = content.join("\n");
+
+        let mut sig = AnchorSig::capture(&content, 2, &Params::default()).unwrap();
+        // Edit the anchor so the exact tier misses and Tier 1 runs.
+        sig.line = normalize("let total = price * quantity;");
+
+        // Tight window around L2: the far copy at ~L203 is out of range, so the
+        // near (now-deleted exact) line region is all that's scanned.
+        let near = Params {
+            fuzzy_window: 5,
+            ..Params::default()
+        };
+        match PreparedFile::new(&content).relocate(&sig, 2, &near) {
+            Outcome::Located(r) => assert!(r.line <= 8, "expected a near match, got L{}", r.line),
+            // Orphaning is also acceptable here (no good near match); the point is
+            // it must NOT jump to the far copy.
+            Outcome::Orphaned => {}
+        }
+
+        // Negative window disables the fuzzy tier: an edited line always orphans.
+        let disabled = Params {
+            fuzzy_window: -1,
+            ..Params::default()
+        };
+        assert_eq!(
+            PreparedFile::new(&content).relocate(&sig, 2, &disabled),
+            Outcome::Orphaned
+        );
     }
 
     #[test]

@@ -67,6 +67,11 @@ type Prompts = Rc<RefCell<Vec<Function>>>;
 /// removed disable line reverts.
 type UpdateChecks = Rc<RefCell<bool>>;
 
+/// The fuzzy-relocation scan window (see [`crate::anchor::Params::fuzzy_window`]),
+/// shared so `mudpuppy.anchor`'s `set_window` can change it and `window` can read
+/// it. Reset to the default on a config reload (like [`Leader`]).
+type AnchorWindow = Rc<RefCell<i64>>;
+
 /// A lifecycle/store event a script can subscribe to with `mudpuppy.on`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventKind {
@@ -115,6 +120,8 @@ pub struct LuaEngine {
     prompts: Prompts,
     /// Whether automatic update checks are on (default true, reset on reload).
     update_checks: UpdateChecks,
+    /// The configured fuzzy-relocation scan window (reset on reload).
+    anchor_window: AnchorWindow,
     /// Where the user config lives (if anywhere). `None` disables user config —
     /// used by tests so the default keymap is exercised in isolation.
     config_path: Option<PathBuf>,
@@ -145,6 +152,10 @@ impl LuaEngine {
         let prompts: Prompts = Rc::new(RefCell::new(Vec::new()));
         // Automatic update checks are on unless the user config disables them.
         let update_checks: UpdateChecks = Rc::new(RefCell::new(true));
+        // The fuzzy-relocation window defaults to the engine default; a config
+        // can override it with `mudpuppy.anchor.set_window`.
+        let anchor_window: AnchorWindow =
+            Rc::new(RefCell::new(crate::anchor::Params::default().fuzzy_window));
         let status: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
         // Redirect `print` to the status buffer — the TUI owns the screen, so a
@@ -167,6 +178,7 @@ impl LuaEngine {
             commands.clone(),
             leader.clone(),
             update_checks.clone(),
+            anchor_window.clone(),
         )
         .map_err(|e| anyhow!("building the mudpuppy table: {e}"))?;
         lua.globals()
@@ -194,6 +206,7 @@ impl LuaEngine {
             leader,
             prompts,
             update_checks,
+            anchor_window,
             config_path,
             status,
         };
@@ -248,6 +261,9 @@ impl LuaEngine {
         // Same for the update-check flag: default on, then let the config disable
         // it again if its skip line is still present.
         *self.update_checks.borrow_mut() = true;
+        // And the fuzzy-relocation window: back to the engine default, then let
+        // the config set it again.
+        *self.anchor_window.borrow_mut() = crate::anchor::Params::default().fuzzy_window;
         self.prompts.borrow_mut().clear();
         *self.status.borrow_mut() = None;
         self.load_scripts(false)
@@ -754,6 +770,18 @@ your config). The same primitives are scriptable:
   mudpuppy.updates.disable()            stop checking and persist that to config
 Set MUDPUPPY_NO_UPDATE_CHECK in the environment to disable the launch check
 without touching your config.
+
+Anchors
+-------
+Annotations remember the code they were attached to and re-locate it when the
+file changes. When a line was edited (not just moved), a fuzzy scan finds its
+new home; that scan is bounded to a window around the original line so it stays
+cheap on large files.
+  mudpuppy.anchor.window()      -> the current fuzzy-scan window, in lines
+  mudpuppy.anchor.set_window(n) set it: n>0 = scan ±n lines around the original
+                                position; 0 = scan the whole file (unbounded);
+                                negative = disable fuzzy relocation (exact only)
+The default is 50.
 
 Events
 ------
@@ -1263,6 +1291,32 @@ index 333..444 100644
         let mut a = app();
         engine.run_command(&mut a, "flag").unwrap();
         assert_eq!(engine.status_message().as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn anchor_window_defaults_and_is_config_settable() {
+        // Default mirrors the engine default.
+        let default = crate::anchor::Params::default().fuzzy_window;
+        let (_dir, path) = config(
+            "mudpuppy.command(\"w\", function() print(tostring(mudpuppy.anchor.window())) end)",
+        );
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        engine.run_command(&mut a, "w").unwrap();
+        assert_eq!(
+            engine.status_message().as_deref(),
+            Some(default.to_string().as_str())
+        );
+
+        // A config can set it (including the disable sentinel).
+        let (_dir, path) = config(
+            "mudpuppy.anchor.set_window(-1)\n\
+             mudpuppy.command(\"w\", function() print(tostring(mudpuppy.anchor.window())) end)\n",
+        );
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        engine.run_command(&mut a, "w").unwrap();
+        assert_eq!(engine.status_message().as_deref(), Some("-1"));
     }
 
     #[test]
