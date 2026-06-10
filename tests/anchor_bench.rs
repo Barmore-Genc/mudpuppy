@@ -70,81 +70,86 @@ fn edited_sig(sig: &AnchorSig) -> AnchorSig {
     s
 }
 
-fn profile(label: &str, content: &str, params: &Params) {
+/// Mean µs to relocate each of `sigs` against `prepared` under `params`.
+fn time_relocate(
+    prepared: &PreparedFile,
+    sigs: &[AnchorSig],
+    anchor_lines: &[u32],
+    params: &Params,
+) -> f64 {
+    let t = Instant::now();
+    for _ in 0..ITERS {
+        for (sig, &line) in sigs.iter().zip(anchor_lines) {
+            std::hint::black_box(prepared.relocate(sig, line, params));
+        }
+    }
+    t.elapsed().as_secs_f64() * 1e6 / (ANCHORS * ITERS) as f64
+}
+
+fn profile(content: &str) {
     let line_count = content.lines().count();
     let anchor_lines = pick_anchor_lines(content, ANCHORS);
+    let base = Params::default();
     let sigs: Vec<AnchorSig> = anchor_lines
         .iter()
-        .map(|&l| AnchorSig::capture(content, l, params).expect("capture"))
+        .map(|&l| AnchorSig::capture(content, l, &base).expect("capture"))
         .collect();
     let edited: Vec<AnchorSig> = sigs.iter().map(edited_sig).collect();
 
-    // Prepare the file once and reuse across all annotations and iterations —
-    // the whole point of PreparedFile. Also time how long that prepare costs,
-    // since with the cache it happens once per file *edit*, not per render.
+    // Prepare once and reuse — with the cache this happens once per file edit.
     let tp = Instant::now();
     for _ in 0..ITERS {
         std::hint::black_box(PreparedFile::new(content));
     }
-    let prepare_once = tp.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+    let prepare = tp.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
     let prepared = PreparedFile::new(content);
 
-    // Tier 0: exact (line text unchanged).
-    let t0 = Instant::now();
-    for _ in 0..ITERS {
-        for (sig, &line) in sigs.iter().zip(&anchor_lines) {
-            std::hint::black_box(prepared.relocate(sig, line, params));
-        }
-    }
-    let tier0 = t0.elapsed();
+    // Advanced scan in isolation (fallback off): an *edited* line drives the
+    // fuzzy ±advanced_match_window scan.
+    let advanced_only = Params {
+        fallback_match_window: -1,
+        ..base
+    };
+    let adv = time_relocate(&prepared, &edited, &anchor_lines, &advanced_only);
 
-    // Tier 1: fuzzy (line edited, full sliding-window scan).
-    let t1 = Instant::now();
-    for _ in 0..ITERS {
-        for (sig, &line) in edited.iter().zip(&anchor_lines) {
-            std::hint::black_box(prepared.relocate(sig, line, params));
-        }
-    }
-    let tier1 = t1.elapsed();
+    // Fallback scan in isolation (advanced off): an *unchanged* line drives the
+    // exact ±fallback_match_window scan.
+    let fallback_only = Params {
+        advanced_match_window: -1,
+        ..base
+    };
+    let fb = time_relocate(&prepared, &sigs, &anchor_lines, &fallback_only);
 
-    let calls = (ANCHORS * ITERS) as f64;
-    let t0_us = tier0.as_secs_f64() * 1e6 / calls;
-    let t1_us = tier1.as_secs_f64() * 1e6 / calls;
-    // A full pass = prepare the file once + relocate all annotations against it.
-    let t0_batch = prepare_once / 1e3 + tier0.as_secs_f64() * 1e3 / ITERS as f64;
-    let t1_batch = prepare_once / 1e3 + tier1.as_secs_f64() * 1e3 / ITERS as f64;
+    // The exact fallback with no window cap, for comparison.
+    let fallback_unbounded = Params {
+        advanced_match_window: -1,
+        fallback_match_window: 0,
+        ..base
+    };
+    let fb_unb = time_relocate(&prepared, &sigs, &anchor_lines, &fallback_unbounded);
 
     println!(
-        "{:>7} lines | {:<12} | prepare {:>7.1} µs | Tier0 {:>6.1} µs/anno ({:>6.1} ms/50) | Tier1 {:>8.1} µs/anno ({:>8.1} ms/50) | {:.0}x",
+        "{:>7} lines | prepare {:>7.1} µs | advanced(±{}) {:>7.1} µs/anno | fallback(±{}) {:>6.1} µs/anno | fallback(∞) {:>7.1} µs/anno",
         line_count,
-        label,
-        prepare_once,
-        t0_us,
-        t0_batch,
-        t1_us,
-        t1_batch,
-        t1_us / t0_us,
+        prepare,
+        base.advanced_match_window,
+        adv,
+        base.fallback_match_window,
+        fb,
+        fb_unb,
     );
 }
 
 #[test]
 #[ignore = "performance profile; run with --ignored --nocapture"]
 fn profile_relocation_tiers() {
-    // Unbounded (whole-file fuzzy scan) vs. the shipped ±50-line window.
-    let unbounded = Params {
-        fuzzy_window: 0,
-        ..Params::default()
-    };
-    let windowed = Params::default(); // fuzzy_window = 50
     println!(
         "\n=== anchor relocation profile ({ANCHORS} annotations, {ITERS} iters, release) ===\n\
-         PreparedFile built once per file; ms/50 = one prepare + all 50 relocations.\n\
-         Tier0 = exact (line unchanged); Tier1 = fuzzy scan (every line edited)\n"
+         PreparedFile built once per file (cached per edit).\n\
+         advanced = fuzzy scan of an edited line; fallback = exact scan of an unchanged line.\n"
     );
     for min in [1000usize, 5000, 20000] {
-        let content = corpus(min);
-        profile("unbounded", &content, &unbounded);
-        profile("window=50", &content, &windowed);
+        profile(&corpus(min));
     }
     println!();
 }

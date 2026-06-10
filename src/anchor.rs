@@ -4,19 +4,25 @@
 //! lightly edited: the gutter mark silently lands on the wrong row or vanishes.
 //! This module captures a small *signature* of the anchored line plus a little
 //! surrounding context at creation time, then **relocates** it in a later
-//! version of the file through a cheap-first cascade:
+//! version of the file through two scans:
 //!
-//! 1. **Exact, shift-aware** — if the normalized line text still exists, snap to
-//!    the nearest occurrence (disambiguated by context). Handles the common case
-//!    (inserted/removed lines above, reorders, moved functions) in a hash lookup.
-//! 2. **Fuzzy** — only when the line itself was edited: slide over the file and
-//!    score each candidate by token-level edit-distance similarity of the line,
-//!    blended with positional context similarity. Accept the best only when it
-//!    clears a threshold *and* beats the runner-up by a margin — so repetitive
-//!    boilerplate can't lure a confident wrong match.
+//! 1. **Advanced match** (the primary scan) — slide over a tight window around
+//!    the original position and score each candidate by token-level
+//!    edit-distance similarity of the line, blended with positional context
+//!    similarity. Accept the best only when it clears a threshold *and* beats the
+//!    runner-up by a margin, so repetitive boilerplate can't lure a wrong match.
+//!    An unchanged line scores a perfect 1.0 here, so this also handles small
+//!    shifts; an *edited* line is handled by the fuzzy similarity.
+//! 2. **Fallback match** — if the advanced scan finds nothing confident, look for
+//!    the exact (normalized) line text over a wider window, snapping to the
+//!    nearest occurrence (disambiguated by context). This catches an unchanged
+//!    line that *moved further than the advanced window* — a relocated function,
+//!    a large block inserted above — which the narrow primary scan can't reach.
 //!
-//! If nothing clears the bar the anchor is [`Outcome::Orphaned`]; the caller
-//! re-pins it to the whole file rather than to an unrelated line.
+//! Each scan has its own window (`advanced_match_window`, `fallback_match_window`)
+//! so the primary fuzzy scan stays cheap while the cheaper exact fallback can
+//! cast a wider net. If neither places the anchor it is [`Outcome::Orphaned`] and
+//! the caller re-pins it to the whole file rather than to an unrelated line.
 //!
 //! The similarity choice (order-aware edit distance, not order-blind set/Jaccard)
 //! follows the empirical finding that for source code the edit-distance family
@@ -43,16 +49,24 @@ pub struct Params {
     /// Minimum lead the best candidate must hold over the runner-up to be
     /// considered unambiguous; guards against boilerplate look-alikes.
     pub margin: f64,
-    /// How far the fuzzy (Tier 1) scan ranges around the anchor's original line,
-    /// to bound its cost on large files (an edited line rarely migrates far):
+    /// Window for the primary (advanced/fuzzy) scan around the anchor's original
+    /// line. An edited line rarely migrates far, so a tight window keeps this
+    /// per-candidate-expensive scan cheap on large files:
     ///
     /// * `> 0` — scan only candidates within ±N lines of the original position.
     /// * `0`   — unbounded; scan the whole file.
-    /// * `< 0` — disable the fuzzy tier entirely (exact-match only; otherwise
-    ///   orphan).
+    /// * `< 0` — disable the advanced scan entirely.
     ///
-    /// Configurable from Lua via `mudpuppy.anchor.set_window(n)`.
-    pub fuzzy_window: i64,
+    /// Configurable from Lua via `mudpuppy.anchor.set_advanced_match_window(n)`.
+    pub advanced_match_window: i64,
+    /// Window for the fallback (exact-text) scan, used only when the advanced
+    /// scan finds nothing confident. Exact matching is cheap per candidate, so
+    /// this casts a wider net to catch a line that moved further than the
+    /// advanced window. Same `>0` / `0` / `<0` semantics as
+    /// [`advanced_match_window`](Self::advanced_match_window).
+    ///
+    /// Configurable from Lua via `mudpuppy.anchor.set_fallback_match_window(n)`.
+    pub fallback_match_window: i64,
 }
 
 impl Default for Params {
@@ -68,7 +82,11 @@ impl Default for Params {
             margin: 0.1,
             // An edited line stays near where it was; ±50 keeps the fuzzy scan
             // cheap on huge files without missing realistic moves.
-            fuzzy_window: 50,
+            advanced_match_window: 50,
+            // The exact fallback is cheap per line (~tens of µs even over a
+            // thousand lines), so it ranges far wider to catch larger moves of an
+            // unchanged line (e.g. a relocated function) for negligible cost.
+            fallback_match_window: 1000,
         }
     }
 }
@@ -182,73 +200,63 @@ impl PreparedFile {
 
     /// Relocate `sig` within this file, given the line it was originally on
     /// (`original_line`, 1-based) for nearest-occurrence tie-breaking.
+    ///
+    /// Runs the advanced (fuzzy) scan first, then the exact fallback; see the
+    /// module docs for why.
     pub fn relocate(&self, sig: &AnchorSig, original_line: u32, params: &Params) -> Outcome {
         if self.norm.is_empty() {
             return Outcome::Orphaned;
         }
+        if let Some(found) = self.advanced_match(sig, original_line, params) {
+            return Outcome::Located(found);
+        }
+        if let Some(found) = self.fallback_match(sig, original_line, params) {
+            return Outcome::Located(found);
+        }
+        Outcome::Orphaned
+    }
 
-        // Tokenize the signature once; reused across every candidate below.
+    /// The candidate index range for a `window` setting (`>0` = ±window around
+    /// the original line, `0` = whole file, `<0` = disabled → `None`).
+    fn window_range(&self, original_line: u32, window: i64) -> Option<(usize, usize)> {
+        if window < 0 {
+            return None;
+        }
+        let len = self.norm.len();
+        if window == 0 {
+            return Some((0, len));
+        }
+        let w = window as usize;
+        let center = (original_line.saturating_sub(1) as usize).min(len - 1);
+        Some((center.saturating_sub(w), (center + w + 1).min(len)))
+    }
+
+    /// Primary scan: token edit-distance similarity of the line (blended with
+    /// context) over the advanced window. Returns the best candidate only if it
+    /// clears the accept threshold and beats the runner-up by the margin.
+    fn advanced_match(
+        &self,
+        sig: &AnchorSig,
+        original_line: u32,
+        params: &Params,
+    ) -> Option<Relocation> {
+        let (lo, hi) = self.window_range(original_line, params.advanced_match_window)?;
+        if lo >= hi {
+            return None;
+        }
+
+        // Tokenize the signature once; reused across every candidate.
         let before_tokens: Vec<Vec<&str>> = sig.before.iter().map(|l| tokenize(l)).collect();
         let after_tokens: Vec<Vec<&str>> = sig.after.iter().map(|l| tokenize(l)).collect();
-        let ctx = |i: usize| self.context_score(&before_tokens, &after_tokens, i);
-
-        // Tier 0: exact, shift-aware. The normalized line text still present?
-        let exact: Vec<usize> = self
-            .norm
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| **l == sig.line && !sig.line.is_empty())
-            .map(|(i, _)| i)
-            .collect();
-        if !exact.is_empty() {
-            // Multiple identical lines (repetitive code): pick the one whose
-            // context matches best, breaking ties toward the original position.
-            let orig0 = original_line.saturating_sub(1) as i64;
-            let best = exact
-                .iter()
-                .copied()
-                .max_by(|&a, &b| {
-                    ctx(a)
-                        .partial_cmp(&ctx(b))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| {
-                            // Closer to the original line wins the tie.
-                            let da = (a as i64 - orig0).abs();
-                            let db = (b as i64 - orig0).abs();
-                            db.cmp(&da)
-                        })
-                })
-                .expect("exact is non-empty");
-            return Outcome::Located(Relocation {
-                line: best as u32 + 1,
-                score: 1.0,
-                exact: true,
-            });
-        }
-
-        // Tier 1: fuzzy. The line was edited (or removed). A negative window
-        // disables the fuzzy tier outright; otherwise bound the scan to a window
-        // around the original position (an edited line rarely moves far), with 0
-        // meaning the whole file.
-        if params.fuzzy_window < 0 {
-            return Outcome::Orphaned;
-        }
-        let len = self.tokens.len();
-        let (lo, hi) = if params.fuzzy_window == 0 {
-            (0, len)
-        } else {
-            let w = params.fuzzy_window as usize;
-            let center = (original_line.saturating_sub(1) as usize).min(len - 1);
-            (center.saturating_sub(w), (center + w + 1).min(len))
-        };
-
         let anchor_tokens = tokenize(&sig.line);
-        let has_context = !sig.before.is_empty() || !sig.after.is_empty();
+        let has_context = !before_tokens.is_empty() || !after_tokens.is_empty();
+
         let mut scored: Vec<(usize, f64)> = (lo..hi)
             .map(|i| {
                 let line_score = lev_ratio(&anchor_tokens, &self.tokens[i]);
                 let total = if has_context {
-                    params.w_line * line_score + params.w_ctx * ctx(i)
+                    let ctx = self.context_score(&before_tokens, &after_tokens, i);
+                    params.w_line * line_score + params.w_ctx * ctx
                 } else {
                     line_score
                 };
@@ -257,20 +265,64 @@ impl PreparedFile {
             .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        if scored.is_empty() {
-            return Outcome::Orphaned;
-        }
-        let (best_i, best) = scored[0];
+        let (best_i, best) = *scored.first()?;
         let runner_up = scored.get(1).map(|&(_, s)| s).unwrap_or(0.0);
         if best >= params.accept && (best - runner_up) >= params.margin {
-            Outcome::Located(Relocation {
+            Some(Relocation {
                 line: best_i as u32 + 1,
                 score: best,
                 exact: false,
             })
         } else {
-            Outcome::Orphaned
+            None
         }
+    }
+
+    /// Fallback scan: the exact (normalized) line text over the wider fallback
+    /// window, snapping to the nearest occurrence and disambiguating ties by
+    /// context. Catches an unchanged line that moved beyond the advanced window.
+    fn fallback_match(
+        &self,
+        sig: &AnchorSig,
+        original_line: u32,
+        params: &Params,
+    ) -> Option<Relocation> {
+        if sig.line.is_empty() {
+            return None;
+        }
+        let (lo, hi) = self.window_range(original_line, params.fallback_match_window)?;
+        let exact: Vec<usize> = (lo..hi).filter(|&i| self.norm[i] == sig.line).collect();
+        if exact.is_empty() {
+            return None;
+        }
+
+        let before_tokens: Vec<Vec<&str>> = sig.before.iter().map(|l| tokenize(l)).collect();
+        let after_tokens: Vec<Vec<&str>> = sig.after.iter().map(|l| tokenize(l)).collect();
+        let ctx = |i: usize| self.context_score(&before_tokens, &after_tokens, i);
+
+        // Multiple identical lines (repetitive code): pick the one whose context
+        // matches best, breaking ties toward the original position.
+        let orig0 = original_line.saturating_sub(1) as i64;
+        let best = exact
+            .iter()
+            .copied()
+            .max_by(|&a, &b| {
+                ctx(a)
+                    .partial_cmp(&ctx(b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        // Closer to the original line wins the tie.
+                        let da = (a as i64 - orig0).abs();
+                        let db = (b as i64 - orig0).abs();
+                        db.cmp(&da)
+                    })
+            })
+            .expect("exact is non-empty");
+        Some(Relocation {
+            line: best as u32 + 1,
+            score: 1.0,
+            exact: true,
+        })
     }
 
     /// Similarity of the signature's (pre-tokenized) context to the lines
@@ -512,11 +564,10 @@ mod tests {
         let orig = "fn a() {}\nlet target = compute(x);\nfn b() {}";
         let sig = AnchorSig::capture(orig, 2, &Params::default()).unwrap();
         let edited = "use std;\nfn a() {}\nlet helper = 1;\nlet target = compute(x);\nfn b() {}";
+        // Found at L4 whether via the advanced scan (perfect line score) or the
+        // exact fallback; the tier is an implementation detail here.
         match relocate_in(&sig, edited, 2) {
-            Outcome::Located(r) => {
-                assert_eq!(r.line, 4);
-                assert!(r.exact);
-            }
+            Outcome::Located(r) => assert_eq!(r.line, 4),
             other => panic!("expected located, got {other:?}"),
         }
     }
@@ -545,9 +596,9 @@ mod tests {
     }
 
     #[test]
-    fn fuzzy_window_bounds_the_scan() {
+    fn advanced_window_bounds_the_scan() {
         // Two near-identical edited candidates: one near the original line, one
-        // far away. A tight window must only consider the near one.
+        // far away. A tight advanced window must only consider the near one.
         let line = "let total = price * qty;";
         let mut content = vec!["// header"];
         content.push(line); // L2 (original anchor)
@@ -556,29 +607,64 @@ mod tests {
         let content = content.join("\n");
 
         let mut sig = AnchorSig::capture(&content, 2, &Params::default()).unwrap();
-        // Edit the anchor so the exact tier misses and Tier 1 runs.
+        // Edit the anchor so the exact line text no longer matches verbatim.
         sig.line = normalize("let total = price * quantity;");
 
-        // Tight window around L2: the far copy at ~L203 is out of range, so the
-        // near (now-deleted exact) line region is all that's scanned.
+        // Tight advanced window around L2, fallback off: only the near region is
+        // scanned, so it must not jump to the far copy at ~L203.
         let near = Params {
-            fuzzy_window: 5,
+            advanced_match_window: 5,
+            fallback_match_window: -1,
             ..Params::default()
         };
         match PreparedFile::new(&content).relocate(&sig, 2, &near) {
             Outcome::Located(r) => assert!(r.line <= 8, "expected a near match, got L{}", r.line),
-            // Orphaning is also acceptable here (no good near match); the point is
-            // it must NOT jump to the far copy.
             Outcome::Orphaned => {}
         }
 
-        // Negative window disables the fuzzy tier: an edited line always orphans.
+        // Both scans disabled: an edited line with no verbatim match orphans.
         let disabled = Params {
-            fuzzy_window: -1,
+            advanced_match_window: -1,
+            fallback_match_window: -1,
             ..Params::default()
         };
         assert_eq!(
             PreparedFile::new(&content).relocate(&sig, 2, &disabled),
+            Outcome::Orphaned
+        );
+    }
+
+    #[test]
+    fn fallback_finds_unchanged_line_moved_past_advanced_window() {
+        // An unchanged line relocated beyond the advanced window is missed by the
+        // primary scan but caught by the wider exact fallback (an exact-tier hit).
+        let anchor = "let answer = compute(everything);";
+        let mut orig = vec![anchor];
+        orig.extend(std::iter::repeat_n("noop();", 200));
+        let orig = orig.join("\n");
+        let sig = AnchorSig::capture(&orig, 1, &Params::default()).unwrap();
+
+        // Same line, now ~200 lines down — outside the ±50 advanced window, inside
+        // the ±500 fallback window.
+        let mut moved: Vec<&str> = std::iter::repeat_n("noop();", 200).collect();
+        moved.push(anchor);
+        let moved = moved.join("\n");
+
+        match PreparedFile::new(&moved).relocate(&sig, 1, &Params::default()) {
+            Outcome::Located(r) => {
+                assert_eq!(r.line, 201);
+                assert!(r.exact, "should be a fallback exact-tier hit");
+            }
+            other => panic!("expected the moved line to be found, got {other:?}"),
+        }
+
+        // With the fallback disabled, that same move is not found.
+        let no_fallback = Params {
+            fallback_match_window: -1,
+            ..Params::default()
+        };
+        assert_eq!(
+            PreparedFile::new(&moved).relocate(&sig, 1, &no_fallback),
             Outcome::Orphaned
         );
     }

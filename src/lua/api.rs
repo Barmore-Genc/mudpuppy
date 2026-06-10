@@ -28,7 +28,7 @@ use mlua::{Function, Lua, Result, Scope, Table, Value};
 
 use super::keys::{KeyChord, KeySeq, Mode};
 use super::views;
-use super::{AnchorWindow, Bindings, Commands, EventKind, Events, Leader, Prompts, UpdateChecks};
+use super::{AnchorWindows, Bindings, Commands, EventKind, Events, Leader, Prompts, UpdateChecks};
 use crate::tui::App;
 
 /// Build the persistent `mudpuppy` table with the `map`/`unmap`/`on`/`command`/
@@ -40,7 +40,7 @@ pub fn build_table(
     commands: Commands,
     leader: Leader,
     update_checks: UpdateChecks,
-    anchor_window: AnchorWindow,
+    anchor_windows: AnchorWindows,
 ) -> Result<Table> {
     let table = lua.create_table()?;
 
@@ -104,29 +104,43 @@ pub fn build_table(
     )?;
 
     table.set("updates", build_updates_table(lua, update_checks)?)?;
-    table.set("anchor", build_anchor_table(lua, anchor_window)?)?;
+    table.set("anchor", build_anchor_table(lua, anchor_windows)?)?;
 
     Ok(table)
 }
 
-/// Build the persistent `mudpuppy.anchor` sub-table: `window()` reads, and
-/// `set_window(n)` sets, the fuzzy-relocation scan window. `n > 0` bounds the
-/// scan to ±n lines around an annotation's original position, `0` scans the
-/// whole file, and any negative value disables fuzzy relocation (exact-only).
-fn build_anchor_table(lua: &Lua, anchor_window: AnchorWindow) -> Result<Table> {
+/// Build the persistent `mudpuppy.anchor` sub-table: a getter/setter pair for
+/// each relocation window — `advanced_match_window`/`set_advanced_match_window`
+/// (the primary fuzzy scan) and `fallback_match_window`/`set_fallback_match_window`
+/// (the wider exact fallback). For each, `n > 0` bounds the scan to ±n lines
+/// around an annotation's original position, `0` scans the whole file, and any
+/// negative value disables that scan.
+fn build_anchor_table(lua: &Lua, anchor_windows: AnchorWindows) -> Result<Table> {
     let anchor = lua.create_table()?;
 
-    let w = anchor_window.clone();
-    anchor.set("window", lua.create_function(move |_, ()| Ok(*w.borrow()))?)?;
-
-    let w = anchor_window;
-    anchor.set(
-        "set_window",
-        lua.create_function(move |_, n: i64| {
-            *w.borrow_mut() = n;
-            Ok(())
-        })?,
-    )?;
+    for (get, set, cell) in [
+        (
+            "advanced_match_window",
+            "set_advanced_match_window",
+            anchor_windows.advanced,
+        ),
+        (
+            "fallback_match_window",
+            "set_fallback_match_window",
+            anchor_windows.fallback,
+        ),
+    ] {
+        let w = cell.clone();
+        anchor.set(get, lua.create_function(move |_, ()| Ok(*w.borrow()))?)?;
+        let w = cell;
+        anchor.set(
+            set,
+            lua.create_function(move |_, n: i64| {
+                *w.borrow_mut() = n;
+                Ok(())
+            })?,
+        )?;
+    }
 
     Ok(anchor)
 }

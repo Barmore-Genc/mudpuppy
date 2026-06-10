@@ -75,7 +75,7 @@
       "modified": "use std::collections::HashMap;\n\n/// A single tunable parameter for the renderer.\n#[derive(Debug, Clone)]\npub struct Setting {\n    pub key: String,\n    pub value: i64,\n}\n\n#[derive(Default)]\npub struct ConfigBuilder {\n    settings: Vec<Setting>,\n    verbose: bool,\n}\n\nimpl ConfigBuilder {\n    pub fn new() -> Self {\n        ConfigBuilder::default()\n    }\n\n    fn set(&mut self, key: &str, value: i64) -> &mut Self {\n        self.settings.push(Setting {\n            key: key.to_string(),\n            value,\n        });\n        self\n    }\n\n    pub fn defaults(&mut self) -> &mut Self {\n        self.set(\"max_fps\", 144);\n        self.set(\"width\", 800);\n        self.set(\"height\", 600);\n        self.set(\"cache_mb\", 256);\n        self\n    }\n\n    pub fn build(&self) -> HashMap<String, i64> {\n        let mut out = HashMap::new();\n        for setting in &self.settings {\n            out.insert(setting.key.clone(), setting.value);\n        }\n        out\n    }\n}\n",
       "expect_line": 30,
       "expect_text": "        self.set(\"max_fps\", 144);",
-      "note": "Reorders sibling builder calls; the anchored line moves up but is byte-identical."
+      "note": "Reorders sibling builder calls; the anchored line moves up but is byte-identical. Note: the relocator may instead pick the sibling whose surrounding block context matches exactly (it weights context, not just the literal line) — an acceptable judgment call, so a non-L30 result here is not a real miss."
     },
     {
       "name": "function_moved",
