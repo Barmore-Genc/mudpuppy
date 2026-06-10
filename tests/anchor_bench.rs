@@ -11,7 +11,7 @@
 
 use std::time::Instant;
 
-use mudpuppy::anchor::{relocate, AnchorSig, Params};
+use mudpuppy::anchor::{AnchorSig, Params, PreparedFile};
 
 const ANCHORS: usize = 50;
 const ITERS: usize = 10;
@@ -79,11 +79,21 @@ fn profile(content: &str, params: &Params) {
         .collect();
     let edited: Vec<AnchorSig> = sigs.iter().map(edited_sig).collect();
 
+    // Prepare the file once and reuse across all annotations and iterations —
+    // the whole point of PreparedFile. Also time how long that prepare costs,
+    // since with the cache it happens once per file *edit*, not per render.
+    let tp = Instant::now();
+    for _ in 0..ITERS {
+        std::hint::black_box(PreparedFile::new(content));
+    }
+    let prepare_once = tp.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
+    let prepared = PreparedFile::new(content);
+
     // Tier 0: exact (line text unchanged).
     let t0 = Instant::now();
     for _ in 0..ITERS {
         for (sig, &line) in sigs.iter().zip(&anchor_lines) {
-            std::hint::black_box(relocate(sig, content, line, params));
+            std::hint::black_box(prepared.relocate(sig, line, params));
         }
     }
     let tier0 = t0.elapsed();
@@ -92,35 +102,27 @@ fn profile(content: &str, params: &Params) {
     let t1 = Instant::now();
     for _ in 0..ITERS {
         for (sig, &line) in edited.iter().zip(&anchor_lines) {
-            std::hint::black_box(relocate(sig, content, line, params));
+            std::hint::black_box(prepared.relocate(sig, line, params));
         }
     }
     let tier1 = t1.elapsed();
 
-    // How much of the per-call cost is just re-normalizing the whole file?
-    // (This is the work a precomputed, shared "prepared file" would do once.)
-    let tn = Instant::now();
-    for _ in 0..ITERS {
-        let normed: Vec<String> = content.lines().map(mudpuppy::anchor::normalize).collect();
-        std::hint::black_box(normed);
-    }
-    let norm_once = tn.elapsed().as_secs_f64() * 1e6 / ITERS as f64;
-
     let calls = (ANCHORS * ITERS) as f64;
     let t0_us = tier0.as_secs_f64() * 1e6 / calls;
     let t1_us = tier1.as_secs_f64() * 1e6 / calls;
-    let t0_batch = tier0.as_secs_f64() * 1e3 / ITERS as f64;
-    let t1_batch = tier1.as_secs_f64() * 1e3 / ITERS as f64;
+    // A full pass = prepare the file once + relocate all annotations against it.
+    let t0_batch = prepare_once / 1e3 + tier0.as_secs_f64() * 1e3 / ITERS as f64;
+    let t1_batch = prepare_once / 1e3 + tier1.as_secs_f64() * 1e3 / ITERS as f64;
 
     println!(
-        "{:>7} lines | Tier0 {:>8.1} µs/anno ({:>7.1} ms/50) | Tier1 {:>9.1} µs/anno ({:>8.1} ms/50) | {:.0}x | normalize-once {:.0} µs",
+        "{:>7} lines | prepare {:>7.1} µs | Tier0 {:>6.1} µs/anno ({:>6.1} ms/50) | Tier1 {:>8.1} µs/anno ({:>8.1} ms/50) | {:.0}x",
         line_count,
+        prepare_once,
         t0_us,
         t0_batch,
         t1_us,
         t1_batch,
         t1_us / t0_us,
-        norm_once,
     );
 }
 
@@ -130,6 +132,7 @@ fn profile_relocation_tiers() {
     let params = Params::default();
     println!(
         "\n=== anchor relocation profile ({ANCHORS} annotations, {ITERS} iters, release) ===\n\
+         PreparedFile built once per file; ms/50 = one prepare + all 50 relocations.\n\
          Tier0 = exact (line unchanged); Tier1 = fuzzy full scan (every line edited)\n"
     );
     for min in [1000usize, 5000, 20000] {

@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use mudpuppy::anchor::{relocate, AnchorSig, Outcome, Params};
+use mudpuppy::anchor::{AnchorSig, Outcome, Params, PreparedFile};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -78,8 +78,7 @@ fn line_at(content: &str, n: u32) -> Option<String> {
         .map(str::to_string)
 }
 
-fn evaluate(case: &Case, sig: &AnchorSig, original_line: u32, params: &Params) -> Verdict {
-    let outcome = relocate(sig, &case.modified, original_line, params);
+fn evaluate(case: &Case, outcome: Outcome) -> Verdict {
     let expects_location = case.category == "survive";
     match (expects_location, outcome) {
         (true, Outcome::Located(r)) => {
@@ -132,7 +131,8 @@ fn anchor_relocation_eval() {
             fx.language, fx.anchor_line, fx.anchor_text
         );
         for case in &fx.cases {
-            let verdict = evaluate(case, &sig, fx.anchor_line, &params);
+            let outcome = PreparedFile::new(&case.modified).relocate(&sig, fx.anchor_line, &params);
+            let verdict = evaluate(case, outcome);
             total += 1;
             match verdict {
                 Verdict::Correct => correct += 1,
@@ -146,7 +146,7 @@ fn anchor_relocation_eval() {
                 Verdict::WrongLine | Verdict::FalseOrphan => "MISS",
                 Verdict::FalseMatch => "BAD ",
             };
-            let detail = match relocate(&sig, &case.modified, fx.anchor_line, &params) {
+            let detail = match outcome {
                 Outcome::Located(r) => {
                     format!("-> L{} (score {:.2}, exact={})", r.line, r.score, r.exact)
                 }

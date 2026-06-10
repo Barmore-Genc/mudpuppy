@@ -130,119 +130,213 @@ pub enum Outcome {
     Orphaned,
 }
 
-/// Relocate `sig` within `content`, given the line it was originally on
-/// (`original_line`, 1-based) for nearest-occurrence tie-breaking.
-pub fn relocate(sig: &AnchorSig, content: &str, original_line: u32, params: &Params) -> Outcome {
-    let raw: Vec<&str> = content.lines().collect();
-    if raw.is_empty() {
-        return Outcome::Orphaned;
-    }
-    let norm: Vec<String> = raw.iter().map(|l| normalize(l)).collect();
+/// A file prepared once for relocation: every line normalized and tokenized
+/// up front, so relocating any number of annotations against it reuses that
+/// work instead of re-normalizing/re-tokenizing the whole file per annotation.
+///
+/// The benchmark (`tests/anchor_bench.rs`) showed the naive per-call shape spent
+/// almost all of its time re-normalizing the file; for N annotations that is N×
+/// redundant. Build this once (see [`PreparedCache`] to also skip rebuilding
+/// when the file is unchanged) and call [`PreparedFile::relocate`] per annotation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedFile {
+    /// Normalized text of each line, in file order.
+    norm: Vec<String>,
+    /// Tokenized form of each normalized line; `tokens[i]` matches `norm[i]`.
+    tokens: Vec<Vec<String>>,
+}
 
-    // Tier 0: exact, shift-aware. The normalized line text still present?
-    let exact: Vec<usize> = norm
-        .iter()
-        .enumerate()
-        .filter(|(_, l)| **l == sig.line && !sig.line.is_empty())
-        .map(|(i, _)| i)
-        .collect();
-    if !exact.is_empty() {
-        // Multiple identical lines (repetitive code): pick the one whose context
-        // matches best, breaking ties toward the original position.
-        let orig0 = original_line.saturating_sub(1) as i64;
-        let best = exact
+impl PreparedFile {
+    /// Normalize and tokenize every line of `content`.
+    pub fn new(content: &str) -> Self {
+        let norm: Vec<String> = content.lines().map(normalize).collect();
+        let tokens = norm
             .iter()
-            .copied()
-            .max_by(|&a, &b| {
-                let ca = context_score(sig, &norm, a);
-                let cb = context_score(sig, &norm, b);
-                ca.partial_cmp(&cb)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| {
-                        // Closer to the original line wins the tie.
-                        let da = (a as i64 - orig0).abs();
-                        let db = (b as i64 - orig0).abs();
-                        db.cmp(&da)
-                    })
+            .map(|l| tokenize(l).into_iter().map(str::to_string).collect())
+            .collect();
+        PreparedFile { norm, tokens }
+    }
+
+    /// Number of lines.
+    pub fn len(&self) -> usize {
+        self.norm.len()
+    }
+
+    /// Whether the file is empty.
+    pub fn is_empty(&self) -> bool {
+        self.norm.is_empty()
+    }
+
+    /// Relocate `sig` within this file, given the line it was originally on
+    /// (`original_line`, 1-based) for nearest-occurrence tie-breaking.
+    pub fn relocate(&self, sig: &AnchorSig, original_line: u32, params: &Params) -> Outcome {
+        if self.norm.is_empty() {
+            return Outcome::Orphaned;
+        }
+
+        // Tokenize the signature once; reused across every candidate below.
+        let before_tokens: Vec<Vec<&str>> = sig.before.iter().map(|l| tokenize(l)).collect();
+        let after_tokens: Vec<Vec<&str>> = sig.after.iter().map(|l| tokenize(l)).collect();
+        let ctx = |i: usize| self.context_score(&before_tokens, &after_tokens, i);
+
+        // Tier 0: exact, shift-aware. The normalized line text still present?
+        let exact: Vec<usize> = self
+            .norm
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| **l == sig.line && !sig.line.is_empty())
+            .map(|(i, _)| i)
+            .collect();
+        if !exact.is_empty() {
+            // Multiple identical lines (repetitive code): pick the one whose
+            // context matches best, breaking ties toward the original position.
+            let orig0 = original_line.saturating_sub(1) as i64;
+            let best = exact
+                .iter()
+                .copied()
+                .max_by(|&a, &b| {
+                    ctx(a)
+                        .partial_cmp(&ctx(b))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| {
+                            // Closer to the original line wins the tie.
+                            let da = (a as i64 - orig0).abs();
+                            let db = (b as i64 - orig0).abs();
+                            db.cmp(&da)
+                        })
+                })
+                .expect("exact is non-empty");
+            return Outcome::Located(Relocation {
+                line: best as u32 + 1,
+                score: 1.0,
+                exact: true,
+            });
+        }
+
+        // Tier 1: fuzzy. The line was edited (or removed). Score every candidate.
+        let anchor_tokens = tokenize(&sig.line);
+        let has_context = !sig.before.is_empty() || !sig.after.is_empty();
+        let mut scored: Vec<(usize, f64)> = (0..self.tokens.len())
+            .map(|i| {
+                let line_score = lev_ratio(&anchor_tokens, &self.tokens[i]);
+                let total = if has_context {
+                    params.w_line * line_score + params.w_ctx * ctx(i)
+                } else {
+                    line_score
+                };
+                (i, total)
             })
-            .expect("exact is non-empty");
-        return Outcome::Located(Relocation {
-            line: best as u32 + 1,
-            score: 1.0,
-            exact: true,
-        });
-    }
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    // Tier 1: fuzzy. The line was edited (or removed). Score every candidate.
-    let anchor_tokens = tokenize(&sig.line);
-    let mut scored: Vec<(usize, f64)> = norm
-        .iter()
-        .enumerate()
-        .map(|(i, line)| {
-            let line_score = lev_ratio(&anchor_tokens, &tokenize(line));
-            let ctx = context_score(sig, &norm, i);
-            let total = if has_context(sig) {
-                params.w_line * line_score + params.w_ctx * ctx
-            } else {
-                line_score
-            };
-            (i, total)
-        })
-        .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-
-    let (best_i, best) = scored[0];
-    let runner_up = scored.get(1).map(|&(_, s)| s).unwrap_or(0.0);
-    if best >= params.accept && (best - runner_up) >= params.margin {
-        Outcome::Located(Relocation {
-            line: best_i as u32 + 1,
-            score: best,
-            exact: false,
-        })
-    } else {
-        Outcome::Orphaned
-    }
-}
-
-/// Whether the signature carries any context lines to compare.
-fn has_context(sig: &AnchorSig) -> bool {
-    !sig.before.is_empty() || !sig.after.is_empty()
-}
-
-/// Similarity of the signature's context to the lines positionally surrounding
-/// candidate index `i`, as the mean per-line edit-distance ratio. Context lines
-/// that fall outside the file score 0, so a candidate near a boundary that loses
-/// expected context is penalized. Returns 0 when the signature has no context.
-fn context_score(sig: &AnchorSig, norm: &[String], i: usize) -> f64 {
-    let mut sum = 0.0;
-    let mut count = 0usize;
-
-    // `before` is file-ordered; its last element is the line just above `i`.
-    for (k, b) in sig.before.iter().enumerate() {
-        let offset = sig.before.len() - k;
-        let ratio = match i.checked_sub(offset) {
-            Some(j) => lev_ratio(&tokenize(b), &tokenize(&norm[j])),
-            None => 0.0,
-        };
-        sum += ratio;
-        count += 1;
-    }
-    for (k, a) in sig.after.iter().enumerate() {
-        let j = i + 1 + k;
-        let ratio = if j < norm.len() {
-            lev_ratio(&tokenize(a), &tokenize(&norm[j]))
+        let (best_i, best) = scored[0];
+        let runner_up = scored.get(1).map(|&(_, s)| s).unwrap_or(0.0);
+        if best >= params.accept && (best - runner_up) >= params.margin {
+            Outcome::Located(Relocation {
+                line: best_i as u32 + 1,
+                score: best,
+                exact: false,
+            })
         } else {
-            0.0
-        };
-        sum += ratio;
-        count += 1;
+            Outcome::Orphaned
+        }
     }
 
-    if count == 0 {
-        0.0
-    } else {
-        sum / count as f64
+    /// Similarity of the signature's (pre-tokenized) context to the lines
+    /// positionally surrounding candidate index `i`, as the mean per-line
+    /// edit-distance ratio. Context lines that fall outside the file score 0, so
+    /// a candidate near a boundary that loses expected context is penalized.
+    /// Returns 0 when the signature has no context.
+    fn context_score(&self, before: &[Vec<&str>], after: &[Vec<&str>], i: usize) -> f64 {
+        let mut sum = 0.0;
+        let mut count = 0usize;
+
+        // `before` is file-ordered; its last element is the line just above `i`.
+        for (k, b) in before.iter().enumerate() {
+            let offset = before.len() - k;
+            let ratio = match i.checked_sub(offset) {
+                Some(j) => lev_ratio(b, &self.tokens[j]),
+                None => 0.0,
+            };
+            sum += ratio;
+            count += 1;
+        }
+        for (k, a) in after.iter().enumerate() {
+            let j = i + 1 + k;
+            let ratio = if j < self.tokens.len() {
+                lev_ratio(a, &self.tokens[j])
+            } else {
+                0.0
+            };
+            sum += ratio;
+            count += 1;
+        }
+
+        if count == 0 {
+            0.0
+        } else {
+            sum / count as f64
+        }
     }
+}
+
+/// A content-addressed cache of [`PreparedFile`]s, keyed by an opaque file key
+/// (e.g. its path). [`prepare`](PreparedCache::prepare) rebuilds a file's
+/// prepared form only when its contents change — so relocation runs the
+/// (linear) prepare pass once per *edit*, not once per render. Pair with the
+/// caller's existing reload trigger; the cache itself holds no file watcher.
+#[derive(Debug, Default)]
+pub struct PreparedCache {
+    entries: std::collections::HashMap<String, CacheEntry>,
+}
+
+#[derive(Debug)]
+struct CacheEntry {
+    hash: u64,
+    prepared: PreparedFile,
+}
+
+impl PreparedCache {
+    /// An empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return a prepared view of `content` stored under `key`, rebuilding only
+    /// if the content changed since the last call for that key.
+    pub fn prepare(&mut self, key: &str, content: &str) -> &PreparedFile {
+        let hash = hash_content(content);
+        let stale = self
+            .entries
+            .get(key)
+            .map(|e| e.hash != hash)
+            .unwrap_or(true);
+        if stale {
+            self.entries.insert(
+                key.to_string(),
+                CacheEntry {
+                    hash,
+                    prepared: PreparedFile::new(content),
+                },
+            );
+        }
+        &self.entries.get(key).expect("just inserted").prepared
+    }
+
+    /// Drop any cached entries whose key is not in `live` (e.g. files no longer
+    /// under review), so the cache doesn't grow without bound across a session.
+    pub fn retain_keys<F: Fn(&str) -> bool>(&mut self, live: F) {
+        self.entries.retain(|k, _| live(k));
+    }
+}
+
+/// Hash file content for cache invalidation. In-memory only (not persisted), so
+/// the standard hasher is fine.
+fn hash_content(content: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut h);
+    h.finish()
 }
 
 /// Collapse all runs of whitespace to single spaces and trim the ends. This is
@@ -297,7 +391,9 @@ fn utf8_len(lead: u8) -> usize {
 
 /// Edit-distance similarity ratio of two token sequences, in `[0, 1]`:
 /// `(|a| + |b| - levenshtein) / (|a| + |b|)`. Two empty sequences are identical.
-fn lev_ratio(a: &[&str], b: &[&str]) -> f64 {
+/// Generic over the token storage so signature tokens (`&str`, borrowed from the
+/// signature) compare directly against prepared-file tokens (owned `String`).
+fn lev_ratio<A: AsRef<str>, B: AsRef<str>>(a: &[A], b: &[B]) -> f64 {
     let total = a.len() + b.len();
     if total == 0 {
         return 1.0;
@@ -307,7 +403,7 @@ fn lev_ratio(a: &[&str], b: &[&str]) -> f64 {
 }
 
 /// Levenshtein distance between two token sequences (classic two-row DP).
-fn levenshtein(a: &[&str], b: &[&str]) -> usize {
+fn levenshtein<A: AsRef<str>, B: AsRef<str>>(a: &[A], b: &[B]) -> usize {
     if a.is_empty() {
         return b.len();
     }
@@ -316,10 +412,10 @@ fn levenshtein(a: &[&str], b: &[&str]) -> usize {
     }
     let mut prev: Vec<usize> = (0..=b.len()).collect();
     let mut cur = vec![0usize; b.len() + 1];
-    for (i, &ta) in a.iter().enumerate() {
+    for (i, ta) in a.iter().enumerate() {
         cur[0] = i + 1;
-        for (j, &tb) in b.iter().enumerate() {
-            let cost = if ta == tb { 0 } else { 1 };
+        for (j, tb) in b.iter().enumerate() {
+            let cost = if ta.as_ref() == tb.as_ref() { 0 } else { 1 };
             cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
         }
         std::mem::swap(&mut prev, &mut cur);
@@ -374,12 +470,18 @@ mod tests {
         assert!(AnchorSig::capture(content, 99, &Params::default()).is_none());
     }
 
+    /// Convenience: relocate `sig` in raw `content` (builds a one-off
+    /// `PreparedFile`), as callers tend to think of it.
+    fn relocate_in(sig: &AnchorSig, content: &str, original_line: u32) -> Outcome {
+        PreparedFile::new(content).relocate(sig, original_line, &Params::default())
+    }
+
     #[test]
     fn relocates_identical_line_shifted_down() {
         let orig = "fn a() {}\nlet target = compute(x);\nfn b() {}";
         let sig = AnchorSig::capture(orig, 2, &Params::default()).unwrap();
         let edited = "use std;\nfn a() {}\nlet helper = 1;\nlet target = compute(x);\nfn b() {}";
-        match relocate(&sig, edited, 2, &Params::default()) {
+        match relocate_in(&sig, edited, 2) {
             Outcome::Located(r) => {
                 assert_eq!(r.line, 4);
                 assert!(r.exact);
@@ -394,7 +496,7 @@ mod tests {
         let sig = AnchorSig::capture(orig, 2, &Params::default()).unwrap();
         // Rename `target` -> `result`: one token differs, context intact.
         let edited = "fn a() {}\nlet result = compute(x);\nfn b() {}";
-        match relocate(&sig, edited, 2, &Params::default()) {
+        match relocate_in(&sig, edited, 2) {
             Outcome::Located(r) => {
                 assert_eq!(r.line, 2);
                 assert!(!r.exact);
@@ -408,9 +510,38 @@ mod tests {
         let orig = "fn a() {}\nlet target = compute(x);\nreturn done();";
         let sig = AnchorSig::capture(orig, 2, &Params::default()).unwrap();
         let edited = "fn a() {}\nreturn done();";
-        assert_eq!(
-            relocate(&sig, edited, 2, &Params::default()),
-            Outcome::Orphaned
-        );
+        assert_eq!(relocate_in(&sig, edited, 2), Outcome::Orphaned);
+    }
+
+    #[test]
+    fn prepared_file_reused_matches_oneoff() {
+        // A shared PreparedFile must produce the same answer as building one
+        // per call — the precompute is a pure optimization.
+        let content = "fn a() {}\nlet x = f(1);\nlet y = g(2);\nfn b() {}";
+        let prepared = PreparedFile::new(content);
+        for line in 1..=prepared.len() as u32 {
+            let sig = AnchorSig::capture(content, line, &Params::default()).unwrap();
+            assert_eq!(
+                prepared.relocate(&sig, line, &Params::default()),
+                relocate_in(&sig, content, line),
+            );
+        }
+    }
+
+    #[test]
+    fn cache_rebuilds_only_on_change() {
+        let mut cache = PreparedCache::new();
+        let v1 = "let a = 1;\nlet b = 2;";
+        let p1 = cache.prepare("f.rs", v1).clone();
+        // Same content → same prepared form (and, in practice, no rebuild).
+        assert_eq!(cache.prepare("f.rs", v1), &p1);
+        // Changed content → prepared form reflects the new lines.
+        let v2 = "let a = 1;\nlet b = 2;\nlet c = 3;";
+        let p2 = cache.prepare("f.rs", v2);
+        assert_eq!(p2.len(), 3);
+        assert_ne!(p2, &p1);
+        // Eviction of keys no longer in use.
+        cache.retain_keys(|k| k != "f.rs");
+        assert_eq!(cache.prepare("f.rs", v1).len(), 2);
     }
 }
