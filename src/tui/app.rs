@@ -1444,14 +1444,16 @@ impl App {
             return None;
         }
         let local = (row - inner.y) as usize + self.hits.annotation_scroll;
-        // Each annotation occupies its block_start line and the next (preview).
-        // Walk in reverse so the latest start <= local wins.
+        // Each annotation's block runs from its start up to the next start; a row
+        // at or after the last start belongs to the last annotation. Walk in
+        // reverse so the latest start <= local wins. Body wrapping can shift rows,
+        // so this maps clicks approximately when bodies wrap past one line.
         self.hits
             .annotation_block_starts
             .iter()
             .enumerate()
             .rev()
-            .find_map(|(i, &s)| (s <= local && local <= s + 1).then_some(i))
+            .find_map(|(i, &s)| (s <= local).then_some(i))
     }
 
     /// Scroll-wheel dispatch by hovered pane: the help overlay (when open) wins
