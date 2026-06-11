@@ -192,6 +192,7 @@ mod tests {
             end_line: None,
             side: super::super::Side::Right,
             scope: super::super::AnchorScope::Line,
+            signature: None,
             severity: super::super::Severity::Info,
             tag: None,
             status: super::super::Status::Open,

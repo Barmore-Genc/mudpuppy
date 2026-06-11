@@ -133,6 +133,13 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     // is surfaced in the status bar and the last good bindings stay in effect.
     let engine = LuaEngine::new(lua::config_path()).context("starting the scripting engine")?;
 
+    // The store was attached (and relocated) before the engine existed, so it used
+    // the default scan windows. Push the now-loaded config's windows in and
+    // re-relocate from the store's original captures.
+    let (adv, fb) = engine.anchor_windows();
+    app.set_anchor_windows(adv, fb);
+    app.reload();
+
     runtime.block_on(async move {
         // Store-change ticks: the watcher fires these from notify's own thread;
         // the loop only cares that *something* changed and re-reads to decide.
@@ -312,6 +319,11 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                 // Errors are non-fatal and surface in the status bar.
                 Some(()) = cfg_rx.recv() => {
                     let _ = engine.reload_config();
+                    // The config may have changed the scan windows; pick them up
+                    // and re-relocate from the store's original captures.
+                    let (adv, fb) = engine.anchor_windows();
+                    app.set_anchor_windows(adv, fb);
+                    app.reload();
                 }
                 // The launch-time update check found a newer release. Fire
                 // `update_check` so `core.luau` can prompt; its callbacks can

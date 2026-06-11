@@ -7,6 +7,8 @@ use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::anchor::AnchorSig;
+
 /// Alphanumeric id alphabet. We avoid nanoid's default `-`/`_` so an id can
 /// never start with `-` and be mistaken for a CLI flag (e.g. `--id -X…`).
 const ID_ALPHABET: [char; 62] = [
@@ -215,6 +217,12 @@ pub struct Annotation {
     /// What the annotation is anchored to. Absent in old stores → [`AnchorScope::Line`].
     #[serde(default)]
     pub scope: AnchorScope,
+    /// Change-resilient location signature captured at creation (see
+    /// [`crate::anchor`]). Lets the TUI relocate the mark when the file is edited
+    /// rather than trusting the bare line number. `None` for file-scoped notes,
+    /// old stores, or when file content was unavailable at capture time.
+    #[serde(default)]
+    pub signature: Option<AnchorSig>,
     /// Significance.
     pub severity: Severity,
     /// Optional intent marker; `None` serializes to `null`.
@@ -268,6 +276,7 @@ mod tests {
             end_line: None,
             side: Side::Right,
             scope: AnchorScope::Line,
+            signature: None,
             severity: Severity::Suggestion,
             tag: Some(Tag::Question),
             status: Status::Open,
@@ -327,6 +336,21 @@ mod tests {
         let a: Annotation = serde_json::from_str(json).unwrap();
         assert_eq!(a.end_line, None);
         assert_eq!(a.scope, AnchorScope::Line);
+        // The relocation signature is likewise additive: absent → None.
+        assert_eq!(a.signature, None);
+    }
+
+    #[test]
+    fn signature_round_trips() {
+        let mut a = sample();
+        a.signature = Some(AnchorSig {
+            line: "let target = compute(x);".to_string(),
+            before: vec!["fn a() {".to_string()],
+            after: vec!["}".to_string()],
+        });
+        let json = serde_json::to_string(&a).unwrap();
+        let back: Annotation = serde_json::from_str(&json).unwrap();
+        assert_eq!(a, back);
     }
 
     #[test]

@@ -366,8 +366,20 @@ pub(crate) struct App {
     pub(crate) annotation_selected: usize,
     /// Top visible line of the annotations tab, so the selection stays on screen.
     pub(crate) annotation_scroll: usize,
-    /// Annotations loaded from the store (both authors, every status).
+    /// Annotations loaded from the store (both authors, every status). Their
+    /// `line`/`end_line` are kept *relocated* against the current file content
+    /// (see [`App::relocate_annotations`]); the store keeps the original capture.
     pub(crate) annotations: Vec<Annotation>,
+    /// Relocation tuning, including the Lua-configured scan windows. Refreshed
+    /// from the engine on config (re)load via [`App::set_anchor_windows`].
+    anchor_params: crate::anchor::Params,
+    /// Per-file prepared-content cache for relocation, rebuilt only when a file's
+    /// content changes. Shared across the many annotations on one reload.
+    anchor_cache: crate::anchor::PreparedCache,
+    /// Ids of annotations that *lost* their anchor on the last relocation pass and
+    /// were re-pinned to the whole file. Lets the banner flag them as orphaned
+    /// (their code is gone) rather than passing them off as authored file notes.
+    pub(crate) orphaned_anchors: HashSet<String>,
     /// The turn-protocol block from the store, kept in sync on reload so the
     /// status bar can surface "agent is waiting" and `r` can release correctly.
     pub(crate) turn: Turn,
@@ -458,6 +470,9 @@ impl App {
             annotation_selected: 0,
             annotation_scroll: 0,
             annotations: Vec::new(),
+            anchor_params: crate::anchor::Params::default(),
+            anchor_cache: crate::anchor::PreparedCache::new(),
+            orphaned_anchors: HashSet::new(),
             turn: Turn::default(),
             store_path: None,
             diff_height: 1,
@@ -502,7 +517,60 @@ impl App {
             self.annotations = state.annotations;
             self.turn = state.turn;
         }
+        self.relocate_annotations();
         self.merge_synthetic_files();
+    }
+
+    /// Refresh the relocation scan windows from the Lua engine's config (called
+    /// after the initial config load and every hot-reload).
+    pub(crate) fn set_anchor_windows(&mut self, advanced: i64, fallback: i64) {
+        self.anchor_params.advanced_match_window = advanced;
+        self.anchor_params.fallback_match_window = fallback;
+    }
+
+    /// Relocate each line-scoped annotation's captured signature against the
+    /// current content of its side, overwriting the in-memory `line`/`end_line`
+    /// so the gutter mark follows edits made since capture. The store keeps the
+    /// original capture, so this recomputes from scratch on every reload. An
+    /// annotation whose anchor can't be placed is re-pinned to the whole file
+    /// ([`AnchorScope::File`]) rather than left on a stale or wrong line.
+    pub(crate) fn relocate_annotations(&mut self) {
+        self.orphaned_anchors.clear();
+        let mut anns = std::mem::take(&mut self.annotations);
+        for a in &mut anns {
+            if a.scope != AnchorScope::Line {
+                continue;
+            }
+            let Some(sig) = a.signature.clone() else {
+                continue;
+            };
+            let Some(lines) = self.blob_for(&a.file, blob::blob_side(a.side)) else {
+                continue;
+            };
+            let content = lines.join("\n");
+            // Key the prepared cache per (file, side); the side picks a distinct
+            // blob (head vs base).
+            let key = format!("{}\u{0}{:?}", a.file, a.side);
+            let prepared = self.anchor_cache.prepare(&key, &content);
+            match prepared.relocate(&sig, a.line, &self.anchor_params) {
+                crate::anchor::Outcome::Located(r) => {
+                    if let Some(end) = a.end_line {
+                        // Slide the region end by the same delta as its start; the
+                        // region keeps its length and never collapses past the start.
+                        let delta = r.line as i64 - a.line as i64;
+                        a.end_line = Some(((end as i64 + delta).max(r.line as i64)) as u32);
+                    }
+                    a.line = r.line;
+                }
+                // The anchored code is gone: surface the note at the file level
+                // rather than guess a line, and remember it was orphaned.
+                crate::anchor::Outcome::Orphaned => {
+                    a.scope = AnchorScope::File;
+                    self.orphaned_anchors.insert(a.id.clone());
+                }
+            }
+        }
+        self.annotations = anns;
     }
 
     /// Reconcile synthetic entries with the loaded annotations so files outside
@@ -561,6 +629,7 @@ impl App {
             self.annotations = state.annotations;
             self.turn = state.turn;
         }
+        self.relocate_annotations();
         self.merge_synthetic_files();
     }
 
@@ -1134,6 +1203,24 @@ impl App {
         });
         self.blob_cache.insert(key, value.clone());
         value
+    }
+
+    /// Capture a relocation signature for a new line-scoped annotation at `line`
+    /// on `side` of `path`, reusing the cached blob. `None` when content is
+    /// unavailable or the line is out of range — the annotation then stores no
+    /// signature and stays on its bare line number.
+    pub(crate) fn capture_signature(
+        &mut self,
+        path: &str,
+        line: u32,
+        side: Side,
+    ) -> Option<crate::anchor::AnchorSig> {
+        let lines = self.blob_for(path, blob::blob_side(side))?;
+        crate::anchor::AnchorSig::capture(
+            &lines.join("\n"),
+            line,
+            &crate::anchor::Params::default(),
+        )
     }
 
     /// Rebuild the current file's view from its plan, supplying the Head blob so

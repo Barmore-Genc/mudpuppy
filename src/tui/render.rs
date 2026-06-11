@@ -231,8 +231,19 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &mut App) {
             .map(|a| a.severity)
             .max()
             .unwrap_or(Severity::Info);
+        // Notes re-pinned here because their line was lost on relocation are
+        // called out so the reviewer knows their anchor went stale.
+        let orphaned = file_level
+            .iter()
+            .filter(|a| app.orphaned_anchors.contains(&a.id))
+            .count();
+        let label = if orphaned > 0 {
+            format!("▌ file-level: {} ({orphaned} orphaned)", file_level.len())
+        } else {
+            format!("▌ file-level: {}", file_level.len())
+        };
         header.push(Line::from(Span::styled(
-            format!("▌ file-level: {}", file_level.len()),
+            label,
             Style::default()
                 .fg(severity_color(sev))
                 .add_modifier(Modifier::BOLD),

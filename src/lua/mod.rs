@@ -294,6 +294,15 @@ impl LuaEngine {
         self.load_scripts(false)
     }
 
+    /// The currently-configured relocation scan windows as `(advanced, fallback)`,
+    /// so the loop can push them into `App` for its on-reload relocation.
+    pub fn anchor_windows(&self) -> (i64, i64) {
+        (
+            *self.anchor_windows.advanced.borrow(),
+            *self.anchor_windows.fallback.borrow(),
+        )
+    }
+
     /// The latest script/config message to show in the status bar, if any.
     pub fn status_message(&self) -> Option<String> {
         self.status.borrow().clone()
@@ -922,6 +931,7 @@ index 333..444 100644
             end_line: None,
             side: Side::Right,
             scope: AnchorScope::Line,
+            signature: None,
             severity: Severity::Warning,
             tag: None,
             status: Status::Open,

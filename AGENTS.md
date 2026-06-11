@@ -40,7 +40,7 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 - `agent.rs`: the `mudpuppy agent` subcommands (add/comment/wait/…) over the store.
 - `install/`: `mudpuppy install claude` — writes the two Claude Code skills (PR review, implementation review) at a chosen scope (project/local/user).
 - `source.rs`: diff-source providers — shells out to `git` (local) and `gh` (PR).
-- `blob.rs`: full file-content provider (working tree / `git show` / `gh api`) for context expansion and added/comment-only files.
+- `blob.rs`: full file-content provider (working tree / `git show` / `gh api`) for context expansion and added/comment-only files; also captures relocation signatures (`capture_signature`).
 - `diff.rs`: hand-rolled unified-diff parser, lazy hunks, line ↔ side anchoring.
 - `anchor.rs`: change-resilient location anchors — capture a line+context signature and relocate it in an edited file (exact-then-fuzzy edit-distance cascade), else orphan.
 - `highlight.rs`: syntect syntax highlighting for the diff pane.
