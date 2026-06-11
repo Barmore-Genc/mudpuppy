@@ -34,7 +34,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Tuning parameters for [`relocate`]. Defaults are the shipped values; kept
+/// Tuning parameters for [`PreparedFile::relocate`]. Defaults are the shipped values; kept
 /// configurable so the fixture-driven eval (`tests/anchor_eval.rs`) can sweep.
 #[derive(Debug, Clone, Copy)]
 pub struct Params {
