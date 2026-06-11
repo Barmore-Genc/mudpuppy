@@ -65,6 +65,19 @@ fn prompt_overlay_shows_message_and_options() {
 }
 
 #[test]
+fn skill_refresh_prompt_renders_from_the_event() {
+    // The launch-time `skill_update_check` event (fired when a stale skill
+    // install exists) runs `core.luau`'s handler, which opens the refresh prompt.
+    let mut a = app();
+    a.fire_skill_update_check_for_test(2, "We added a new heredoc comment workflow.");
+    let term = drive(&mut a, 100, 24, &[]);
+    let s = screen(&term);
+    assert!(s.contains("heredoc comment workflow"), "screen: {s}");
+    assert!(s.contains("Update the installed"), "screen: {s}");
+    assert!(s.contains("Skip this version"), "screen: {s}");
+}
+
+#[test]
 fn prompt_navigation_moves_and_commits_the_selection() {
     let mut a = app();
     a.open_prompt(

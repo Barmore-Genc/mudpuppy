@@ -15,6 +15,7 @@
 //! target arrives later.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
 use std::time::Duration;
 
@@ -105,12 +106,53 @@ fn comment(command: CommentCommand) -> Result<()> {
     }
 }
 
+/// Resolve the comment body from the mutually-exclusive `--body`/`--body-file`
+/// sources. A `-` for either reads stdin to end — the heredoc form Claude Code
+/// can run without approval-gating ANSI-C (`$'…\n…'`) quoting. Exactly one
+/// source is required; zero or both is an error. A single trailing newline is
+/// trimmed so a heredoc's terminating newline doesn't bloat the stored body.
+fn resolve_body(body: Option<&str>, body_file: Option<&str>) -> Result<String> {
+    let raw = match (body, body_file) {
+        (Some(_), Some(_)) => {
+            bail!("pass exactly one of --body or --body-file, not both")
+        }
+        (None, None) => bail!("a comment body is required: pass --body or --body-file"),
+        (Some("-"), None) | (None, Some("-")) => read_stdin()?,
+        (Some(inline), None) => inline.to_string(),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .with_context(|| format!("reading the comment body from {path}"))?,
+    };
+    Ok(trim_trailing_newline(raw))
+}
+
+/// Read stdin to end as UTF-8 for a `--body -`/`--body-file -` body.
+fn read_stdin() -> Result<String> {
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buf)
+        .context("reading the comment body from stdin")?;
+    Ok(buf)
+}
+
+/// Drop a single trailing `\n` (and the `\r` of a `\r\n`), so a heredoc or
+/// editor file doesn't leave a dangling blank line on the stored body.
+fn trim_trailing_newline(mut s: String) -> String {
+    if s.ends_with('\n') {
+        s.pop();
+        if s.ends_with('\r') {
+            s.pop();
+        }
+    }
+    s
+}
+
 /// `agent comment add` — create an annotation authored by the agent.
 fn add(args: AddArgs) -> Result<()> {
     // Parse the enum-valued flags up front so a typo fails before we touch disk.
     let side: Side = args.side.parse()?;
     let severity: Severity = args.severity.parse()?;
     let tag = args.tag.as_deref().map(str::parse::<Tag>).transpose()?;
+    let body = resolve_body(args.body.as_deref(), args.body_file.as_deref())?;
 
     let session = session()?;
     let now = Timestamp::now();
@@ -145,7 +187,7 @@ fn add(args: AddArgs) -> Result<()> {
         severity,
         tag,
         status: Status::Open,
-        body: args.body,
+        body,
         reply_to: args.reply_to,
         created_at: now,
         updated_at: now,
@@ -587,6 +629,30 @@ fn tag_symbol(t: Tag) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_body_inline_and_file_with_trailing_newline_trim() {
+        // Inline body is taken verbatim; a single trailing newline is trimmed.
+        assert_eq!(resolve_body(Some("hi"), None).unwrap(), "hi");
+
+        // A file body round-trips its embedded newline but loses one trailing one.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("body.md");
+        std::fs::write(&path, "line one\nline two\n").unwrap();
+        assert_eq!(
+            resolve_body(None, Some(path.to_str().unwrap())).unwrap(),
+            "line one\nline two"
+        );
+    }
+
+    #[test]
+    fn resolve_body_requires_exactly_one_source() {
+        assert!(resolve_body(None, None).is_err(), "zero sources");
+        assert!(
+            resolve_body(Some("x"), Some("y")).is_err(),
+            "conflicting sources"
+        );
+    }
 
     const RAW: &str = "\
 diff --git a/src/alpha.rs b/src/alpha.rs

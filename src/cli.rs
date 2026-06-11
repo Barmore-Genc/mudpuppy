@@ -195,9 +195,16 @@ pub struct AddArgs {
     /// Thread this comment as a reply under an existing annotation id.
     #[arg(long, value_name = "ID")]
     pub reply_to: Option<String>,
-    /// Markdown body.
+    /// Markdown body, inline. Use `-` to read it from stdin. For multi-line
+    /// bodies prefer `--body-file -` with a heredoc, which avoids shell ANSI-C
+    /// (`$'…\n…'`) quoting. Exactly one of `--body`/`--body-file` is required.
     #[arg(long, value_name = "TEXT")]
-    pub body: String,
+    pub body: Option<String>,
+    /// Read the Markdown body from a file, or from stdin when the path is `-`.
+    /// The heredoc form `--body-file - <<'EOF' … EOF` is the canonical way to
+    /// pass a multi-line body without ANSI-C shell quoting.
+    #[arg(long, value_name = "PATH")]
+    pub body_file: Option<String>,
 }
 
 /// Parse the process arguments and dispatch.
@@ -273,7 +280,8 @@ mod tests {
         assert_eq!(args.file, "src/lib.rs");
         assert_eq!(args.line, 10);
         assert_eq!(args.side, "right"); // default
-        assert_eq!(args.body, "hello");
+        assert_eq!(args.body.as_deref(), Some("hello"));
+        assert_eq!(args.body_file, None);
         assert_eq!(args.end_line, None);
         assert!(!args.whole_file);
     }

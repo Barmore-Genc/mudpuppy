@@ -183,3 +183,27 @@ m.command("check-updates", function()
     print("mudpuppy is up to date.")
   end
 end)
+
+-- ---- Skill refresh: offer to update stale installed Claude Code skills ------
+--
+-- Separate from the binary self-update above: this only rewrites the installed
+-- SKILL.md files. The event loop runs a local check at launch and fires
+-- `skill_update_check` (with the version + a "what changed" message) when a
+-- stale install exists and the user hasn't skipped that version.
+
+-- Offer to refresh. "Update" rewrites the files now; "Not now" defers until the
+-- next launch; "Skip this version" records the refusal so it stays quiet.
+local function offer_skill_refresh(version, message)
+  m.prompt(message .. " Update the installed skills?", {
+    { "Update", function()
+        m.skills.refresh()
+        print("Updated the installed mudpuppy skills.")
+      end },
+    { "Not now", function() end },
+    { "Skip this version", function() m.skills.skip(version) end },
+  })
+end
+
+m.on("skill_update_check", function(ev)
+  offer_skill_refresh(ev.version, ev.message)
+end)

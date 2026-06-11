@@ -104,9 +104,60 @@ pub fn build_table(
     )?;
 
     table.set("updates", build_updates_table(lua, update_checks)?)?;
+    table.set("skills", build_skills_table(lua)?)?;
     table.set("anchor", build_anchor_table(lua, anchor_windows)?)?;
 
     Ok(table)
+}
+
+/// Build the persistent `mudpuppy.skills` sub-table, mirroring `mudpuppy.updates`
+/// but for the installed Claude Code skill files (not the binary): `check()` ->
+/// `{ version, message }` when a stale install should be refreshed (else nil),
+/// `refresh()` rewrites the installed `SKILL.md` files current, and `skip(version)`
+/// persists the user's refusal so the prompt stays quiet until a newer version.
+fn build_skills_table(lua: &Lua) -> Result<Table> {
+    let skills = lua.create_table()?;
+
+    // `check()` -> `{ version = N, message = "…" }` if a stale install exists and
+    // the user hasn't skipped this version, else nil. The launch check does the
+    // same gating before firing the event; this exposes it to scripts on demand.
+    skills.set(
+        "check",
+        lua.create_function(|lua, ()| {
+            if crate::install::should_prompt_skill_refresh() {
+                let t = lua.create_table()?;
+                t.set("version", crate::install::SKILL_VERSION)?;
+                t.set("message", crate::install::SKILL_UPDATE_MESSAGE)?;
+                Ok(Value::Table(t))
+            } else {
+                Ok(Value::Nil)
+            }
+        })?,
+    )?;
+
+    // `refresh()` force-rewrites every installed skill file to the current
+    // version. Raises a Lua error on an IO failure so the status bar sees it.
+    skills.set(
+        "refresh",
+        lua.create_function(|_, ()| {
+            crate::install::refresh_installed_skills()
+                .map_err(|e| mlua::Error::runtime(e.to_string()))?;
+            Ok(())
+        })?,
+    )?;
+
+    // `skip(version)` persists the refusal beside the config dir. Raises on a
+    // write failure.
+    skills.set(
+        "skip",
+        lua.create_function(|_, version: u32| {
+            crate::install::skip_skill_version(version)
+                .map_err(|e| mlua::Error::runtime(e.to_string()))?;
+            Ok(())
+        })?,
+    )?;
+
+    Ok(skills)
 }
 
 /// Build the persistent `mudpuppy.anchor` sub-table: a getter/setter pair for

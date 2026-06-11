@@ -39,6 +39,20 @@ below. Read it first, and trust it over this file if anything here has drifted.
    add`: anchor with `--file` / `--line` / `--side`, set `--severity`
    (`info` < `suggestion` < `warning` < `blocker`) and an optional `--tag`
    (`?` question, `!` concern, `>` direction). One concrete point per comment.
+
+   Write the body with `--body-file -` and a quoted heredoc — this is the
+   canonical form, and it avoids the `$'…\n…'` shell quoting that gets gated for
+   approval on every call:
+
+   ```sh
+   mudpuppy agent comment add --file src/foo.rs --line 42 --body-file - <<'EOF'
+   This loop re-reads the file each iteration.
+
+   Hoist the read above the loop instead.
+   EOF
+   ```
+
+   For a trivial one-liner, `--body "short note"` is fine.
 5. **Hand the turn to the user and wait** with `mudpuppy agent wait`. It blocks
    until they release the turn, then prints everything they changed — their
    replies, status changes, and new comments. Read that, respond (`comment add

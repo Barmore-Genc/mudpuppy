@@ -9,6 +9,7 @@
 
 mod common;
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -27,6 +28,34 @@ fn run(repo: &Path, data: &Path, args: &[&str]) -> (String, String, bool) {
         .env("GIT_CONFIG_SYSTEM", "/dev/null")
         .output()
         .expect("run mudpuppy");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.success(),
+    )
+}
+
+/// Run `mudpuppy <args>` inside `repo` with `stdin` piped in, for the
+/// `--body-file -` / `--body -` stdin-fed body cases.
+fn run_with_stdin(repo: &Path, data: &Path, args: &[&str], stdin: &str) -> (String, String, bool) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mudpuppy"))
+        .args(args)
+        .current_dir(repo)
+        .env("MUDPUPPY_DATA_DIR", data)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn mudpuppy");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stdin.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().expect("run mudpuppy");
     (
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
@@ -103,6 +132,86 @@ fn add_list_resolve_round_trip() {
         stdout.contains("no matching annotations"),
         "resolved comment should not be open: {stdout}"
     );
+}
+
+/// Read the body of the single annotation in the store under `data`.
+fn only_body(data: &Path) -> String {
+    let store = find_store(data).expect("store file written");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(store).unwrap()).unwrap();
+    v["annotations"][0]["body"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn body_from_stdin_round_trips_multiline() {
+    let repo = repo_with_changes();
+    let data = tempfile::tempdir().unwrap();
+    let (repo, data) = (repo.path(), data.path());
+
+    // `--body-file -` reads stdin (the heredoc form). The body keeps its embedded
+    // newline; the single trailing newline is trimmed.
+    let (_, stderr, ok) = run_with_stdin(
+        repo,
+        data,
+        &[
+            "agent",
+            "comment",
+            "add",
+            "--file",
+            "a_app.rs",
+            "--line",
+            "1",
+            "--body-file",
+            "-",
+        ],
+        "line one\nline two\n",
+    );
+    assert!(ok, "stdin add failed: {stderr}");
+    assert_eq!(only_body(data), "line one\nline two");
+}
+
+#[test]
+fn body_from_file_round_trips_multiline() {
+    let repo = repo_with_changes();
+    let data = tempfile::tempdir().unwrap();
+    let (repo, data) = (repo.path(), data.path());
+
+    let body_path = data.join("body.md");
+    std::fs::write(&body_path, "first line\nsecond line\n").unwrap();
+    let (_, stderr, ok) = run(
+        repo,
+        data,
+        &[
+            "agent",
+            "comment",
+            "add",
+            "--file",
+            "a_app.rs",
+            "--line",
+            "1",
+            "--body-file",
+            body_path.to_str().unwrap(),
+        ],
+    );
+    assert!(ok, "file add failed: {stderr}");
+    assert_eq!(only_body(data), "first line\nsecond line");
+}
+
+#[test]
+fn add_without_a_body_source_is_an_error() {
+    let repo = repo_with_changes();
+    let data = tempfile::tempdir().unwrap();
+    let (repo, data) = (repo.path(), data.path());
+
+    let (_, stderr, ok) = run(
+        repo,
+        data,
+        &[
+            "agent", "comment", "add", "--file", "a_app.rs", "--line", "1",
+        ],
+    );
+    assert!(!ok, "a missing body must fail");
+    assert!(stderr.contains("body is required"), "stderr: {stderr}");
 }
 
 #[test]

@@ -114,6 +114,10 @@ pub enum EventKind {
     /// A newer release was found by the launch-time check. Payload: `{ version }`.
     /// `core.luau` subscribes to it to prompt the user.
     UpdateCheck,
+    /// Installed Claude Code skills are stale (an older version than the binary
+    /// ships). Fired at launch when a refresh is worth offering. Payload:
+    /// `{ version, message }`. `core.luau` subscribes to it to prompt the user.
+    SkillUpdateCheck,
 }
 
 impl EventKind {
@@ -125,6 +129,7 @@ impl EventKind {
             "annotation_added" => EventKind::AnnotationAdded,
             "turn_change" => EventKind::TurnChange,
             "update_check" => EventKind::UpdateCheck,
+            "skill_update_check" => EventKind::SkillUpdateCheck,
             _ => return None,
         })
     }
@@ -494,6 +499,23 @@ impl LuaEngine {
         })
     }
 
+    /// Fire `skill_update_check{version, message}` when the launch-time check
+    /// found stale installed skills. `core.luau` handles the refresh prompt.
+    pub(crate) fn fire_skill_update_check(
+        &self,
+        app: &mut App,
+        version: u32,
+        message: &str,
+    ) -> Result<()> {
+        let message = message.to_string();
+        self.fire(app, EventKind::SkillUpdateCheck, move |lua, _| {
+            let t = lua.create_table()?;
+            t.set("version", version)?;
+            t.set("message", message)?;
+            Ok(t)
+        })
+    }
+
     /// Whether automatic update checks are enabled (the shared flag a config can
     /// turn off). The event loop reads this before launching the check.
     pub(crate) fn update_checks_enabled(&self) -> bool {
@@ -805,6 +827,20 @@ your config). The same primitives are scriptable:
 Set MUDPUPPY_NO_UPDATE_CHECK in the environment to disable the launch check
 without touching your config.
 
+Skills
+------
+Separately from the binary self-update, mudpuppy can refresh the Claude Code
+skill files it wrote with `mudpuppy install claude` when they go stale (an older
+version than this binary ships). At launch, if a stale install is found and you
+haven't skipped that version, it offers to update them. The primitives are
+scriptable:
+  mudpuppy.skills.check()    -> { version = N, message = "…" } if a stale install
+                                should be refreshed, else nil
+  mudpuppy.skills.refresh()  rewrite the installed SKILL.md files to the current
+                                version
+  mudpuppy.skills.skip(n)    record that you skipped version n, so the prompt
+                                stays quiet until a newer one ships
+
 Anchors
 -------
 Annotations remember the code they were attached to and re-locate it when the
@@ -830,6 +866,9 @@ Events
                     payload: { turn = { ... } }
   update_check      once per launch, when the check found a newer release
                     payload: { version = "vX.Y.Z" }  (the default handler prompts)
+  skill_update_check once per launch, when the installed Claude Code skills are
+                    stale and not skipped
+                    payload: { version = N, message = "…" }  (default: prompts)
 
 Examples
 --------
@@ -1382,10 +1421,82 @@ index 333..444 100644
         assert_eq!(engine.status_message().as_deref(), Some("false"));
     }
 
+    /// Serializes the tests that mutate process-global env vars (`HOME`,
+    /// `XDG_CONFIG_HOME`, `MUDPUPPY_CONFIG`), which would otherwise race under the
+    /// parallel test runner.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn skill_skip_suppresses_the_next_check() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<(&str, Option<std::ffi::OsString>)> =
+            [CONFIG_ENV, "XDG_CONFIG_HOME", "HOME"]
+                .iter()
+                .map(|k| (*k, std::env::var_os(k)))
+                .collect();
+
+        // A temp HOME holding a stale (version-0, unstamped) user-level skill
+        // install, so `should_prompt_skill_refresh` sees something to refresh.
+        let home = tempfile::tempdir().unwrap();
+        let skills = home
+            .path()
+            .join(".claude")
+            .join("skills")
+            .join("mudpuppy-pr-review");
+        std::fs::create_dir_all(&skills).unwrap();
+        std::fs::write(skills.join("SKILL.md"), "---\nname: x\n---\nbody\n").unwrap();
+
+        // The config (and thus the skip file beside it) lives under the same temp
+        // tree, isolated from the host.
+        let cfg = home.path().join("config").join("mudpuppy.luau");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::set_var("HOME", home.path());
+        std::env::set_var(CONFIG_ENV, &cfg);
+
+        // Before skipping, `check()` reports the stale install; `skip(version)`
+        // then suppresses it.
+        let engine = LuaEngine::new(None).unwrap();
+        let mut a = app();
+        engine
+            .lua
+            .load(
+                "mudpuppy.command(\"chk\", function()\n\
+                   local s = mudpuppy.skills.check()\n\
+                   print(s and tostring(s.version) or \"nil\")\n\
+                 end)\n\
+                 mudpuppy.command(\"skip\", function() mudpuppy.skills.skip(mudpuppy.skills.check().version) end)\n",
+            )
+            .exec()
+            .unwrap();
+
+        engine.run_command(&mut a, "chk").unwrap();
+        assert_eq!(
+            engine.status_message().as_deref(),
+            Some(crate::install::SKILL_VERSION.to_string().as_str()),
+            "a stale install is reported before skipping"
+        );
+
+        engine.run_command(&mut a, "skip").unwrap();
+        engine.run_command(&mut a, "chk").unwrap();
+        assert_eq!(
+            engine.status_message().as_deref(),
+            Some("nil"),
+            "after skip, check is suppressed"
+        );
+
+        for (k, v) in saved {
+            match v {
+                Some(val) => std::env::set_var(k, val),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
     #[test]
     fn config_path_honors_the_search_order() {
-        // These env vars are process-global; this is the only test that touches
-        // them, so mutating them in sequence is safe.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // These env vars are process-global; the env lock above serializes the
+        // tests that touch them so mutating them in sequence is safe.
         let saved: Vec<(&str, Option<std::ffi::OsString>)> =
             [CONFIG_ENV, "XDG_CONFIG_HOME", "HOME"]
                 .iter()
