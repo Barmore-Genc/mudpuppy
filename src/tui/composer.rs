@@ -340,7 +340,7 @@ impl App {
             // `Enter` (save) and `Esc` (cancel) need `App`; the rest is buffer-local.
             Mode::Normal => match ev.code {
                 KeyCode::Enter => self.save_composer(),
-                KeyCode::Esc => self.composer = None,
+                KeyCode::Esc => self.close_composer(),
                 _ => self.composer.as_mut().unwrap().normal_key(ev),
             },
         }
@@ -357,6 +357,9 @@ impl App {
         let body = composer.body();
         if body.trim().is_empty() {
             self.notice = Some("empty comment discarded".to_string());
+            // Drop the inline placeholder rows the discarded composer reserved
+            // (it was already taken out of `self.composer` above).
+            self.rebuild_view();
             return;
         }
         let Composer {
@@ -393,12 +396,15 @@ impl App {
                     file,
                 ));
                 self.selection_anchor = None;
+                self.rebuild_view();
+                self.focus_composer_row();
             }
             None => self.notice = Some("no diff line under the cursor to comment on".to_string()),
         }
     }
 
-    /// Open the composer for a whole-file comment.
+    /// Open the composer for a whole-file comment. The whole-file composer keeps
+    /// its centered modal, so no inline placeholder is spliced.
     pub(crate) fn comment_file(&mut self) {
         let file = self.current().display_path().to_string();
         self.composer = Some(Composer::new(ComposerTarget::File, file));
@@ -409,12 +415,17 @@ impl App {
     /// no-op with a hint when no annotation is anchored there.
     pub(crate) fn reply(&mut self) {
         match self.annotation_id_at_cursor() {
-            Some(parent) => {
-                let file = self.current().display_path().to_string();
-                self.composer = Some(Composer::new(ComposerTarget::Reply { parent }, file));
-            }
+            Some(parent) => self.open_reply(parent),
             None => self.notice = Some("no annotation on this line to reply to".to_string()),
         }
+    }
+
+    /// Open a reply composer under annotation `parent` and scroll it into view.
+    pub(crate) fn open_reply(&mut self, parent: String) {
+        let file = self.current().display_path().to_string();
+        self.composer = Some(Composer::new(ComposerTarget::Reply { parent }, file));
+        self.rebuild_view();
+        self.focus_composer_row();
     }
 
     /// Open the composer to edit the user's own annotation on the cursor line,
@@ -425,6 +436,12 @@ impl App {
             self.notice = Some("no annotation on this line to edit".to_string());
             return;
         };
+        self.open_edit(id);
+    }
+
+    /// Open the edit composer for annotation `id`, prefilled. Guards against
+    /// editing the agent's annotations.
+    pub(crate) fn open_edit(&mut self, id: String) {
         let Some(a) = self.annotations.iter().find(|a| a.id == id) else {
             return;
         };
@@ -432,11 +449,29 @@ impl App {
             self.notice = Some("can only edit your own annotations".to_string());
             return;
         }
+        let (body, severity, tag) = (a.body.clone(), a.severity, a.tag);
         let file = self.current().display_path().to_string();
         let mut composer = Composer::new(ComposerTarget::Edit { id }, file);
-        composer.set_body(&a.body);
-        composer.severity = a.severity;
-        composer.tag = a.tag;
+        composer.set_body(&body);
+        composer.severity = severity;
+        composer.tag = tag;
         self.composer = Some(composer);
+        self.rebuild_view();
+        self.focus_composer_row();
+    }
+
+    /// A double-click on a comment row: reply to it, or edit it when it is the
+    /// user's own. Drives the mouse path in `dispatch_click`.
+    pub(crate) fn reply_or_edit(&mut self, id: String) {
+        let own = self
+            .annotations
+            .iter()
+            .find(|a| a.id == id)
+            .is_some_and(|a| a.author == crate::domain::Author::User);
+        if own {
+            self.open_edit(id);
+        } else {
+            self.open_reply(id);
+        }
     }
 }

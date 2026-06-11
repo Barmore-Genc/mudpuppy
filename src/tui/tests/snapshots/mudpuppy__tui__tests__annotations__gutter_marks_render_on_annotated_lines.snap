@@ -1,5 +1,6 @@
 ---
 source: src/tui/tests/annotations.rs
+assertion_line: 36
 expression: screen(&term)
 ---
 "┌ Files (7) │ Annotations ─┐┌ src/alpha.rs [modified] 1/7  ●2 ─────────────────────────────────────┐"
@@ -7,16 +8,16 @@ expression: screen(&term)
 "│M src/long.rs  +4 -2      ││     1     1   use std::io;                                           │"
 "│M README.md  +1 -1        ││     2       - let x = 1;                                             │"
 "│A src/new_module.rs  +3 -0││●          2 + let x = 2;                                             │"
-"│D old.txt  +0 -2          ││           3 + let y = 3;                                             │"
-"│A assets/logo.png  +0 -0  ││●    3     4   println!("{x}");                                       │"
-"│R src/relocated.rs  +0 -0 ││     4     5   done                                                   │"
+"│D old.txt  +0 -2          ││ ▏ ● agent [open] body for blk00001                                   │"
+"│A assets/logo.png  +0 -0  ││           3 + let y = 3;                                             │"
+"│R src/relocated.rs  +0 -0 ││●    3     4   println!("{x}");                                       │"
+"│                          ││ ▏ ● user [open] body for inf00002                                    │"
+"│                          ││     4     5   done                                                   │"
 "│                          ││   ↕ 15 hidden lines — show more                                      │"
 "│                          ││ @@ -20,2 +21,2 @@ fn beta() {                                        │"
 "│                          ││    20    21   let beta = compute();                                  │"
 "│                          ││    21       - old beta                                               │"
 "│                          ││          22 + new beta                                               │"
-"│                          ││                                                                      │"
-"│                          ││                                                                      │"
 "│                          ││                                                                      │"
 "│                          ││                                                                      │"
 "│                          ││                                                                      │"

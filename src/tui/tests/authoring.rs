@@ -488,3 +488,179 @@ fn esc_clears_the_visual_selection() {
     a.handle_key(key(KeyCode::Esc));
     assert!(a.selection_anchor.is_none(), "Esc leaves visual mode");
 }
+
+// --- inline comment threads & inline compose box ---------------------------
+
+/// Count the `Row::Comment` rows belonging to annotation `id` in the built view.
+fn comment_rows_for(a: &App, id: &str) -> usize {
+    a.view
+        .rows
+        .iter()
+        .filter(|r| matches!(r, Row::Comment(c) if c.id == id))
+        .count()
+}
+
+/// Index of the first `Row::Composer` placeholder, if any.
+fn composer_row(a: &App) -> Option<usize> {
+    a.view
+        .rows
+        .iter()
+        .position(|r| matches!(r, Row::Composer { .. }))
+}
+
+#[test]
+fn a_thread_renders_inline_under_its_line() {
+    // A comment on line 2 splices a `Row::Comment` directly after that diff line.
+    let (mut a, _dir) = stored_app_with(vec![note(
+        "blk00001",
+        Author::Agent,
+        "src/alpha.rs",
+        Side::Right,
+        2,
+        Severity::Blocker,
+    )]);
+    // Render once so the width is measured and the threads re-wrap.
+    let _ = drive(&mut a, 100, 24, &[]);
+
+    let line_idx = a
+        .view
+        .rows
+        .iter()
+        .position(|r| matches!(r, Row::Line(l, _) if l.new_lineno == Some(2)))
+        .expect("the diff line for new-side 2");
+    match &a.view.rows[line_idx + 1] {
+        Row::Comment(c) => {
+            assert!(c.header, "the first comment row carries the header");
+            assert_eq!(c.id, "blk00001");
+        }
+        _ => panic!("expected a comment row directly under the anchored line"),
+    }
+}
+
+#[test]
+fn a_long_body_wraps_to_several_comment_rows() {
+    let mut long = note(
+        "blk00001",
+        Author::Agent,
+        "src/alpha.rs",
+        Side::Right,
+        2,
+        Severity::Blocker,
+    );
+    // A body far wider than the diff pane must wrap to more than one row.
+    long.body = "word ".repeat(80);
+    let (mut a, _dir) = stored_app_with(vec![long]);
+    let _ = drive(&mut a, 100, 24, &[]);
+    assert!(
+        comment_rows_for(&a, "blk00001") > 1,
+        "a long body wraps to several single-line rows"
+    );
+}
+
+#[test]
+fn the_compose_box_appears_inline_under_the_cursor_line() {
+    let (mut a, _dir) = stored_app();
+    cursor_to_new_line(&mut a, 1);
+    leader(&mut a, "cc");
+    let idx = composer_row(&a).expect("a composer placeholder was spliced in");
+    // It sits just after the anchored diff line (new-side 1).
+    let line_idx = a
+        .view
+        .rows
+        .iter()
+        .position(|r| matches!(r, Row::Line(l, _) if l.new_lineno == Some(1)))
+        .unwrap();
+    assert_eq!(idx, line_idx + 1, "the box follows the cursor line");
+    assert_eq!(
+        a.cursor, idx,
+        "the cursor moves onto the composer to reveal it"
+    );
+}
+
+#[test]
+fn cancelling_the_inline_composer_removes_its_rows() {
+    let (mut a, _dir) = stored_app();
+    cursor_to_new_line(&mut a, 1);
+    leader(&mut a, "cc");
+    assert!(composer_row(&a).is_some());
+    // Esc → normal, Esc → cancel.
+    a.handle_key(key(KeyCode::Esc));
+    a.handle_key(key(KeyCode::Esc));
+    assert!(a.composer.is_none(), "the composer closed");
+    assert!(
+        composer_row(&a).is_none(),
+        "its placeholder rows are gone after the rebuild"
+    );
+}
+
+#[test]
+fn the_reply_box_appears_below_the_thread() {
+    let (mut a, _dir) = stored_app_with(vec![note(
+        "agent001",
+        Author::Agent,
+        "src/alpha.rs",
+        Side::Right,
+        1,
+        Severity::Warning,
+    )]);
+    cursor_to_new_line(&mut a, 1);
+    leader(&mut a, "cr");
+    let composer = composer_row(&a).expect("a reply composer placeholder");
+    let last_comment = a
+        .view
+        .rows
+        .iter()
+        .rposition(|r| matches!(r, Row::Comment(c) if c.id == "agent001"))
+        .expect("the parent comment's rows");
+    assert!(
+        composer > last_comment,
+        "the reply box sits below the thread it replies to"
+    );
+}
+
+#[test]
+fn interleave_keeps_hunk_starts_pointing_at_hunk_rows() {
+    // Two annotations on the first hunk shift every later row down; `hunk_starts`
+    // must be recomputed so `}`/`{` still land on real hunk headers.
+    let (mut a, _dir) = stored_app_with(alpha_notes_for_interleave());
+    let _ = drive(&mut a, 100, 24, &[]);
+
+    assert!(!a.view.hunk_starts.is_empty(), "alpha.rs has hunks");
+    for &s in &a.view.hunk_starts {
+        assert!(
+            matches!(a.view.rows[s], Row::Hunk(_)),
+            "every recomputed hunk_start indexes a Row::Hunk"
+        );
+    }
+    // The second hunk's start is pushed past the spliced comment rows: there is
+    // at least one comment row before it.
+    let comments = a
+        .view
+        .rows
+        .iter()
+        .filter(|r| matches!(r, Row::Comment(_)))
+        .count();
+    assert!(comments >= 2, "both threads spliced their comment rows");
+}
+
+/// Two single-line notes on alpha.rs's first hunk, for the interleave test.
+fn alpha_notes_for_interleave() -> Vec<Annotation> {
+    vec![
+        note(
+            "blk00001",
+            Author::Agent,
+            "src/alpha.rs",
+            Side::Right,
+            2,
+            Severity::Blocker,
+        ),
+        note(
+            "inf00002",
+            Author::User,
+            "src/alpha.rs",
+            Side::Right,
+            4,
+            Severity::Info,
+        ),
+    ]
+}

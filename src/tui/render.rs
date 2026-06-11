@@ -14,8 +14,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, Focus, Hits, Row, Sidebar};
-use super::composer::{Composer, Mode};
+use super::app::{App, CommentLine, Focus, Hits, Row, Sidebar};
+use super::composer::{Composer, ComposerTarget, Mode};
 use crate::command::CommandPalette;
 use crate::diff::{DiffLine, FileStatus, LineKind};
 use crate::domain::{Author, Severity, Side, Status, Tag, Target};
@@ -94,12 +94,16 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
         app.hits.palette_inner = Some(inner);
         app.hits.palette_offset = offset;
     }
+    // Line/reply/edit composers draw inline over their reserved rows inside
+    // `render_diff`; only the whole-file composer keeps the centered modal.
     if let Some(composer) = app.composer.as_ref() {
-        let area = frame.area();
-        let (rect, save, cancel) = render_composer(frame, area, composer);
-        app.hits.composer_outer = Some(rect);
-        app.hits.composer_save_span = Some(save);
-        app.hits.composer_cancel_span = Some(cancel);
+        if matches!(composer.target, ComposerTarget::File) {
+            let area = frame.area();
+            let (rect, save, cancel) = render_composer(frame, area, composer);
+            app.hits.composer_outer = Some(rect);
+            app.hits.composer_save_span = Some(save);
+            app.hits.composer_cancel_span = Some(cancel);
+        }
     }
     // A modal prompt sits on top of everything (only one overlay is open at a
     // time in practice, but draw it last so it is unambiguously topmost).
@@ -217,6 +221,9 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
 /// has any annotations every row reserves the mark column so text stays aligned.
 fn render_diff(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == Focus::Diff;
+    // Re-wrap inline comment threads to the current pane width before slicing,
+    // so each `Row::Comment` stays one visual line (the row↔line invariant).
+    app.sync_comment_width(area.width.saturating_sub(2));
     let marks = app.line_marks();
     let gutter = !marks.is_empty();
     let height = app.diff_height.max(1);
@@ -294,6 +301,41 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &mut App) {
         )
     };
     frame.render_widget(Paragraph::new(lines).block(bordered(&title, focused)), area);
+
+    // The inline (line/reply/edit) composer draws as a popover over its reserved
+    // `Row::Composer` placeholder. The `Clear` inside `render_compose_box` wipes
+    // whatever showed through. The whole-file composer is the centered modal and
+    // is handled by the top-level `render`.
+    if let Some(composer) = app.composer.as_ref() {
+        if !matches!(composer.target, ComposerTarget::File) {
+            if let Some((idx, reserved)) =
+                app.view.rows.iter().enumerate().find_map(|(i, r)| match r {
+                    Row::Composer { rows } => Some((i, *rows)),
+                    _ => None,
+                })
+            {
+                // On-screen y of the placeholder's first row (inside the border,
+                // below any file-level header rows).
+                if idx >= app.scroll {
+                    let inner = inner_rect(area);
+                    let y = inner.y + app.hits.diff_header_rows + (idx - app.scroll) as u16;
+                    if y < inner.y + inner.height {
+                        let avail_h = (inner.y + inner.height).saturating_sub(y);
+                        let box_rect = Rect {
+                            x: inner.x,
+                            y,
+                            width: inner.width,
+                            height: reserved.min(avail_h),
+                        };
+                        let (save, cancel) = render_compose_box(frame, box_rect, composer);
+                        app.hits.composer_outer = Some(box_rect);
+                        app.hits.composer_save_span = Some(save);
+                        app.hits.composer_cancel_span = Some(cancel);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The annotations sidebar tab: every annotation in the store across all files,
@@ -655,16 +697,22 @@ fn render_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) -> (R
     (area, inner, offset)
 }
 
-/// The modal comment composer: the target anchor, severity + tag chips, the
-/// body with a visible caret, and a key-hint footer.
+/// The whole-file comment composer as a centered modal (the `File` target keeps
+/// the modal; line/reply/edit targets draw inline via [`render_compose_box`]).
 fn render_composer(
     frame: &mut Frame,
     area: Rect,
     composer: &Composer,
 ) -> (Rect, super::app::Hitspan, super::app::Hitspan) {
     let area = centered_rect(72, (area.height * 6 / 10).max(8), area);
-    let block = bordered(" Comment ", true);
+    let (save, cancel) = render_compose_box(frame, area, composer);
+    (area, save, cancel)
+}
 
+/// The composer body lines (anchor, severity+tag chips, mode label, the body
+/// with a caret, a blank spacer) — everything above the footer, which is laid
+/// out by [`render_compose_box`] since its hit spans depend on the box origin.
+fn compose_lines(composer: &Composer) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled("on ", Style::default().fg(Color::DarkGray)),
@@ -730,11 +778,23 @@ fn render_composer(
     }
 
     lines.push(Line::raw(""));
+    lines
+}
+
+/// Draw the bordered composer box at `area` (a `Clear` underneath so whatever it
+/// covers doesn't show through), returning the save/cancel footer hit spans at
+/// their on-screen coordinates so the mouse handler is the same inline or modal.
+pub(super) fn render_compose_box(
+    frame: &mut Frame,
+    area: Rect,
+    composer: &Composer,
+) -> (super::app::Hitspan, super::app::Hitspan) {
+    let block = bordered(" Comment ", true);
+    let mut lines = compose_lines(composer);
+
     // The save / cancel labels are styled as button-like chips (green/red on
-    // black, bold) so they read as something clickable rather than just an
-    // informational footer (issue #29). The rest of the footer keeps the
-    // existing dim hint look. Layout below the chips records their column
-    // ranges so the mouse can hit them.
+    // black, bold) so they read as clickable. Their column ranges are recorded
+    // below so the mouse can hit them.
     let dim = Style::default().fg(Color::DarkGray);
     let save_chip_text = " save ";
     let cancel_chip_text = " cancel ";
@@ -783,7 +843,7 @@ fn render_composer(
 
     let save_span: super::app::Hitspan = (footer_y, save_x0, save_x1);
     let cancel_span: super::app::Hitspan = (footer_y, cancel_x0, cancel_x1);
-    (area, save_span, cancel_span)
+    (save_span, cancel_span)
 }
 
 /// The centered help overlay listing every keybinding. The overlay is
@@ -955,7 +1015,69 @@ fn row_to_line(row: &Row, gutter: bool, marks: &HashMap<(Side, u32), Severity>) 
                     .add_modifier(Modifier::ITALIC),
             ))
         }
+        Row::Comment(c) => comment_line(c, pad),
+        // The composer popover is drawn over its reserved rows separately; the
+        // placeholder itself renders blank so nothing shows through the edges.
+        Row::Composer { .. } => Line::raw(pad.to_string()),
     }
+}
+
+/// Render one inline comment visual line: a `▏` thread bar, then on the header
+/// line `● author {tag?} [status] {text}`, and on continuation lines just the
+/// wrapped body text. Resolved/withdrawn comments render dimmed.
+fn comment_line(c: &CommentLine, pad: &str) -> Line<'static> {
+    let indent = "  ".repeat(c.depth);
+    let dim = if c.dimmed {
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let mut spans = vec![Span::styled(format!("{pad}{indent}▏ "), dim)];
+
+    match c.meta.as_ref().filter(|_| c.header) {
+        Some(meta) => {
+            let mark_style = if c.dimmed {
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM)
+            } else {
+                Style::default().fg(severity_color(meta.severity))
+            };
+            spans.push(Span::styled(format!("{MARK} "), mark_style));
+            let label_style = if c.dimmed {
+                dim
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let tag = meta
+                .tag
+                .map(|t| format!("{} ", tag_symbol(t)))
+                .unwrap_or_default();
+            spans.push(Span::styled(
+                format!(
+                    "{} {}[{}] ",
+                    author_word(meta.author),
+                    tag,
+                    ann_status(meta.status)
+                ),
+                label_style,
+            ));
+        }
+        None => {
+            // Continuation lines align the body under the header text.
+            spans.push(Span::raw("  "));
+        }
+    }
+
+    let text_style = if c.dimmed {
+        dim
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    spans.push(Span::styled(c.text.clone(), text_style));
+    Line::from(spans)
 }
 
 /// Format a content line: an optional annotation mark, an `old new` gutter, a

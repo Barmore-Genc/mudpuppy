@@ -21,7 +21,9 @@ use ratatui::layout::Rect;
 use crate::blob::{self, BlobSide};
 use crate::command::CommandPalette;
 use crate::diff::{DiffLine, FileDiff, GapPos, LineKind};
-use crate::domain::{AnchorScope, Annotation, Author, Severity, Side, StateFile, Target, Turn};
+use crate::domain::{
+    AnchorScope, Annotation, Author, Severity, Side, StateFile, Status, Target, Turn,
+};
 use crate::highlight::{Highlighter, HlLine};
 use crate::lua::keys::KeyChord;
 use crate::picker::Picker;
@@ -137,6 +139,43 @@ pub(crate) enum Row {
         can_up: bool,
         can_down: bool,
     },
+    /// One pre-wrapped visual line of an inline comment thread, spliced in
+    /// directly under the diff line its annotation anchors to (GitHub style).
+    /// Bodies are wrapped to single-line rows so the "1 row = 1 visual line"
+    /// invariant (scroll slicing, `diff_row_at`, `follow_cursor`) still holds.
+    /// Non-selectable: an inert cursor stop, like a hunk header.
+    Comment(CommentLine),
+    /// A placeholder reserving `rows` visual lines for the inline composer
+    /// popover. The live `Composer` (buffer/cursor/severity/tag/target) is read
+    /// from `App::composer` at render time and drawn over these rows.
+    Composer { rows: u16 },
+}
+
+/// One wrapped visual line of an inline comment thread row ([`Row::Comment`]).
+/// The first visual line of a comment carries the header (mark + author + tag +
+/// status); continuation lines carry only wrapped body text.
+pub(crate) struct CommentLine {
+    /// Owning annotation id (so a click can reply to / edit the right comment).
+    pub(crate) id: String,
+    /// Indent depth: 0 for a top-level comment, 1 for a reply.
+    pub(crate) depth: usize,
+    /// True on the first visual line of a comment (carries the header prefix);
+    /// false on wrapped continuation lines (body text only).
+    pub(crate) header: bool,
+    /// The wrapped body text for this visual line (empty on a header-only line).
+    pub(crate) text: String,
+    /// Header fields, present only on the header line.
+    pub(crate) meta: Option<CommentMeta>,
+    /// Dim the row (resolved / withdrawn comments read as settled).
+    pub(crate) dimmed: bool,
+}
+
+/// The header fields shown on a comment's first visual line.
+pub(crate) struct CommentMeta {
+    pub(crate) author: Author,
+    pub(crate) severity: Severity,
+    pub(crate) tag: Option<crate::domain::Tag>,
+    pub(crate) status: Status,
 }
 
 /// How far one gap of hidden context has been revealed from each edge.
@@ -445,6 +484,10 @@ pub(crate) struct App {
     /// already returns the name from `handle_palette_key`; mouse stashes here
     /// because `handle_mouse_event` returns only a bool.
     pending_command: Option<String>,
+    /// Diff inner width the inline comment threads were last wrapped to. The
+    /// renderer rebuilds the view when the pane resizes so wrapped bodies stay
+    /// pre-wrapped to single-line rows (the "1 row = 1 visual line" invariant).
+    pub(super) comment_width: u16,
 }
 
 impl App {
@@ -497,6 +540,7 @@ impl App {
             last_press: None,
             last_click: None,
             pending_command: None,
+            comment_width: 0,
         }
     }
 
@@ -523,6 +567,9 @@ impl App {
         }
         self.relocate_annotations();
         self.merge_synthetic_files();
+        // Inline threads live in `view.rows`, so the view must rebuild once the
+        // store is attached for comments to appear under their lines.
+        self.rebuild_view();
     }
 
     /// Refresh the relocation scan windows from the Lua engine's config (called
@@ -635,6 +682,8 @@ impl App {
         }
         self.relocate_annotations();
         self.merge_synthetic_files();
+        // Pick up another process's comment writes in the inline threads too.
+        self.rebuild_view();
     }
 
     /// Release the turn back to the agent (PLAN.md §6): bump `seq`, take
@@ -1228,7 +1277,8 @@ impl App {
     }
 
     /// Rebuild the current file's view from its plan, supplying the Head blob so
-    /// revealed context lines can be drawn.
+    /// revealed context lines can be drawn, then splice in any inline comment
+    /// threads and the open composer.
     pub(crate) fn rebuild_view(&mut self) {
         let blob = match self.current_path() {
             Some(path) => self.blob_for(&path, BlobSide::Head),
@@ -1238,9 +1288,50 @@ impl App {
         if let Some(file) = self.files.get(self.selected) {
             self.view = FileView::build(file, blob.as_deref(), &plan);
         }
+        self.interleave_annotations();
         self.clamp_cursor();
     }
 
+    /// Set the inline-comment wrap width from the renderer's measured diff inner
+    /// width and rebuild if it changed, so wrapped bodies stay pre-wrapped to
+    /// single-line rows after a resize. Called once per frame before slicing.
+    pub(crate) fn sync_comment_width(&mut self, width: u16) {
+        if width != self.comment_width {
+            self.comment_width = width;
+            self.rebuild_view();
+        }
+    }
+
+    /// Move the cursor onto the inline composer placeholder and scroll it into
+    /// view. Called when a composer opens so the inline box is visible.
+    pub(crate) fn focus_composer_row(&mut self) {
+        if let Some(idx) = self
+            .view
+            .rows
+            .iter()
+            .position(|r| matches!(r, Row::Composer { .. }))
+        {
+            self.set_cursor(idx as i64);
+        }
+    }
+
+    /// Close the open composer and rebuild so its inline placeholder rows go
+    /// away. The single exit path for Esc-cancel, click-cancel, and the
+    /// empty-body discard.
+    pub(crate) fn close_composer(&mut self) {
+        self.composer = None;
+        self.rebuild_view();
+    }
+
+    /// Splice inline comment threads (and the open composer) into the freshly
+    /// built code rows. Runs after `FileView::build`, which stays annotation-free.
+    ///
+    /// Each thread (a line-scoped parent plus its replies) is wrapped to the
+    /// current diff inner width and emitted as single-line [`Row::Comment`] rows
+    /// just after the diff line it anchors to. The open composer reserves
+    /// placeholder [`Row::Composer`] rows at its target so following content is
+    /// pushed down. Hunk start indices are recomputed because the splice shifts
+    /// them.
     /// New-side total line count for the current file, if its Head blob is
     /// cached (drives the trailing-gap calculation).
     fn current_new_total(&self) -> Option<u32> {
@@ -1505,7 +1596,7 @@ impl App {
         }
         if let Some(span) = self.hits.composer_cancel_span {
             if Self::in_span(span, col, row) {
-                self.composer = None;
+                self.close_composer();
                 return true;
             }
         }
@@ -1726,14 +1817,30 @@ impl App {
             if p == r {
                 self.focus = Focus::Diff;
                 self.selection_anchor = None;
-                self.set_cursor(r as i64);
+                // A double-click on an existing comment row replies (or edits
+                // the user's own); on a code line it opens a fresh comment.
                 if double {
-                    self.add_comment();
+                    if let Some(comment) = self.comment_at_row(r) {
+                        self.reply_or_edit(comment);
+                    } else {
+                        self.set_cursor(r as i64);
+                        self.add_comment();
+                    }
+                } else {
+                    self.set_cursor(r as i64);
                 }
                 return true;
             }
         }
         false
+    }
+
+    /// The owning annotation id of the [`Row::Comment`] at `idx`, if any.
+    fn comment_at_row(&self, idx: usize) -> Option<String> {
+        match self.view.rows.get(idx) {
+            Some(Row::Comment(c)) => Some(c.id.clone()),
+            _ => None,
+        }
     }
 
     /// Preview the highlighted annotation in the diff without committing focus,
