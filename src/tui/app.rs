@@ -185,7 +185,8 @@ impl FileView {
                 ));
                 return FileView { rows, hunk_starts };
             };
-            let highlighter = Highlighter::for_path(file.display_path());
+            let highlighter =
+                Highlighter::for_path(file.display_path(), blob.first().map(String::as_str));
             let texts: Vec<&str> = blob.iter().map(String::as_str).collect();
             let highlights = highlighter.as_ref().map(|hl| hl.hunk(&texts));
             for (idx, text) in texts.iter().enumerate() {
@@ -209,7 +210,10 @@ impl FileView {
         // extension) means every line falls back to plain per-kind colouring.
         // Highlighting happens here, when a file is *opened*, so the cost tracks
         // the opened file rather than the whole 1000-file diff.
-        let highlighter = Highlighter::for_path(file.display_path());
+        let highlighter = Highlighter::for_path(
+            file.display_path(),
+            blob.and_then(|b| b.first()).map(String::as_str),
+        );
 
         let hunks = file.hunks();
         let new_total = blob.map(|b| b.len() as u32);

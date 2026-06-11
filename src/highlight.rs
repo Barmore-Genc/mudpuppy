@@ -26,7 +26,7 @@ use std::sync::OnceLock;
 
 use ratatui::style::Color;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Theme, ThemeSet};
+use syntect::highlighting::Theme;
 use syntect::parsing::{SyntaxReference, SyntaxSet};
 
 /// One highlighted line: contiguous `(colour, text)` runs whose concatenated
@@ -34,8 +34,8 @@ use syntect::parsing::{SyntaxReference, SyntaxSet};
 /// only their colour — see TESTING.md on why that keeps the `.snap` grid stable).
 pub type HlLine = Vec<(Color, String)>;
 
-/// The loaded syntect assets: the default syntax definitions and the one theme
-/// we colour with. Built once and shared.
+/// The loaded syntect assets: the syntax definitions and the one theme we colour
+/// with. Built once and shared.
 struct Assets {
     syntaxes: SyntaxSet,
     theme: Theme,
@@ -44,12 +44,16 @@ struct Assets {
 fn assets() -> &'static Assets {
     static ASSETS: OnceLock<Assets> = OnceLock::new();
     ASSETS.get_or_init(|| {
-        // `_newlines` is the variant whose rules expect a trailing `\n`, which is
-        // what `hunk` feeds in for correct end-of-line tokenization.
-        let syntaxes = SyntaxSet::load_defaults_newlines();
-        // A dark theme that reads well on the TUI's dark background; this is one
-        // of the defaults syntect ships, so no asset files to vendor.
-        let theme = ThemeSet::load_defaults().themes["base16-ocean.dark"].clone();
+        // `two-face` bundles the Sublime/bat syntax and theme set, far broader
+        // than syntect's small built-in defaults — so unfamiliar languages get
+        // real highlighting instead of falling back to flat per-kind colour.
+        // The `_newlines` variant's rules expect a trailing `\n`, which is what
+        // `hunk` feeds in for correct end-of-line tokenization.
+        let syntaxes = two_face::syntax::extra_newlines();
+        // A dark theme that reads well on the TUI's dark background.
+        let theme = two_face::theme::extra()
+            .get(two_face::theme::EmbeddedThemeName::Base16OceanDark)
+            .clone();
         Assets { syntaxes, theme }
     })
 }
@@ -61,12 +65,18 @@ pub struct Highlighter {
 }
 
 impl Highlighter {
-    /// Resolve the language for `path` by its extension, or `None` when nothing
-    /// matches — the caller then renders the file without highlighting.
-    pub fn for_path(path: &str) -> Option<Highlighter> {
+    /// Resolve the language for `path`, or `None` when nothing matches — the
+    /// caller then renders the file without highlighting. Tries the file
+    /// extension first, then `first_line`'s content (e.g. a `#!` shebang) so a
+    /// known interpreter still highlights when the extension is missing or
+    /// unrecognized.
+    pub fn for_path(path: &str, first_line: Option<&str>) -> Option<Highlighter> {
         let assets = assets();
-        let ext = Path::new(path).extension()?.to_str()?;
-        let syntax = assets.syntaxes.find_syntax_by_extension(ext)?;
+        let syntax = Path::new(path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .and_then(|ext| assets.syntaxes.find_syntax_by_extension(ext))
+            .or_else(|| first_line.and_then(|l| assets.syntaxes.find_syntax_by_first_line(l)))?;
         Some(Highlighter { syntax })
     }
 
@@ -113,13 +123,32 @@ mod tests {
 
     #[test]
     fn unknown_extension_has_no_highlighter() {
-        assert!(Highlighter::for_path("notes.unknownext").is_none());
-        assert!(Highlighter::for_path("Makefile-with-no-ext").is_none());
+        assert!(Highlighter::for_path("notes.unknownext", None).is_none());
+        assert!(Highlighter::for_path("Makefile-with-no-ext", None).is_none());
+    }
+
+    #[test]
+    fn first_line_resolves_when_extension_is_unknown() {
+        // No usable extension, but a `#!` shebang names the interpreter.
+        let hl = Highlighter::for_path("script", Some("#!/usr/bin/env python3"));
+        assert!(hl.is_some(), "shebang should resolve a syntax");
+    }
+
+    #[test]
+    fn common_non_rust_languages_resolve() {
+        // two-face's broad set covers languages syntect's defaults miss; these
+        // are the kind of files that used to render flat green/red.
+        for path in ["main.go", "app.py", "lib.rb", "index.ts", "config.toml"] {
+            assert!(
+                Highlighter::for_path(path, None).is_some(),
+                "{path} should resolve to a syntax"
+            );
+        }
     }
 
     #[test]
     fn rust_keyword_gets_a_distinct_colour() {
-        let hl = Highlighter::for_path("src/lib.rs").expect("rust syntax");
+        let hl = Highlighter::for_path("src/lib.rs", None).expect("rust syntax");
         let line = hl.hunk(&["let x = 1;"]).pop().unwrap();
 
         // The runs reconstruct the original line exactly — only colour is added.
@@ -141,7 +170,7 @@ mod tests {
 
     #[test]
     fn highlighting_preserves_every_line_and_its_text() {
-        let hl = Highlighter::for_path("a.rs").unwrap();
+        let hl = Highlighter::for_path("a.rs", None).unwrap();
         let lines = ["fn main() {", "    let s = \"hi\";", "}"];
         let out = hl.hunk(&lines);
         assert_eq!(out.len(), lines.len());
