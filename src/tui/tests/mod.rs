@@ -35,6 +35,7 @@ mod authoring;
 mod expansion;
 mod keymap;
 mod mouse;
+mod relocation;
 mod rendering;
 mod turns;
 
@@ -143,6 +144,7 @@ fn note(id: &str, author: Author, file: &str, side: Side, line: u32, sev: Severi
         end_line: None,
         side,
         scope: AnchorScope::Line,
+        signature: None,
         severity: sev,
         tag: None,
         status: Status::Open,

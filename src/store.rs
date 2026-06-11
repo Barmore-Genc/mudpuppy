@@ -152,6 +152,7 @@ mod tests {
             end_line: None,
             side: Side::Right,
             scope: AnchorScope::Line,
+            signature: None,
             severity: Severity::Suggestion,
             tag: None,
             status: Status::Open,

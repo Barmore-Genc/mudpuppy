@@ -67,6 +67,37 @@ type Prompts = Rc<RefCell<Vec<Function>>>;
 /// removed disable line reverts.
 type UpdateChecks = Rc<RefCell<bool>>;
 
+/// A relocation scan window (in lines), shared so the `mudpuppy.anchor` setters
+/// can change it and the getters can read it. Reset to the default on a config
+/// reload (like [`Leader`]).
+type AnchorWindow = Rc<RefCell<i64>>;
+
+/// The pair of relocation scan windows (see [`crate::anchor::Params`]), bundled
+/// so they pass as one argument and reset together on reload.
+#[derive(Clone)]
+struct AnchorWindows {
+    advanced: AnchorWindow,
+    fallback: AnchorWindow,
+}
+
+impl AnchorWindows {
+    /// Both windows at the engine defaults.
+    fn defaults() -> AnchorWindows {
+        let p = crate::anchor::Params::default();
+        AnchorWindows {
+            advanced: Rc::new(RefCell::new(p.advanced_match_window)),
+            fallback: Rc::new(RefCell::new(p.fallback_match_window)),
+        }
+    }
+
+    /// Reset both windows to the engine defaults (on config reload).
+    fn reset(&self) {
+        let p = crate::anchor::Params::default();
+        *self.advanced.borrow_mut() = p.advanced_match_window;
+        *self.fallback.borrow_mut() = p.fallback_match_window;
+    }
+}
+
 /// A lifecycle/store event a script can subscribe to with `mudpuppy.on`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EventKind {
@@ -115,6 +146,8 @@ pub struct LuaEngine {
     prompts: Prompts,
     /// Whether automatic update checks are on (default true, reset on reload).
     update_checks: UpdateChecks,
+    /// The configured relocation scan windows (reset on reload).
+    anchor_windows: AnchorWindows,
     /// Where the user config lives (if anywhere). `None` disables user config —
     /// used by tests so the default keymap is exercised in isolation.
     config_path: Option<PathBuf>,
@@ -145,6 +178,9 @@ impl LuaEngine {
         let prompts: Prompts = Rc::new(RefCell::new(Vec::new()));
         // Automatic update checks are on unless the user config disables them.
         let update_checks: UpdateChecks = Rc::new(RefCell::new(true));
+        // The relocation windows default to the engine defaults; a config can
+        // override them with `mudpuppy.anchor.set_{advanced,fallback}_match_window`.
+        let anchor_windows = AnchorWindows::defaults();
         let status: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
         // Redirect `print` to the status buffer — the TUI owns the screen, so a
@@ -167,6 +203,7 @@ impl LuaEngine {
             commands.clone(),
             leader.clone(),
             update_checks.clone(),
+            anchor_windows.clone(),
         )
         .map_err(|e| anyhow!("building the mudpuppy table: {e}"))?;
         lua.globals()
@@ -194,6 +231,7 @@ impl LuaEngine {
             leader,
             prompts,
             update_checks,
+            anchor_windows,
             config_path,
             status,
         };
@@ -248,9 +286,21 @@ impl LuaEngine {
         // Same for the update-check flag: default on, then let the config disable
         // it again if its skip line is still present.
         *self.update_checks.borrow_mut() = true;
+        // And the relocation windows: back to the engine defaults, then let the
+        // config set them again.
+        self.anchor_windows.reset();
         self.prompts.borrow_mut().clear();
         *self.status.borrow_mut() = None;
         self.load_scripts(false)
+    }
+
+    /// The currently-configured relocation scan windows as `(advanced, fallback)`,
+    /// so the loop can push them into `App` for its on-reload relocation.
+    pub fn anchor_windows(&self) -> (i64, i64) {
+        (
+            *self.anchor_windows.advanced.borrow(),
+            *self.anchor_windows.fallback.borrow(),
+        )
     }
 
     /// The latest script/config message to show in the status bar, if any.
@@ -755,6 +805,19 @@ your config). The same primitives are scriptable:
 Set MUDPUPPY_NO_UPDATE_CHECK in the environment to disable the launch check
 without touching your config.
 
+Anchors
+-------
+Annotations remember the code they were attached to and re-locate it when the
+file changes. A primary "advanced" scan does fuzzy (edit-distance) matching in a
+tight window around the original line; if it finds nothing confident, a wider
+"fallback" scan looks for the exact line text to catch a line that moved further
+(e.g. a relocated function). Each window: n>0 = scan ±n lines around the
+original position; 0 = scan the whole file; negative = disable that scan.
+  mudpuppy.anchor.advanced_match_window()       -> the advanced (fuzzy) window
+  mudpuppy.anchor.set_advanced_match_window(n)  set it (default 50)
+  mudpuppy.anchor.fallback_match_window()       -> the fallback (exact) window
+  mudpuppy.anchor.set_fallback_match_window(n)  set it (default 1000)
+
 Events
 ------
   startup           once, after the config first loads
@@ -868,6 +931,7 @@ index 333..444 100644
             end_line: None,
             side: Side::Right,
             scope: AnchorScope::Line,
+            signature: None,
             severity: Severity::Warning,
             tag: None,
             status: Status::Open,
@@ -1263,6 +1327,43 @@ index 333..444 100644
         let mut a = app();
         engine.run_command(&mut a, "flag").unwrap();
         assert_eq!(engine.status_message().as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn anchor_windows_default_and_are_config_settable() {
+        // Defaults mirror the engine defaults.
+        let defaults = crate::anchor::Params::default();
+        let (_dir, path) = config(
+            "mudpuppy.command(\"w\", function()\n\
+               print(mudpuppy.anchor.advanced_match_window() .. \",\" .. mudpuppy.anchor.fallback_match_window())\n\
+             end)",
+        );
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        engine.run_command(&mut a, "w").unwrap();
+        assert_eq!(
+            engine.status_message().as_deref(),
+            Some(
+                format!(
+                    "{},{}",
+                    defaults.advanced_match_window, defaults.fallback_match_window
+                )
+                .as_str()
+            )
+        );
+
+        // A config can set each independently (including the disable sentinel).
+        let (_dir, path) = config(
+            "mudpuppy.anchor.set_advanced_match_window(-1)\n\
+             mudpuppy.anchor.set_fallback_match_window(1000)\n\
+             mudpuppy.command(\"w\", function()\n\
+               print(mudpuppy.anchor.advanced_match_window() .. \",\" .. mudpuppy.anchor.fallback_match_window())\n\
+             end)\n",
+        );
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        engine.run_command(&mut a, "w").unwrap();
+        assert_eq!(engine.status_message().as_deref(), Some("-1,1000"));
     }
 
     #[test]

@@ -136,6 +136,7 @@ impl App {
         body: String,
     ) {
         let file = self.current().display_path().to_string();
+        let signature = self.capture_signature(&file, line, side);
         let now = Timestamp::now();
         let annotation = Annotation {
             id: Annotation::new_id(),
@@ -145,6 +146,7 @@ impl App {
             end_line,
             side,
             scope: AnchorScope::Line,
+            signature,
             severity,
             tag,
             status: Status::Open,
@@ -177,6 +179,7 @@ impl App {
             end_line: None,
             side: Side::Right,
             scope: AnchorScope::File,
+            signature: None,
             severity,
             tag,
             status: Status::Open,
@@ -213,6 +216,9 @@ impl App {
                 end_line: p.end_line,
                 side: p.side,
                 scope: p.scope,
+                // Inherit the parent's signature so a reply relocates in lockstep
+                // with the comment it threads under.
+                signature: p.signature.clone(),
                 severity,
                 tag,
                 status: Status::Open,

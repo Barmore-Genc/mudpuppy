@@ -16,8 +16,36 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use crate::domain::Target;
+use crate::anchor::{AnchorSig, Params};
+use crate::domain::{Side, Target};
 use crate::source::{pr_owner_repo, run_optional};
+
+/// The content side a diff [`Side`] anchors against: the new (Right) side reads
+/// head content, a deletion (Left) reads the base.
+pub fn blob_side(side: Side) -> BlobSide {
+    match side {
+        Side::Right => BlobSide::Head,
+        Side::Left => BlobSide::Base,
+    }
+}
+
+/// Capture a relocation [`AnchorSig`] for `line` (1-based) on `side` of `file`,
+/// reading the file's full content from the matching diff side. Returns `None`
+/// when the content is unavailable (absent / binary / oversize) or `line` is out
+/// of range — the caller then simply stores no signature and the annotation
+/// falls back to its bare line number.
+pub fn capture_signature(
+    target: &Target,
+    repo_root: &Path,
+    file: &str,
+    line: u32,
+    side: Side,
+) -> Option<AnchorSig> {
+    let lines = contents(target, repo_root, file, blob_side(side))
+        .ok()
+        .flatten()?;
+    AnchorSig::capture(&lines.join("\n"), line, &Params::default())
+}
 
 /// Which side of the diff a content request is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

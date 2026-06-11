@@ -1,0 +1,73 @@
+{
+  "language": "javascript",
+  "original": "\"use strict\";\n\nconst MAX_RETRIES = 3;\n\nclass RateLimiter {\n  constructor(limit, windowMs) {\n    this.limit = limit;\n    this.windowMs = windowMs;\n    this.hits = new Map();\n  }\n\n  allow(key) {\n    const now = Date.now();\n    const recent = (this.hits.get(key) || []).filter((t) => now - t < this.windowMs);\n    if (recent.length >= this.limit) {\n      return false;\n    }\n    recent.push(now);\n    this.hits.set(key, recent);\n    return true;\n  }\n}\n\nfunction withRetry(fn) {\n  let attempt = 0;\n  while (attempt < MAX_RETRIES) {\n    try {\n      return fn();\n    } catch (err) {\n      attempt += 1;\n    }\n  }\n  throw new Error(\"retries exhausted\");\n}\n\nmodule.exports = { RateLimiter, withRetry };\n",
+  "anchor_line": 15,
+  "anchor_text": "    if (recent.length >= this.limit) {",
+  "anchor_desc": "Guard rejecting a request when recent hits have reached the configured limit.",
+  "cases": [
+    {
+      "name": "unrelated_line_changed",
+      "category": "survive",
+      "modified": "\"use strict\";\n\nconst MAX_RETRIES = 5;\n\nclass RateLimiter {\n  constructor(limit, windowMs) {\n    this.limit = limit;\n    this.windowMs = windowMs;\n    this.hits = new Map();\n  }\n\n  allow(key) {\n    const now = Date.now();\n    const recent = (this.hits.get(key) || []).filter((t) => now - t < this.windowMs);\n    if (recent.length >= this.limit) {\n      return false;\n    }\n    recent.push(now);\n    this.hits.set(key, recent);\n    return true;\n  }\n}\n\nfunction withRetry(fn) {\n  let attempt = 0;\n  while (attempt < MAX_RETRIES) {\n    try {\n      return fn();\n    } catch (err) {\n      attempt += 1;\n    }\n  }\n  throw new Error(\"retries exhausted\");\n}\n\nmodule.exports = { RateLimiter, withRetry };\n",
+      "expect_line": 15,
+      "expect_text": "    if (recent.length >= this.limit) {",
+      "note": "Changing the MAX_RETRIES constant leaves the anchored line byte-identical at the same position."
+    },
+    {
+      "name": "lines_inserted_above",
+      "category": "survive",
+      "modified": "\"use strict\";\n\nconst MAX_RETRIES = 3;\nconst DEFAULT_WINDOW = 60000;\n\nclass RateLimiter {\n  constructor(limit, windowMs) {\n    this.limit = limit;\n    this.windowMs = windowMs;\n    this.hits = new Map();\n  }\n\n  allow(key) {\n    const now = Date.now();\n    if (!key) {\n      throw new Error(\"key is required\");\n    }\n    const recent = (this.hits.get(key) || []).filter((t) => now - t < this.windowMs);\n    if (recent.length >= this.limit) {\n      return false;\n    }\n    recent.push(now);\n    this.hits.set(key, recent);\n    return true;\n  }\n}\n\nfunction withRetry(fn) {\n  let attempt = 0;\n  while (attempt < MAX_RETRIES) {\n    try {\n      return fn();\n    } catch (err) {\n      attempt += 1;\n    }\n  }\n  throw new Error(\"retries exhausted\");\n}\n\nmodule.exports = { RateLimiter, withRetry };\n",
+      "expect_line": 19,
+      "expect_text": "    if (recent.length >= this.limit) {",
+      "note": "Inserting a const and a key guard above shifts the anchored line down by four with identical text."
+    },
+    {
+      "name": "whitespace_change",
+      "category": "survive",
+      "modified": "\"use strict\";\n\nconst MAX_RETRIES = 3;\n\nclass RateLimiter {\n  constructor(limit, windowMs) {\n    this.limit = limit;\n    this.windowMs = windowMs;\n    this.hits = new Map();\n  }\n\n  allow(key) {\n    const now = Date.now();\n    const recent = (this.hits.get(key) || []).filter((t) => now - t < this.windowMs);\n      if (recent.length >= this.limit) {\n      return false;\n    }\n    recent.push(now);\n    this.hits.set(key, recent);\n    return true;\n  }\n}\n\nfunction withRetry(fn) {\n  let attempt = 0;\n  while (attempt < MAX_RETRIES) {\n    try {\n      return fn();\n    } catch (err) {\n      attempt += 1;\n    }\n  }\n  throw new Error(\"retries exhausted\");\n}\n\nmodule.exports = { RateLimiter, withRetry };\n",
+      "expect_line": 15,
+      "expect_text": "      if (recent.length >= this.limit) {",
+      "note": "Only the leading indentation of the anchored line changes; tokens are unchanged."
+    },
+    {
+      "name": "trailing_punct_added",
+      "category": "survive",
+      "modified": "\"use strict\";\n\nconst MAX_RETRIES = 3;\n\nclass RateLimiter {\n  constructor(limit, windowMs) {\n    this.limit = limit;\n    this.windowMs = windowMs;\n    this.hits = new Map();\n  }\n\n  allow(key) {\n    const now = Date.now();\n    const recent = (this.hits.get(key) || []).filter((t) => now - t < this.windowMs)\n    if (recent.length >= this.limit) {\n      return false;\n    }\n    recent.push(now);\n    this.hits.set(key, recent);\n    return true;\n  }\n}\n\nfunction withRetry(fn) {\n  let attempt = 0;\n  while (attempt < MAX_RETRIES) {\n    try {\n      return fn();\n    } catch (err) {\n      attempt += 1;\n    }\n  }\n  throw new Error(\"retries exhausted\");\n}\n\nmodule.exports = { RateLimiter, withRetry };\n",
+      "expect_line": 15,
+      "expect_text": "    if (recent.length >= this.limit) {",
+      "note": "Drops the optional semicolon on the line above (ASI) while the anchored line stays identical at the same position."
+    },
+    {
+      "name": "variable_renamed",
+      "category": "survive",
+      "modified": "\"use strict\";\n\nconst MAX_RETRIES = 3;\n\nclass RateLimiter {\n  constructor(limit, windowMs) {\n    this.limit = limit;\n    this.windowMs = windowMs;\n    this.hits = new Map();\n  }\n\n  allow(key) {\n    const now = Date.now();\n    const timestamps = (this.hits.get(key) || []).filter((t) => now - t < this.windowMs);\n    if (timestamps.length >= this.limit) {\n      return false;\n    }\n    timestamps.push(now);\n    this.hits.set(key, timestamps);\n    return true;\n  }\n}\n\nfunction withRetry(fn) {\n  let attempt = 0;\n  while (attempt < MAX_RETRIES) {\n    try {\n      return fn();\n    } catch (err) {\n      attempt += 1;\n    }\n  }\n  throw new Error(\"retries exhausted\");\n}\n\nmodule.exports = { RateLimiter, withRetry };\n",
+      "expect_line": 15,
+      "expect_text": "    if (timestamps.length >= this.limit) {",
+      "note": "Renames the local recent to timestamps everywhere, including on the anchored comparison."
+    },
+    {
+      "name": "rename_and_ops_changed",
+      "category": "survive",
+      "modified": "\"use strict\";\n\nconst MAX_RETRIES = 3;\n\nclass RateLimiter {\n  constructor(limit, windowMs) {\n    this.limit = limit;\n    this.windowMs = windowMs;\n    this.hits = new Map();\n  }\n\n  allow(key) {\n    const now = Date.now();\n    const timestamps = (this.hits.get(key) || []).filter((t) => now - t < this.windowMs);\n    if (timestamps.length > this.limit) {\n      return false;\n    }\n    timestamps.push(now);\n    this.hits.set(key, timestamps);\n    return true;\n  }\n}\n\nfunction withRetry(fn) {\n  let attempt = 0;\n  while (attempt < MAX_RETRIES) {\n    try {\n      return fn();\n    } catch (err) {\n      attempt += 1;\n    }\n  }\n  throw new Error(\"retries exhausted\");\n}\n\nmodule.exports = { RateLimiter, withRetry };\n",
+      "expect_line": 15,
+      "expect_text": "    if (timestamps.length > this.limit) {",
+      "note": "Renames recent to timestamps and changes the comparison from >= to > on the same line (Type-3 near-miss)."
+    },
+    {
+      "name": "anchor_line_deleted",
+      "category": "orphan",
+      "modified": "\"use strict\";\n\nconst MAX_RETRIES = 3;\n\nclass RateLimiter {\n  constructor(limit, windowMs) {\n    this.limit = limit;\n    this.windowMs = windowMs;\n    this.hits = new Map();\n  }\n\n  allow(key) {\n    const now = Date.now();\n    const recent = (this.hits.get(key) || []).filter((t) => now - t < this.windowMs);\n    recent.push(now);\n    this.hits.set(key, recent);\n    return recent.length <= this.limit;\n  }\n}\n\nfunction withRetry(fn) {\n  let attempt = 0;\n  while (attempt < MAX_RETRIES) {\n    try {\n      return fn();\n    } catch (err) {\n      attempt += 1;\n    }\n  }\n  throw new Error(\"retries exhausted\");\n}\n\nmodule.exports = { RateLimiter, withRetry };\n",
+      "expect_line": null,
+      "expect_text": null,
+      "note": "The limit guard and its early return are removed entirely, so the anchor has no real target."
+    },
+    {
+      "name": "boilerplate_trap",
+      "category": "orphan",
+      "modified": "\"use strict\";\n\nconst MAX_RETRIES = 3;\n\nclass RateLimiter {\n  constructor(limit, windowMs) {\n    this.limit = limit;\n    this.windowMs = windowMs;\n    this.hits = new Map();\n  }\n\n  allow(key) {\n    const now = Date.now();\n    const recent = (this.hits.get(key) || []).filter((t) => now - t < this.windowMs);\n    recent.push(now);\n    this.hits.set(key, recent);\n    return true;\n  }\n\n  validate(opts) {\n    if (opts.length >= this.max) {\n      return false;\n    }\n    if (opts.length >= this.cap) {\n      return false;\n    }\n    if (opts.length >= this.ceiling) {\n      return false;\n    }\n    return true;\n  }\n}\n\nfunction withRetry(fn) {\n  let attempt = 0;\n  while (attempt < MAX_RETRIES) {\n    try {\n      return fn();\n    } catch (err) {\n      attempt += 1;\n    }\n  }\n  throw new Error(\"retries exhausted\");\n}\n\nmodule.exports = { RateLimiter, withRetry };\n",
+      "expect_line": null,
+      "expect_text": null,
+      "note": "The anchored guard is deleted while several similar `if (opts.length >= this.X) {` lines are introduced as decoys."
+    }
+  ]
+}

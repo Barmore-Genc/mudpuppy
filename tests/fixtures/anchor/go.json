@@ -1,0 +1,73 @@
+{
+  "language": "go",
+  "original": "package wallet\n\nimport (\n\t\"errors\"\n\t\"fmt\"\n)\n\n// Account holds a user's balance in cents.\ntype Account struct {\n\tID      string\n\tOwner   string\n\tBalance int64\n}\n\nvar ErrInsufficient = errors.New(\"insufficient funds\")\n\n// Withdraw removes amount cents from the account balance.\nfunc (a *Account) Withdraw(amount int64) error {\n\tif amount <= 0 {\n\t\treturn fmt.Errorf(\"invalid amount: %d\", amount)\n\t}\n\tif a.Balance < amount {\n\t\treturn ErrInsufficient\n\t}\n\ta.Balance -= amount\n\treturn nil\n}\n\n// Transfer moves amount cents from src to dst.\nfunc Transfer(src, dst *Account, amount int64) error {\n\tif err := src.Withdraw(amount); err != nil {\n\t\treturn err\n\t}\n\tdst.Balance += amount\n\treturn nil\n}\n",
+  "anchor_line": 22,
+  "anchor_text": "\tif a.Balance < amount {",
+  "anchor_desc": "Guard checking the account balance is large enough before withdrawing.",
+  "cases": [
+    {
+      "name": "unrelated_line_changed",
+      "category": "survive",
+      "modified": "package wallet\n\nimport (\n\t\"errors\"\n\t\"fmt\"\n)\n\n// Account holds a user's balance in cents.\ntype Account struct {\n\tID      string\n\tOwner   string\n\tBalance int64\n}\n\nvar ErrInsufficient = errors.New(\"not enough funds available\")\n\n// Withdraw removes amount cents from the account balance.\nfunc (a *Account) Withdraw(amount int64) error {\n\tif amount <= 0 {\n\t\treturn fmt.Errorf(\"invalid amount: %d\", amount)\n\t}\n\tif a.Balance < amount {\n\t\treturn ErrInsufficient\n\t}\n\ta.Balance -= amount\n\treturn nil\n}\n\n// Transfer moves amount cents from src to dst.\nfunc Transfer(src, dst *Account, amount int64) error {\n\tif err := src.Withdraw(amount); err != nil {\n\t\treturn err\n\t}\n\tdst.Balance += amount\n\treturn nil\n}\n",
+      "expect_line": 22,
+      "expect_text": "\tif a.Balance < amount {",
+      "note": "Editing the ErrInsufficient message leaves the anchored line byte-identical at the same position."
+    },
+    {
+      "name": "lines_inserted_above",
+      "category": "survive",
+      "modified": "package wallet\n\nimport (\n\t\"errors\"\n\t\"fmt\"\n)\n\n// Account holds a user's balance in cents.\ntype Account struct {\n\tID      string\n\tOwner   string\n\tBalance int64\n}\n\nvar ErrInsufficient = errors.New(\"insufficient funds\")\nvar ErrClosed = errors.New(\"account closed\")\n\n// Withdraw removes amount cents from the account balance.\nfunc (a *Account) Withdraw(amount int64) error {\n\tif a.ID == \"\" {\n\t\treturn ErrClosed\n\t}\n\tif amount <= 0 {\n\t\treturn fmt.Errorf(\"invalid amount: %d\", amount)\n\t}\n\tif a.Balance < amount {\n\t\treturn ErrInsufficient\n\t}\n\ta.Balance -= amount\n\treturn nil\n}\n\n// Transfer moves amount cents from src to dst.\nfunc Transfer(src, dst *Account, amount int64) error {\n\tif err := src.Withdraw(amount); err != nil {\n\t\treturn err\n\t}\n\tdst.Balance += amount\n\treturn nil\n}\n",
+      "expect_line": 26,
+      "expect_text": "\tif a.Balance < amount {",
+      "note": "Inserting a var and a guard block above shifts the anchored line down by four with identical text."
+    },
+    {
+      "name": "whitespace_change",
+      "category": "survive",
+      "modified": "package wallet\n\nimport (\n\t\"errors\"\n\t\"fmt\"\n)\n\n// Account holds a user's balance in cents.\ntype Account struct {\n\tID      string\n\tOwner   string\n\tBalance int64\n}\n\nvar ErrInsufficient = errors.New(\"insufficient funds\")\n\n// Withdraw removes amount cents from the account balance.\nfunc (a *Account) Withdraw(amount int64) error {\n\tif amount <= 0 {\n\t\treturn fmt.Errorf(\"invalid amount: %d\", amount)\n\t}\n\tif a.Balance  <  amount {\n\t\treturn ErrInsufficient\n\t}\n\ta.Balance -= amount\n\treturn nil\n}\n\n// Transfer moves amount cents from src to dst.\nfunc Transfer(src, dst *Account, amount int64) error {\n\tif err := src.Withdraw(amount); err != nil {\n\t\treturn err\n\t}\n\tdst.Balance += amount\n\treturn nil\n}\n",
+      "expect_line": 22,
+      "expect_text": "\tif a.Balance  <  amount {",
+      "note": "Only the internal spacing around the comparison operator changes; tokens are unchanged."
+    },
+    {
+      "name": "trailing_punct_added",
+      "category": "survive",
+      "modified": "package wallet\n\nimport (\n\t\"errors\"\n\t\"fmt\"\n)\n\n// Account holds a user's balance in cents.\ntype Account struct {\n\tID      string\n\tOwner   string\n\tBalance int64\n}\n\nvar ErrInsufficient = errors.New(\"insufficient funds\")\n\n// Withdraw removes amount cents from the account balance.\nfunc (a *Account) Withdraw(amount int64) error {\n\tif amount <= 0 {\n\t\treturn fmt.Errorf(\"invalid amount: %d\", amount)\n\t}\n\tif a.Balance < amount {;\n\t\treturn ErrInsufficient\n\t}\n\ta.Balance -= amount\n\treturn nil\n}\n\n// Transfer moves amount cents from src to dst.\nfunc Transfer(src, dst *Account, amount int64) error {\n\tif err := src.Withdraw(amount); err != nil {\n\t\treturn err\n\t}\n\tdst.Balance += amount\n\treturn nil\n}\n",
+      "expect_line": 22,
+      "expect_text": "\tif a.Balance < amount {;",
+      "note": "Adds a redundant optional semicolon (Go auto-inserts these) to the anchored line."
+    },
+    {
+      "name": "variable_renamed",
+      "category": "survive",
+      "modified": "package wallet\n\nimport (\n\t\"errors\"\n\t\"fmt\"\n)\n\n// Account holds a user's balance in cents.\ntype Account struct {\n\tID      string\n\tOwner   string\n\tBalance int64\n}\n\nvar ErrInsufficient = errors.New(\"insufficient funds\")\n\n// Withdraw removes amount cents from the account balance.\nfunc (a *Account) Withdraw(cents int64) error {\n\tif cents <= 0 {\n\t\treturn fmt.Errorf(\"invalid amount: %d\", cents)\n\t}\n\tif a.Balance < cents {\n\t\treturn ErrInsufficient\n\t}\n\ta.Balance -= cents\n\treturn nil\n}\n\n// Transfer moves amount cents from src to dst.\nfunc Transfer(src, dst *Account, amount int64) error {\n\tif err := src.Withdraw(amount); err != nil {\n\t\treturn err\n\t}\n\tdst.Balance += amount\n\treturn nil\n}\n",
+      "expect_line": 22,
+      "expect_text": "\tif a.Balance < cents {",
+      "note": "Renames the parameter amount to cents everywhere, including on the anchored comparison."
+    },
+    {
+      "name": "rename_and_ops_changed",
+      "category": "survive",
+      "modified": "package wallet\n\nimport (\n\t\"errors\"\n\t\"fmt\"\n)\n\n// Account holds a user's balance in cents.\ntype Account struct {\n\tID      string\n\tOwner   string\n\tBalance int64\n}\n\nvar ErrInsufficient = errors.New(\"insufficient funds\")\n\n// Withdraw removes amount cents from the account balance.\nfunc (a *Account) Withdraw(cents int64) error {\n\tif cents <= 0 {\n\t\treturn fmt.Errorf(\"invalid amount: %d\", cents)\n\t}\n\tif a.Balance <= cents {\n\t\treturn ErrInsufficient\n\t}\n\ta.Balance -= cents\n\treturn nil\n}\n\n// Transfer moves amount cents from src to dst.\nfunc Transfer(src, dst *Account, amount int64) error {\n\tif err := src.Withdraw(amount); err != nil {\n\t\treturn err\n\t}\n\tdst.Balance += amount\n\treturn nil\n}\n",
+      "expect_line": 22,
+      "expect_text": "\tif a.Balance <= cents {",
+      "note": "Renames amount to cents and changes the comparison from < to <= on the same line (Type-3 near-miss)."
+    },
+    {
+      "name": "anchor_line_deleted",
+      "category": "orphan",
+      "modified": "package wallet\n\nimport (\n\t\"errors\"\n\t\"fmt\"\n)\n\n// Account holds a user's balance in cents.\ntype Account struct {\n\tID      string\n\tOwner   string\n\tBalance int64\n}\n\nvar ErrInsufficient = errors.New(\"insufficient funds\")\n\n// Withdraw removes amount cents from the account balance.\nfunc (a *Account) Withdraw(amount int64) error {\n\tif amount <= 0 {\n\t\treturn fmt.Errorf(\"invalid amount: %d\", amount)\n\t}\n\ta.Balance -= amount\n\treturn nil\n}\n\n// Transfer moves amount cents from src to dst.\nfunc Transfer(src, dst *Account, amount int64) error {\n\tif err := src.Withdraw(amount); err != nil {\n\t\treturn err\n\t}\n\tdst.Balance += amount\n\treturn nil\n}\n",
+      "expect_line": null,
+      "expect_text": null,
+      "note": "The balance guard and its body are removed entirely, so the anchor has no real target."
+    },
+    {
+      "name": "boilerplate_trap",
+      "category": "orphan",
+      "modified": "package wallet\n\nimport (\n\t\"errors\"\n\t\"fmt\"\n)\n\n// Account holds a user's balance in cents.\ntype Account struct {\n\tID      string\n\tOwner   string\n\tBalance int64\n}\n\nvar ErrInsufficient = errors.New(\"insufficient funds\")\n\n// Withdraw removes amount cents from the account balance.\nfunc (a *Account) Withdraw(amount int64) error {\n\tif amount <= 0 {\n\t\treturn fmt.Errorf(\"invalid amount: %d\", amount)\n\t}\n\ta.Balance -= amount\n\treturn nil\n}\n\n// LimitsOK reports whether the amount is within all configured limits.\nfunc (a *Account) LimitsOK(amount int64) bool {\n\tif a.Balance < dailyLimit {\n\t\treturn false\n\t}\n\tif a.Balance < weeklyLimit {\n\t\treturn false\n\t}\n\tif a.Balance < monthlyLimit {\n\t\treturn false\n\t}\n\treturn true\n}\n\n// Transfer moves amount cents from src to dst.\nfunc Transfer(src, dst *Account, amount int64) error {\n\tif err := src.Withdraw(amount); err != nil {\n\t\treturn err\n\t}\n\tdst.Balance += amount\n\treturn nil\n}\n",
+      "expect_line": null,
+      "expect_text": null,
+      "note": "The anchored guard is deleted while several similar `if a.Balance < X {` lines are introduced as decoys."
+    }
+  ]
+}

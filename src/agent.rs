@@ -119,6 +119,20 @@ fn add(args: AddArgs) -> Result<()> {
     } else {
         AnchorScope::Line
     };
+    // Capture a relocation signature for line-scoped notes so the viewer can
+    // follow the line if the file is edited before review. File-scoped notes
+    // have no line to anchor.
+    let signature = (scope == AnchorScope::Line)
+        .then(|| {
+            crate::blob::capture_signature(
+                &session.target,
+                &session.repo_root,
+                &args.file,
+                args.line,
+                side,
+            )
+        })
+        .flatten();
     let annotation = Annotation {
         id: Annotation::new_id(),
         author: Author::Agent,
@@ -127,6 +141,7 @@ fn add(args: AddArgs) -> Result<()> {
         end_line: args.end_line,
         side,
         scope,
+        signature,
         severity,
         tag,
         status: Status::Open,
@@ -613,6 +628,7 @@ index 3..4 100644
             end_line: None,
             side: Side::Right,
             scope: AnchorScope::Line,
+            signature: None,
             severity: Severity::Warning,
             tag: Some(Tag::Concern),
             status: Status::Open,
@@ -655,6 +671,7 @@ index 3..4 100644
             end_line: None,
             side: Side::Right,
             scope: AnchorScope::Line,
+            signature: None,
             severity: Severity::Suggestion,
             tag: None,
             status: Status::Open,

@@ -1,3 +1,3 @@
 #!/bin/sh
-# Installed by `just setup-dev` (sets core.hooksPath to this directory).
+# Installed by `just setup-git-hooks` (sets core.hooksPath to this directory).
 exec just pre-commit
