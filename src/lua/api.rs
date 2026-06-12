@@ -401,6 +401,13 @@ pub fn install_scoped<'scope>(
         })?,
     )?;
     table.set(
+        "scroll_h",
+        scope.create_function(move |_, delta: i64| {
+            cell.borrow_mut().scroll_h(delta as isize);
+            Ok(())
+        })?,
+    )?;
+    table.set(
         "next_hunk",
         scope.create_function(move |_, ()| {
             cell.borrow_mut().next_hunk();

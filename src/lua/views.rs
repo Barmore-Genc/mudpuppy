@@ -48,6 +48,7 @@ pub fn state_field(lua: &Lua, app: &App, key: &str) -> Result<Value> {
         "viewport" => {
             let viewport = lua.create_table()?;
             viewport.set("height", app.diff_height)?;
+            viewport.set("width", app.diff_width)?;
             viewport.set("total", app.view.rows.len())?;
             viewport.set("top", app.scroll)?;
             Value::Table(viewport).into_lua(lua)

@@ -55,6 +55,11 @@ anyhow = "1"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 
+# Display-column widths for clamping the diff pane's horizontal scroll to its
+# widest line. Pinned to the 0.2 line ratatui re-exports so the two stay a single
+# instance via Cargo's feature unification.
+unicode-width = "0.2"
+
 # Annotation store (milestone 2). `directories` resolves the per-OS data dir that
 # holds the store; `tempfile` + `fs4` give atomic (temp + rename) and advisory-
 # locked writes so a live TUI and a headless agent never corrupt each other's

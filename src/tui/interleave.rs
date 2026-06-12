@@ -114,6 +114,7 @@ impl App {
             }
         }
 
+        self.view.max_width = super::app::FileView::rows_width(&rows);
         self.view.rows = rows;
         self.view.hunk_starts = hunk_starts;
     }
