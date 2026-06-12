@@ -55,6 +55,21 @@ pub enum Command {
         #[command(subcommand)]
         command: InstallCommand,
     },
+
+    /// Developer diagnostics for inspecting the viewer's rendering.
+    #[command(hide = true)]
+    Debug {
+        #[command(subcommand)]
+        command: DebugCommand,
+    },
+}
+
+/// Visual diagnostics under `mudpuppy debug`.
+#[derive(Debug, Subcommand)]
+pub enum DebugCommand {
+    /// Open a swatch page of every colour the viewer uses, drawn on the themed
+    /// background, to judge contrast in your own terminal.
+    Colors,
 }
 
 /// Integrations `mudpuppy install` can set up.
@@ -236,6 +251,9 @@ fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Some(Command::Agent { command }) => crate::agent::dispatch(command),
         Some(Command::Install { command }) => crate::install::dispatch(command),
+        Some(Command::Debug { command }) => match command {
+            DebugCommand::Colors => crate::tui::debug::run(),
+        },
         None => crate::tui::launch(cli.pr, cli.base),
     }
 }

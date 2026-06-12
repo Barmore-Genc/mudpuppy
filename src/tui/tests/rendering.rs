@@ -212,11 +212,54 @@ fn diff_content_is_syntax_highlighted() {
 fn selection_and_status_bar_have_background_fills() {
     let term = drive(&mut app(), 100, 24, &[]);
     assert!(
-        any_cell_has_bg(&term, Color::Rgb(40, 44, 52)),
+        any_cell_has_bg(&term, palette::BG_SELECTED_FILE),
         "selected tree row is highlighted"
     );
     assert!(
         any_cell_has_bg(&term, Color::Rgb(30, 33, 40)),
         "status bar has its background fill"
+    );
+}
+
+#[test]
+fn diff_kind_tints_render_and_yield_to_selection() {
+    // alpha.rs's first hunk has additions (`+let x = 2;` / `+let y = 3;`) and a
+    // deletion (`-let x = 1;`); each kind gets a faint background band.
+    let term = drive(&mut app(), 100, 24, &[]);
+    assert!(
+        any_cell_has_bg(&term, palette::BG_ADDED),
+        "added lines carry the addition tint"
+    );
+    assert!(
+        any_cell_has_bg(&term, palette::BG_REMOVED),
+        "removed lines carry the deletion tint"
+    );
+    // `y` is unique to the `+let y = 3;` row, so this pins that exact line's band.
+    assert_eq!(
+        style_of(&term, "y", 29).bg,
+        Some(palette::BG_ADDED),
+        "the added line's own band is the addition tint"
+    );
+
+    // Selection must override the kind band. Focus the diff, land the cursor on
+    // the `+let y = 3;` row (index 4: hunk header, context, deletion, two adds),
+    // open a visual selection, then step the cursor up one — so that row stays in
+    // the span but is no longer the cursor row, which would otherwise take
+    // `BG_CURSOR` on top. Its background should now be the selection tint.
+    let keys = [
+        key(KeyCode::Char('l')),
+        key(KeyCode::Char('j')),
+        key(KeyCode::Char('j')),
+        key(KeyCode::Char('j')),
+        key(KeyCode::Char('j')),
+        key(KeyCode::Char('v')),
+        key(KeyCode::Char('k')),
+    ];
+    let mut a = app();
+    let term = drive(&mut a, 100, 24, &keys);
+    assert_eq!(
+        style_of(&term, "y", 29).bg,
+        Some(palette::BG_SELECTION),
+        "selection background overrides the addition tint"
     );
 }
