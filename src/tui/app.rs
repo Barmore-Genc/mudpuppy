@@ -424,7 +424,7 @@ pub(crate) struct App {
     /// (their code is gone) rather than passing them off as authored file notes.
     pub(crate) orphaned_anchors: HashSet<String>,
     /// The turn-protocol block from the store, kept in sync on reload so the
-    /// status bar can surface "agent is waiting" and `r` can release correctly.
+    /// status bar can surface "agent is waiting" and a release can land correctly.
     pub(crate) turn: Turn,
     /// Path to the annotation store, when one was resolved; drives live reload.
     pub(crate) store_path: Option<PathBuf>,
@@ -712,7 +712,7 @@ impl App {
     /// Whether an agent is making first contact: it is blocked in `agent wait`
     /// (so it has written to this session and is expecting a turn) but the user
     /// has not yet approved. While this holds the TUI surfaces an approval prompt,
-    /// and the user's first turn-release (`r`) doubles as approval (PLAN.md §6).
+    /// and the user's first turn-release doubles as approval (PLAN.md §6).
     /// Once approved a session stays approved, so this is only ever true at the
     /// very start.
     pub(crate) fn awaiting_approval(&self) -> bool {
@@ -1539,14 +1539,16 @@ impl App {
             return None;
         }
         let local = (row - inner.y) as usize + self.hits.annotation_scroll;
-        // Each annotation occupies its block_start line and the next (preview).
-        // Walk in reverse so the latest start <= local wins.
+        // Each annotation's block runs from its start up to the next start; a row
+        // at or after the last start belongs to the last annotation. Walk in
+        // reverse so the latest start <= local wins. Body wrapping can shift rows,
+        // so this maps clicks approximately when bodies wrap past one line.
         self.hits
             .annotation_block_starts
             .iter()
             .enumerate()
             .rev()
-            .find_map(|(i, &s)| (s <= local && local <= s + 1).then_some(i))
+            .find_map(|(i, &s)| (s <= local).then_some(i))
     }
 
     /// Scroll-wheel dispatch by hovered pane: the help overlay (when open) wins

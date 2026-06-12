@@ -350,7 +350,7 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &mut App) {
 
 /// The annotations sidebar tab: every annotation in the store across all files,
 /// grouped under a bold file header, each row a severity-coloured mark with its
-/// anchor, author, optional tag, status, and a one-line body preview. Threaded
+/// anchor, author, optional tag, status, and the full (wrapped) body. Threaded
 /// replies are indented under their parent. The selected row is highlighted and
 /// the list scrolls to keep it visible. Replaces the file tree when toggled on.
 fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -376,8 +376,9 @@ fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
     let sel_bg = palette::BG_SELECTION;
 
     // Build the flat line list: a dim bold header before each new file's run,
-    // then a header + preview pair per annotation. `block_start[i]` records where
-    // annotation `i` begins so the selection can be scrolled into view.
+    // then a header plus the full (wrapped) body per annotation. `block_start[i]`
+    // records where annotation `i` begins so the selection can be scrolled into
+    // view; the block extends up to the next annotation's start.
     let mut lines: Vec<Line> = Vec::new();
     let mut block_start: Vec<usize> = Vec::with_capacity(total);
     let mut current_file: Option<&str> = None;
@@ -415,21 +416,26 @@ fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
         }
         lines.push(Line::from(Span::styled(header, header_style)));
 
-        // First body line as a preview; the list stays scannable.
-        let preview = a.body.lines().next().unwrap_or_default();
-        let mut preview_style = Style::default().fg(Color::Gray);
+        // The full body; the panel `Paragraph` wraps each line to the pane width.
+        let mut body_style = Style::default().fg(Color::Gray);
         if sel {
-            preview_style = preview_style.bg(sel_bg);
+            body_style = body_style.bg(sel_bg);
         }
-        lines.push(Line::from(Span::styled(
-            format!("{indent}  {preview}"),
-            preview_style,
-        )));
+        for body_line in a.body.lines() {
+            lines.push(Line::from(Span::styled(
+                format!("{indent}  {body_line}"),
+                body_style,
+            )));
+        }
     }
 
-    // Keep the two-line selected block within the viewport.
+    // Keep the selected block within the viewport. The block runs from its start
+    // up to the next annotation's start (or the end of the list).
     let start = block_start[selected];
-    let end = start + 2;
+    let end = block_start
+        .get(selected + 1)
+        .copied()
+        .unwrap_or(lines.len());
     let mut scroll = app.annotation_scroll;
     if start < scroll {
         scroll = start;
@@ -447,14 +453,19 @@ fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
     let visible: Vec<Line> = visible.into_iter().take(height).collect();
 
     let block = sidebar_tabs_block(area, app, focused);
-    frame.render_widget(Paragraph::new(visible).block(block), area);
+    frame.render_widget(
+        Paragraph::new(visible)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 /// The first-contact approval banner (PLAN.md §6): a full-width highlighted row
 /// telling the user an agent wants to collaborate and that releasing the turn
-/// (`r`) approves it. Shown only while [`App::awaiting_approval`] holds.
+/// (`Space t r`) approves it. Shown only while [`App::awaiting_approval`] holds.
 fn render_approval_banner(frame: &mut Frame, area: Rect) {
-    let text = " An agent wants to collaborate on this review — press r to approve and hand it the first turn ";
+    let text = " An agent wants to collaborate on this review — press Space t r to approve and hand it the first turn ";
     let banner = Paragraph::new(Line::from(Span::styled(
         text,
         Style::default()
@@ -552,8 +563,8 @@ fn render_status(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     // When an agent is blocked in `agent wait`, make it impossible to miss and
-    // advertise the release key (PLAN.md §6). Before first-contact approval the
-    // same `r` press approves, so the hint says so (the banner spells it out).
+    // advertise the release chord (PLAN.md §6). Before first-contact approval the
+    // same release approves, so the hint says so (the banner spells it out).
     if app.turn.agent_waiting {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
@@ -564,17 +575,19 @@ fn render_status(frame: &mut Frame, area: Rect, app: &mut App) {
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw("  "));
-        // Record the clickable span over "r release"/"r approve" so a mouse
+        // Record the clickable span over "Space t r release"/"approve" so a mouse
         // click on the call-to-action triggers release_turn (issue #29).
         let x_start = area.x + span_total_width(&spans).min(area.width);
-        spans.push(Span::styled("r", Style::default().fg(Color::Yellow)));
+        let key = "Space t r";
+        spans.push(Span::styled(key, Style::default().fg(Color::Yellow)));
         let action = if app.turn.approved {
             " release  "
         } else {
             " approve  "
         };
         spans.push(Span::raw(action));
-        let label_chars = 1 + action.trim().chars().count();
+        // Span the key plus the action word (drop only the trailing padding).
+        let label_chars = key.chars().count() + action.trim_end().chars().count();
         let x_end = (x_start + label_chars as u16).min(area.x + area.width);
         app.hits.release_span = Some((area.y, x_start, x_end));
     } else {
@@ -905,7 +918,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &mut App) -> Rect {
         Line::raw("  wheel         scroll the pane / overlay under the cursor"),
         Line::raw("  click         focus a pane; pick a file / annotation row"),
         Line::raw("  click title   switch sidebar tabs (Files ↔ Annotations)"),
-        Line::raw("  click r       release / approve the turn (status bar)"),
+        Line::raw("  click waiting release / approve the turn (status bar)"),
         Line::raw("  drag (diff)   enter visual mode and select lines"),
         Line::raw("  dbl-click     open file (tree) · comment line (diff)"),
         Line::raw(""),
