@@ -55,6 +55,7 @@ fn prompt_overlay_shows_message_and_options() {
             "Ignore for now".to_string(),
             "Skip".to_string(),
         ],
+        None,
     );
     let term = drive(&mut a, 100, 24, &[]);
     let s = screen(&term);
@@ -83,6 +84,7 @@ fn prompt_navigation_moves_and_commits_the_selection() {
     a.open_prompt(
         "pick".to_string(),
         vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        None,
     );
     // Right/l advances; clamps at the last option.
     a.handle_key(key(KeyCode::Right));
@@ -102,9 +104,54 @@ fn prompt_navigation_moves_and_commits_the_selection() {
 #[test]
 fn prompt_esc_dismisses_without_choosing() {
     let mut a = app();
-    a.open_prompt("q".to_string(), vec!["only".to_string()]);
+    a.open_prompt("q".to_string(), vec!["only".to_string()], None);
     a.handle_key(key(KeyCode::Esc));
     assert!(a.prompt.is_none());
+}
+
+#[test]
+fn update_prompt_renders_changelog_and_scrolls() {
+    // A prompt with a details body (the release changelog) gets the scrollable
+    // layout: the top is visible at first, later entries only after scrolling, and
+    // the footer advertises the scroll keys.
+    let mut a = app();
+    let changelog = (1..=40)
+        .map(|i| format!("- change number {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    a.open_prompt(
+        "mudpuppy v9.9.9 is available. Update now?".to_string(),
+        vec![
+            "Install".to_string(),
+            "Ignore for now".to_string(),
+            "Skip".to_string(),
+        ],
+        Some(changelog),
+    );
+
+    let s = screen(&drive(&mut a, 100, 24, &[]));
+    assert!(s.contains("change number 1"), "top of changelog shown: {s}");
+    assert!(!s.contains("change number 40"), "bottom not shown yet: {s}");
+    assert!(s.contains("scroll"), "scroll hint shown: {s}");
+
+    // Down scrolls the body (rather than moving the option selection).
+    for _ in 0..25 {
+        a.handle_key(key(KeyCode::Down));
+    }
+    assert_eq!(
+        a.prompt.as_ref().unwrap().selected,
+        0,
+        "down scrolls, not select"
+    );
+    let s = screen(&drive(&mut a, 100, 24, &[]));
+    assert!(
+        s.contains("change number 30"),
+        "scrolled into later entries: {s}"
+    );
+
+    // Left/right still move the option selection while a body is shown.
+    a.handle_key(key(KeyCode::Right));
+    assert_eq!(a.prompt.as_ref().unwrap().selected, 1);
 }
 
 #[test]
