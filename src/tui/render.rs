@@ -70,7 +70,9 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     // keep the tree/list selection visible.
     app.tree_height = side.height.saturating_sub(2) as usize;
     app.diff_height = diff.height.saturating_sub(2) as usize;
+    app.diff_width = diff.width.saturating_sub(2) as usize;
     app.scroll = app.scroll.min(app.max_scroll());
+    app.h_scroll = app.h_scroll.min(app.max_h_scroll());
 
     app.hits.sidebar_outer = Some(side);
     app.hits.sidebar_inner = Some(inner_rect(side));
@@ -310,7 +312,14 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &mut App) {
             app.files.len(),
         )
     };
-    frame.render_widget(Paragraph::new(lines).block(bordered(&title, focused)), area);
+    // Horizontal scroll shifts every line left by `h_scroll` columns (less -S
+    // style: the gutter scrolls with the code), letting over-long lines be read.
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((0, app.h_scroll.min(u16::MAX as usize) as u16))
+            .block(bordered(&title, focused)),
+        area,
+    );
 
     // The inline (line/reply/edit) composer draws as a popover over its reserved
     // `Row::Composer` placeholder. The `Clear` inside `render_compose_box` wipes
@@ -893,6 +902,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &mut App) -> Rect {
         Line::raw(""),
         section("Navigation"),
         Line::raw("  j / k         move cursor (diff) / selection (tree)"),
+        Line::raw("  h / l ← / →   scroll the code left / right (diff)"),
         Line::raw("  ctrl-d/u/f/b  half / full page down / up"),
         Line::raw("  g g / G       top / bottom (cursor in diff, first/last file)"),
         Line::raw("  ]h / [h  } {  next / prev hunk"),
@@ -900,7 +910,8 @@ fn render_help(frame: &mut Frame, area: Rect, app: &mut App) -> Rect {
         Line::raw("  5j  100G      a number prefixes a count"),
         Line::raw(""),
         section("Focus"),
-        Line::raw("  Tab / l / h   toggle · tree → diff · diff → tree"),
+        Line::raw("  Tab           toggle tree ↔ diff"),
+        Line::raw("  Space p h/l   focus the tree / the diff pane"),
         Line::raw(""),
         section("Annotations  (Space is the leader)"),
         Line::raw("  Space a       annotations tab (all files) ↔ file tree"),

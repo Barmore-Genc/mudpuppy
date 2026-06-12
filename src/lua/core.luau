@@ -29,6 +29,13 @@ local function page()
   return m.state().viewport.height
 end
 
+-- One horizontal scroll step: a third of the diff pane's width, so a couple of
+-- `l` presses reveal the rest of an over-long line. A count multiplies it
+-- (`3l`), and the move is clamped to the widest line in `scroll_h`.
+local function hstep()
+  return math.max(1, math.floor(m.state().viewport.width / 3))
+end
+
 -- ---- Commands: the `:`-palette verbs (also reusable from bindings) ----------
 
 m.command("quit", function() m.quit() end)
@@ -74,6 +81,12 @@ m.map("global", "pageup", function() m.scroll(-page()) end)
 m.map("global", "<leader> t r", function() m.release_turn() end)
 m.map("global", "<leader> a", function() m.toggle_annotations() end)
 m.map("global", "<leader> f", function() m.open_picker() end)
+
+-- Panel focus under `<leader> p` (`h`/`l` map to the left/right pane, vim-window
+-- style). The diff pane now uses bare `h`/`l` for horizontal scrolling, so pane
+-- switching moved here (Tab still toggles between the two).
+m.map("global", "<leader> p h", function() m.set_focus("tree") end)
+m.map("global", "<leader> p l", function() m.set_focus("diff") end)
 
 -- ---- Sidebar: move the selection in whichever tab is showing -----------------
 
@@ -125,9 +138,12 @@ m.map("diff", "esc", function() m.clear_selection() end)
 m.map("diff", "J", function() m.move_selection(1) end)
 m.map("diff", "K", function() m.move_selection(-1) end)
 
--- Focus the sidebar.
-m.map("diff", "h", function() m.set_focus("tree") end)
-m.map("diff", "left", function() m.set_focus("tree") end)
+-- Horizontal scroll for over-long lines: `h`/`l` (or ←/→) pan the code left and
+-- right. Pane focus moved to `<leader> p h/l` (and Tab) to free these keys.
+m.map("diff", "h", function() m.scroll_h(-hstep()) end)
+m.map("diff", "left", function() m.scroll_h(-hstep()) end)
+m.map("diff", "l", function() m.scroll_h(hstep()) end)
+m.map("diff", "right", function() m.scroll_h(hstep()) end)
 
 -- Context expansion: reveal all hidden context around the cursor.
 m.map("diff", "<leader> e", function() m.expand_all() end)

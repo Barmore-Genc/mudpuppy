@@ -124,6 +124,83 @@ fn capital_j_k_switch_files_from_the_diff_pane() {
 }
 
 #[test]
+fn h_l_pan_the_code_horizontally_and_clamp() {
+    // A line far wider than the pane, so horizontal scroll has somewhere to go.
+    let long_line = "a".repeat(200);
+    let diff = format!(
+        "diff --git a/wide.rs b/wide.rs\n\
+         index 1111111..2222222 100644\n\
+         --- a/wide.rs\n\
+         +++ b/wide.rs\n\
+         @@ -1 +1 @@\n\
+         -short\n\
+         +{long_line}\n"
+    );
+    let mut a = App::new(
+        parse_diff(&diff),
+        Target::Local {
+            base: "main".to_string(),
+            head_sha: "deadbeefcafe".to_string(),
+        },
+    );
+    // Render at a known width (sets `diff_width`) and open the file into the diff.
+    drive(&mut a, 100, 24, &[key(KeyCode::Char('l'))]);
+    assert_eq!(a.focus, Focus::Diff);
+    assert_eq!(a.h_scroll, 0, "starts unscrolled");
+    let max = a.max_h_scroll();
+    assert!(max > 0, "the 200-col line overflows the 100-col pane");
+
+    a.handle_key(key(KeyCode::Char('l')));
+    assert!(a.h_scroll > 0, "l pans the code right");
+
+    for _ in 0..50 {
+        a.handle_key(key(KeyCode::Char('l')));
+    }
+    assert_eq!(a.h_scroll, max, "l clamps at the widest line");
+
+    for _ in 0..50 {
+        a.handle_key(key(KeyCode::Char('h')));
+    }
+    assert_eq!(a.h_scroll, 0, "h clamps at the left edge");
+}
+
+#[test]
+fn opening_a_different_file_resets_horizontal_scroll() {
+    // Two files, both wide enough to scroll; switching between them must land at
+    // the left edge even though the new file could itself hold a scroll.
+    let wide = "b".repeat(200);
+    let diff = format!(
+        "diff --git a/one.rs b/one.rs\n\
+         index 1111111..2222222 100644\n\
+         --- a/one.rs\n\
+         +++ b/one.rs\n\
+         @@ -1 +1 @@\n\
+         -short\n\
+         +{wide}\n\
+         diff --git a/two.rs b/two.rs\n\
+         index 3333333..4444444 100644\n\
+         --- a/two.rs\n\
+         +++ b/two.rs\n\
+         @@ -1 +1 @@\n\
+         -short\n\
+         +{wide}\n"
+    );
+    let mut a = App::new(
+        parse_diff(&diff),
+        Target::Local {
+            base: "main".to_string(),
+            head_sha: "deadbeefcafe".to_string(),
+        },
+    );
+    drive(&mut a, 100, 24, &[key(KeyCode::Char('l'))]); // open one.rs into the diff
+    a.handle_key(key(KeyCode::Char('l'))); // pan right
+    assert!(a.h_scroll > 0);
+    a.handle_key(key(KeyCode::Char('J'))); // switch to two.rs
+    assert_eq!(a.selected, 1);
+    assert_eq!(a.h_scroll, 0, "a fresh file opens unscrolled");
+}
+
+#[test]
 fn quit_keys_signal_exit() {
     assert!(app().handle_key(key(KeyCode::Char('q'))), "q quits");
     assert!(app().handle_key(ctrl('c')), "Ctrl-c quits");

@@ -17,6 +17,7 @@ use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Rect;
+use unicode_width::UnicodeWidthStr;
 
 use crate::blob::{self, BlobSide};
 use crate::command::CommandPalette;
@@ -197,6 +198,44 @@ pub(crate) struct ViewPlan {
 pub(crate) struct FileView {
     pub(crate) rows: Vec<Row>,
     pub(crate) hunk_starts: Vec<usize>,
+    /// Display-column width of the widest row, used to clamp the diff pane's
+    /// horizontal scroll. Recomputed on [`FileView::new`] and after the inline
+    /// annotation interleave splices comment rows in.
+    pub(crate) max_width: usize,
+}
+
+/// The fixed gutter ahead of a content line's text: the annotation-mark column,
+/// the `"NNNNN NNNNN "` old/new line numbers, and the `"+/-/space "` marker.
+/// Kept in sync with [`crate::tui::render`]'s `diff_line`; used only to size the
+/// horizontal-scroll extent, so being off by the rare narrow-gutter file is
+/// harmless.
+const DIFF_GUTTER_COLS: usize = 1 + 12 + 2;
+
+impl FileView {
+    /// Assemble a view and measure its widest row for horizontal-scroll clamping.
+    fn new(rows: Vec<Row>, hunk_starts: Vec<usize>) -> FileView {
+        let max_width = Self::rows_width(&rows);
+        FileView {
+            rows,
+            hunk_starts,
+            max_width,
+        }
+    }
+
+    /// Widest rendered row in display columns. Only content lines (and the short
+    /// hunk/notice rows) can overflow the pane; comment rows are pre-wrapped to
+    /// the pane width, so they never extend the scroll extent.
+    pub(crate) fn rows_width(rows: &[Row]) -> usize {
+        rows.iter()
+            .map(|row| match row {
+                // Tabs render as four columns (see `diff_line`).
+                Row::Line(line, _) => DIFF_GUTTER_COLS + line.content.replace('\t', "    ").width(),
+                Row::Hunk(text) | Row::Notice(text) => 1 + text.width(),
+                _ => 0,
+            })
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 impl FileView {
@@ -212,7 +251,7 @@ impl FileView {
 
         if file.is_binary {
             rows.push(Row::Notice("Binary file — no textual diff to show".into()));
-            return FileView { rows, hunk_starts };
+            return FileView::new(rows, hunk_starts);
         }
 
         // Synthetic files have no diff: render their full current content as
@@ -222,7 +261,7 @@ impl FileView {
                 rows.push(Row::Notice(
                     "current content unavailable (deleted, binary, or too large)".into(),
                 ));
-                return FileView { rows, hunk_starts };
+                return FileView::new(rows, hunk_starts);
             };
             let highlighter =
                 Highlighter::for_path(file.display_path(), blob.first().map(String::as_str));
@@ -242,7 +281,7 @@ impl FileView {
                     hl,
                 ));
             }
-            return FileView { rows, hunk_starts };
+            return FileView::new(rows, hunk_starts);
         }
 
         // Resolve the language once for the whole file; `None` (unknown
@@ -364,7 +403,7 @@ impl FileView {
             rows.push(Row::Notice("No line changes (metadata-only change)".into()));
         }
 
-        FileView { rows, hunk_starts }
+        FileView::new(rows, hunk_starts)
     }
 }
 
@@ -379,6 +418,10 @@ pub(crate) struct App {
     pub(crate) view: FileView,
     /// Top visible row of the diff pane.
     pub(crate) scroll: usize,
+    /// Leftmost visible display column of the diff pane: how far the code is
+    /// scrolled horizontally so over-long lines can be read. Clamped to
+    /// `[0, max_h_scroll]`; reset to 0 when a different file is opened.
+    pub(crate) h_scroll: usize,
     /// Focused row index into `view.rows` — the line the user's comment/visual
     /// verbs act on (GitHub-style cursor). Kept visible via [`App::follow_cursor`].
     pub(crate) cursor: usize,
@@ -430,6 +473,8 @@ pub(crate) struct App {
     pub(crate) store_path: Option<PathBuf>,
     /// Diff-pane inner height from the last render, used for paging/clamping.
     pub(crate) diff_height: usize,
+    /// Diff-pane inner width from the last render, used to clamp horizontal scroll.
+    pub(crate) diff_width: usize,
     /// File-tree inner height from the last render, used to keep selection visible.
     pub(crate) tree_height: usize,
     /// Set by the Lua `quit` verb; checked by `run_loop` after each dispatch.
@@ -503,6 +548,7 @@ impl App {
             focus: Focus::Tree,
             view,
             scroll: 0,
+            h_scroll: 0,
             cursor: 0,
             selection_anchor: None,
             pending_delete: None,
@@ -523,6 +569,7 @@ impl App {
             turn: Turn::default(),
             store_path: None,
             diff_height: 1,
+            diff_width: 1,
             tree_height: 1,
             should_quit: false,
             status_msg: None,
@@ -760,6 +807,7 @@ impl App {
         if idx != self.selected {
             self.selected = idx;
             self.scroll = 0;
+            self.h_scroll = 0;
             self.cursor = 0;
             self.selection_anchor = None;
             // Rebuild from the file's plan so any context revealed earlier in
@@ -793,6 +841,20 @@ impl App {
         self.scroll = next.clamp(0, self.max_scroll() as isize) as usize;
         let cur = self.cursor as isize + delta;
         self.cursor = cur.clamp(0, self.last_row() as isize) as usize;
+    }
+
+    /// Furthest the diff can scroll right: the widest row minus the visible
+    /// width, so the last column of the longest line can still reach the edge.
+    pub(crate) fn max_h_scroll(&self) -> usize {
+        self.view.max_width.saturating_sub(self.diff_width)
+    }
+
+    /// Scroll the diff horizontally by `delta` display columns (scaled by the
+    /// pending count), clamped to `[0, max_h_scroll]`. Negative scrolls left.
+    pub(crate) fn scroll_h(&mut self, delta: isize) {
+        let delta = delta.saturating_mul(self.count() as isize);
+        let next = self.h_scroll as isize + delta;
+        self.h_scroll = next.clamp(0, self.max_h_scroll() as isize) as usize;
     }
 
     /// Set the diff scroll to an absolute row, clamped to `[0, max_scroll]`,
