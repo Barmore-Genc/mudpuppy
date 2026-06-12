@@ -960,9 +960,9 @@ fn row_to_line(row: &Row, gutter: bool, marks: &HashMap<(Side, u32), Severity>) 
 
 /// Format a content line: an optional annotation mark, an `old new` gutter, a
 /// `+`/`-`/space marker, then the text. The `+`/`-` marker keeps its kind colour
-/// (green/red) so additions and deletions stay scannable at a glance; the text
-/// itself is syntax-coloured when `hl` is present, falling back to the plain
-/// per-kind colour otherwise.
+/// (green/red) so additions and deletions stay scannable at a glance — it is the
+/// sole add/remove cue. The text itself is syntax-coloured when `hl` is present,
+/// falling back to the plain default style (never flat green/red) otherwise.
 fn diff_line(
     line: &DiffLine,
     hl: Option<&HlLine>,
@@ -1014,11 +1014,14 @@ fn diff_line(
             }
         }
         None => {
-            let text_style = match line.kind {
-                LineKind::Context => Style::default(),
-                _ => Style::default().fg(color),
-            };
-            spans.push(Span::styled(line.content.replace('\t', "    "), text_style));
+            // No highlighting (unknown language): render text in the plain
+            // default style. The `+`/`-` marker's kind colour is the sole
+            // add/remove cue — flat green/red text only repeats it and drowns
+            // out the content.
+            spans.push(Span::styled(
+                line.content.replace('\t', "    "),
+                Style::default(),
+            ));
         }
     }
     Line::from(spans)

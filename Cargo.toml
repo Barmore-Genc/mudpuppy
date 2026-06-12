@@ -79,9 +79,16 @@ tokio-stream = "0.1"
 # + `default-fancy` swaps oniguruma (a C dependency) for the pure-Rust
 # `fancy-regex` engine, keeping the build toolchain-light and consistent with
 # "entirely local, lean deps" — at a highlighting-speed cost we never feel since
-# we highlight only the opened file's visible hunks. The bundle pulls the default
-# syntaxes + themes we load at runtime.
+# we highlight only the opened file's visible hunks.
 syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+
+# Broad language/theme coverage for `highlight.rs`. syntect's bundled defaults
+# cover only a handful of languages, so unfamiliar files rendered without
+# highlighting; `two-face` ships the full Sublime/bat syntax + theme set (the
+# same bundle `bat` uses). `default-features = false` + `syntect-fancy` keeps the
+# pure-Rust `fancy-regex` engine — two-face's default would otherwise turn on
+# syntect's oniguruma (a C dependency) we deliberately avoid above.
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 
 # Embedded scripting/config layer (the Lua keymap + event hooks). Luau is mlua's
 # first-class, sandbox-oriented backend; `vendored` builds the interpreter from
