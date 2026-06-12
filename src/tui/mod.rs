@@ -187,6 +187,24 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
         engine.fire_startup(app)?;
         engine.fire_file_open(app)?;
 
+        // Launch-time skill-staleness check. Unlike the release check this is local
+        // file IO (read a few `SKILL.md` stamps), so it runs synchronously here —
+        // no thread, no network. Fires only when a stale install exists and the
+        // user hasn't skipped this version, so `core.luau` can offer a refresh.
+        if crate::install::should_prompt_skill_refresh() {
+            let before = Snapshot::of(app);
+            engine.fire_skill_update_check(
+                app,
+                crate::install::SKILL_VERSION,
+                crate::install::SKILL_UPDATE_MESSAGE,
+            )?;
+            if app.should_quit {
+                return Ok(());
+            }
+            let after = Snapshot::of(app);
+            fire_changes(&engine, app, &before, &after)?;
+        }
+
         loop {
             app.status_msg = engine.status_message();
             terminal.draw(|frame| render(frame, app))?;

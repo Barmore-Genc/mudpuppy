@@ -1793,4 +1793,14 @@ impl App {
         }
         self.should_quit
     }
+
+    /// Test helper: fire the `skill_update_check` event through a fresh core-only
+    /// engine, exactly as `run_loop` does at launch, so a layer-1 test can see the
+    /// refresh prompt `core.luau` opens.
+    pub(crate) fn fire_skill_update_check_for_test(&mut self, version: u32, message: &str) {
+        let engine = LuaEngine::new(None).expect("core.luau loads");
+        engine
+            .fire_skill_update_check(self, version, message)
+            .expect("fire skill_update_check");
+    }
 }

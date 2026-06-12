@@ -35,6 +35,20 @@ below. Read it first, and trust it over this file if anything here has drifted.
    (`--file` / `--line` / `--side`, `--severity`, `--tag`). Use `>` for a
    direction or decision, `?` for a genuine question, `!` for a concern. Say
    exactly what you want from the user on each line.
+
+   Write the body with `--body-file -` and a quoted heredoc — this is the
+   canonical form, and it avoids the `$'…\n…'` shell quoting that gets gated for
+   approval on every call:
+
+   ```sh
+   mudpuppy agent comment add --file src/foo.rs --line 42 --body-file - <<'EOF'
+   I picked a BTreeMap here for stable ordering.
+
+   Let me know if you'd rather keep insertion order with a Vec.
+   EOF
+   ```
+
+   For a trivial one-liner, `--body "short note"` is fine.
 5. **Hand off and wait** with `mudpuppy agent wait`. It blocks until the user
    releases the turn, then prints their replies and status changes. Read them,
    adjust your code, reply or resolve (`comment add --reply-to <id>`, `comment
