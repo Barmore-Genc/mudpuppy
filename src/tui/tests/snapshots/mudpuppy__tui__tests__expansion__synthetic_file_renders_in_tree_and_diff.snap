@@ -1,12 +1,13 @@
 ---
 source: src/tui/tests/expansion.rs
+assertion_line: 272
 expression: text
 ---
 "┌ Files (8) │ Annotat┐┌ docs/notes.md [unchanged] 8/8  ●1 ─────────────────────┐"
 "│M src/alpha.rs  +3 -││     1     1   # Notes                                  │"
 "│M src/long.rs  +4 -2││●    2     2   first line                               │"
-"│M README.md  +1 -1  ││     3     3   second line                              │"
-"│A src/new_module.rs ││                                                        │"
+"│M README.md  +1 -1  ││ ▏ ● user [open] body for a1                            │"
+"│A src/new_module.rs ││     3     3   second line                              │"
 "│D old.txt  +0 -2    ││                                                        │"
 "│A assets/logo.png  +││                                                        │"
 "│R src/relocated.rs  ││                                                        │"

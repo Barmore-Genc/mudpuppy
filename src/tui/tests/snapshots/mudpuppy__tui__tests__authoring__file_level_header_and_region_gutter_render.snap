@@ -1,5 +1,6 @@
 ---
 source: src/tui/tests/authoring.rs
+assertion_line: 479
 expression: s
 ---
 "┌ Files (7) │ Annotations ─┐┌ src/alpha.rs [modified] 1/7  ●2 ─────────────────────────────────────┐"
@@ -8,15 +9,15 @@ expression: s
 "│M README.md  +1 -1        ││     1     1   use std::io;                                           │"
 "│A src/new_module.rs  +3 -0││     2       - let x = 1;                                             │"
 "│D old.txt  +0 -2          ││●          2 + let x = 2;                                             │"
-"│A assets/logo.png  +0 -0  ││●          3 + let y = 3;                                             │"
-"│R src/relocated.rs  +0 -0 ││     3     4   println!("{x}");                                       │"
+"│A assets/logo.png  +0 -0  ││ ▏ ● agent [open] body for rgn00002                                   │"
+"│R src/relocated.rs  +0 -0 ││●          3 + let y = 3;                                             │"
+"│                          ││     3     4   println!("{x}");                                       │"
 "│                          ││     4     5   done                                                   │"
 "│                          ││   ↕ 15 hidden lines — show more                                      │"
 "│                          ││ @@ -20,2 +21,2 @@ fn beta() {                                        │"
 "│                          ││    20    21   let beta = compute();                                  │"
 "│                          ││    21       - old beta                                               │"
 "│                          ││          22 + new beta                                               │"
-"│                          ││                                                                      │"
 "│                          ││                                                                      │"
 "│                          ││                                                                      │"
 "│                          ││                                                                      │"

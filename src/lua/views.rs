@@ -154,6 +154,14 @@ pub fn screen(lua: &Lua, app: &App) -> Result<Table> {
                 r.set("old_lineno", old.start)?;
                 r.set("new_lineno", new.start)?;
             }
+            Row::Comment(c) => {
+                r.set("kind", "comment")?;
+                r.set("text", c.text.as_str())?;
+                r.set("id", c.id.as_str())?;
+            }
+            Row::Composer { .. } => {
+                r.set("kind", "composer")?;
+            }
         }
         arr.set(i + 1, r)?;
     }
