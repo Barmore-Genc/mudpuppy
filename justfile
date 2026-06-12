@@ -6,4 +6,5 @@ setup-git-hooks:
 # broken intra-doc link fails here instead of in the docs job.
 pre-commit:
 	cargo fmt --all --check
+	cargo clippy --all-targets --all-features -- -D warnings
 	RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
