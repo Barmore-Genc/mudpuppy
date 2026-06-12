@@ -173,6 +173,17 @@ fn emit_scenario_svgs() {
                 session.screen()
             );
         }
+        // The marker can land a paint or two before keys typed after it (e.g.
+        // the composer body) have finished rendering, which truncates the
+        // capture. Wait for the grid to stop changing before recording.
+        if !session.wait_for_stable_screen(3, Duration::from_secs(10)) {
+            eprintln!(
+                "[{}] screen never quiesced after {:?}; capturing anyway. screen was:\n{}",
+                scenario.name,
+                scenario.settle_marker,
+                session.screen()
+            );
+        }
 
         // Record the settled screen as a truecolor SVG of the vt100 grid.
         let svg = session.screen_svg();

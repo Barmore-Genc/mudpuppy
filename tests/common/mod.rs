@@ -146,6 +146,35 @@ impl Session {
         }
     }
 
+    /// Poll until the screen stops changing — the same grid for `stable_for`
+    /// consecutive samples — or `timeout` elapses; returns whether it settled.
+    /// Keystrokes typed into the PTY are delivered and rendered asynchronously
+    /// one paint at a time, so a marker substring (e.g. the composer's
+    /// `-- INSERT --`) can appear a render or two *before* the text typed after
+    /// it has fully landed. Waiting on the marker alone races that tail; waiting
+    /// for the whole grid to quiesce captures it.
+    pub fn wait_for_stable_screen(&self, stable_for: u32, timeout: Duration) -> bool {
+        let start = Instant::now();
+        let mut last = self.screen();
+        let mut stable = 0;
+        loop {
+            thread::sleep(Duration::from_millis(40));
+            let now = self.screen();
+            if now == last {
+                stable += 1;
+                if stable >= stable_for {
+                    return true;
+                }
+            } else {
+                stable = 0;
+                last = now;
+            }
+            if start.elapsed() >= timeout {
+                return false;
+            }
+        }
+    }
+
     /// Poll the screen until `needle` *disappears* or `timeout` elapses. The
     /// mirror of [`wait_for_screen`](Self::wait_for_screen).
     pub fn wait_until_absent(&self, needle: &str, timeout: Duration) -> bool {
