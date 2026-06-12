@@ -16,6 +16,7 @@ use ratatui::Frame;
 
 use super::app::{App, CommentLine, Focus, Hits, Row, Sidebar};
 use super::composer::{Composer, ComposerTarget, Mode};
+use super::palette;
 use crate::command::CommandPalette;
 use crate::diff::{DiffLine, FileStatus, LineKind};
 use crate::domain::{Author, Severity, Side, Status, Tag, Target};
@@ -33,6 +34,15 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     // fields `None` when closed, so handlers know the affordance isn't on
     // screen.
     app.hits = Hits::default();
+    // Paint the app background across the whole frame first, so foregrounds read
+    // against a background we control instead of the terminal's default (which
+    // can be close enough to a token colour to hide text). Panes that draw their
+    // own background (selection rows, status bar) override per cell; the rest
+    // (gutter, untokenized text, empty cells) inherit it.
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette::BG)),
+        frame.area(),
+    );
     // On first contact an approval banner claims the top row. It only appears
     // until the user approves, so an established session lays out exactly as
     // before and its snapshots are unchanged.
@@ -151,10 +161,10 @@ fn render_prompt(frame: &mut Frame, area: Rect, prompt: &super::prompt::Prompt) 
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "←/→ choose  ·  1-9 pick  ·  Enter confirm  ·  Esc dismiss",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(palette::FG_DIM),
     )));
 
-    frame.render_widget(Clear, area);
+    clear_themed(frame, area);
     frame.render_widget(
         Paragraph::new(lines)
             .block(block)
@@ -207,7 +217,7 @@ fn render_tree(frame: &mut Frame, area: Rect, app: &mut App) {
 
         let mut line = Line::from(spans);
         if selected {
-            line = line.style(Style::default().bg(Color::Rgb(40, 44, 52)));
+            line = line.style(Style::default().bg(palette::BG_SELECTED_FILE));
         }
         lines.push(line);
     }
@@ -270,13 +280,13 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &mut App) {
         // Selection span first, then the cursor row on top, so the cursor stays
         // distinct inside a highlighted region.
         if selection.is_some_and(|(lo, hi)| lo <= idx && idx <= hi) {
-            line = line.style(Style::default().bg(Color::Rgb(48, 54, 78)));
+            line = line.style(Style::default().bg(palette::BG_SELECTION));
         }
         // Highlight the cursor row when the diff is focused, or when the
         // annotations tab is driving it (so the previewed line is visible even
         // though focus stays on the list).
         if (focused || app.sidebar == Sidebar::Annotations) && idx == app.cursor {
-            line = line.style(Style::default().bg(Color::Rgb(60, 66, 84)));
+            line = line.style(Style::default().bg(palette::BG_CURSOR));
         }
         lines.push(line);
     }
@@ -354,7 +364,7 @@ fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
         let line = Line::from(Span::styled(
             "No annotations yet.",
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(palette::FG_DIM)
                 .add_modifier(Modifier::ITALIC),
         ));
         let block = sidebar_tabs_block(area, app, focused);
@@ -363,7 +373,7 @@ fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     let selected = app.annotation_selected.min(total - 1);
-    let sel_bg = Color::Rgb(48, 54, 78);
+    let sel_bg = palette::BG_SELECTION;
 
     // Build the flat line list: a dim bold header before each new file's run,
     // then a header + preview pair per annotation. `block_start[i]` records where
@@ -626,7 +636,7 @@ fn render_picker(frame: &mut Frame, area: Rect, picker: &Picker) -> (Rect, Rect,
         lines.push(picker_row(path, &positions, row == picker.selected));
     }
 
-    frame.render_widget(Clear, area);
+    clear_themed(frame, area);
     frame.render_widget(Paragraph::new(lines).block(block), area);
     (area, inner, offset)
 }
@@ -692,7 +702,7 @@ fn render_palette(frame: &mut Frame, area: Rect, palette: &CommandPalette) -> (R
         lines.push(picker_row(name, &positions, row == palette.selected));
     }
 
-    frame.render_widget(Clear, area);
+    clear_themed(frame, area);
     frame.render_widget(Paragraph::new(lines).block(block), area);
     (area, inner, offset)
 }
@@ -715,7 +725,7 @@ fn render_composer(
 fn compose_lines(composer: &Composer) -> Vec<Line<'static>> {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled("on ", Style::default().fg(Color::DarkGray)),
+        Span::styled("on ", Style::default().fg(palette::FG_DIM)),
         Span::raw(composer.file.clone()),
         Span::raw("  "),
         Span::styled(
@@ -795,7 +805,7 @@ pub(super) fn render_compose_box(
     // The save / cancel labels are styled as button-like chips (green/red on
     // black, bold) so they read as clickable. Their column ranges are recorded
     // below so the mouse can hit them.
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(palette::FG_DIM);
     let save_chip_text = " save ";
     let cancel_chip_text = " cancel ";
     let save_chip_style = Style::default()
@@ -833,7 +843,7 @@ pub(super) fn render_compose_box(
         Span::styled("Ctrl-E severity  ·  Ctrl-T tag  ·  Ctrl-J newline", dim),
     ]));
 
-    frame.render_widget(Clear, area);
+    clear_themed(frame, area);
     frame.render_widget(
         Paragraph::new(lines)
             .block(block)
@@ -946,7 +956,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &mut App) -> Rect {
 
     let block = bordered(&title, true);
     let inner_area = block.inner(outer);
-    frame.render_widget(Clear, outer);
+    clear_themed(frame, outer);
     frame.render_widget(block, outer);
 
     if show_more_hint {
@@ -961,7 +971,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &mut App) -> Rect {
         let hint = Line::from(Span::styled(
             "  ↓ press j or scroll for more ",
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(palette::FG_DIM)
                 .add_modifier(Modifier::ITALIC),
         ));
         frame.render_widget(Paragraph::new(hint), hint_area);
@@ -991,7 +1001,7 @@ fn row_to_line(row: &Row, gutter: bool, marks: &HashMap<(Side, u32), Severity>) 
         Row::Notice(text) => Line::from(Span::styled(
             format!("{pad}{text}"),
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(palette::FG_DIM)
                 .add_modifier(Modifier::ITALIC),
         )),
         Row::Line(line, hl) => diff_line(line, hl.as_ref(), gutter, marks),
@@ -1011,7 +1021,7 @@ fn row_to_line(row: &Row, gutter: bool, marks: &HashMap<(Side, u32), Severity>) 
             Line::from(Span::styled(
                 format!("{pad}  {arrows} {hidden} hidden lines — show more"),
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(palette::FG_DIM)
                     .add_modifier(Modifier::ITALIC),
             ))
         }
@@ -1029,10 +1039,10 @@ fn comment_line(c: &CommentLine, pad: &str) -> Line<'static> {
     let indent = "  ".repeat(c.depth);
     let dim = if c.dimmed {
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(palette::FG_DIM)
             .add_modifier(Modifier::DIM)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(palette::FG_DIM)
     };
     let mut spans = vec![Span::styled(format!("{pad}{indent}▏ "), dim)];
 
@@ -1040,7 +1050,7 @@ fn comment_line(c: &CommentLine, pad: &str) -> Line<'static> {
         Some(meta) => {
             let mark_style = if c.dimmed {
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(palette::FG_DIM)
                     .add_modifier(Modifier::DIM)
             } else {
                 Style::default().fg(severity_color(meta.severity))
@@ -1117,7 +1127,7 @@ fn diff_line(
             None => spans.push(Span::raw(" ")),
         }
     }
-    spans.push(Span::styled(numbers, Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(numbers, Style::default().fg(palette::FG_DIM)));
     spans.push(Span::styled(
         format!("{marker} "),
         Style::default().fg(color),
@@ -1146,7 +1156,16 @@ fn diff_line(
             ));
         }
     }
-    Line::from(spans)
+
+    // A faint kind-coloured band behind the whole line so additions/deletions
+    // read at a glance without parsing the gutter. Selection and cursor styles
+    // are applied on top in `render_diff` and take precedence.
+    let rendered = Line::from(spans);
+    match line.kind {
+        LineKind::Addition => rendered.style(Style::default().bg(palette::BG_ADDED)),
+        LineKind::Deletion => rendered.style(Style::default().bg(palette::BG_REMOVED)),
+        LineKind::Context => rendered,
+    }
 }
 
 /// Build the sidebar's bordered block with a two-tab title strip — `Files (N)`
@@ -1159,15 +1178,15 @@ fn sidebar_tabs_block(area: Rect, app: &mut App, focused: bool) -> Block<'static
     let border_style = if focused {
         Style::default().fg(Color::Cyan)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(palette::FG_DIM)
     };
 
     let active = Style::default()
         .fg(Color::Black)
         .bg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
-    let inactive = Style::default().fg(Color::DarkGray);
-    let sep = Style::default().fg(Color::DarkGray);
+    let inactive = Style::default().fg(palette::FG_DIM);
+    let sep = Style::default().fg(palette::FG_DIM);
 
     let files_text = match app.sidebar {
         Sidebar::Files => format!(" Files ({}) ", app.files.len()),
@@ -1208,12 +1227,24 @@ fn sidebar_tabs_block(area: Rect, app: &mut App, focused: bool) -> Block<'static
         .title(title)
 }
 
+/// Wipe `area` and repaint it with the app background. Overlays clear the cells
+/// underneath them before drawing; a bare `Clear` resets those cells to the
+/// terminal default, so without this the popover would show the terminal's
+/// background instead of the themed one painted across the rest of the app.
+fn clear_themed(frame: &mut Frame, area: Rect) {
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette::BG)),
+        area,
+    );
+}
+
 /// A bordered block whose border brightens when its pane is focused.
 fn bordered(title: &str, focused: bool) -> Block<'static> {
     let border_style = if focused {
         Style::default().fg(Color::Cyan)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(palette::FG_DIM)
     };
     Block::default()
         .borders(Borders::ALL)
@@ -1228,7 +1259,7 @@ fn status_marker(status: &FileStatus) -> (char, Color) {
         FileStatus::Deleted => ('D', Color::Red),
         FileStatus::Modified => ('M', Color::Yellow),
         FileStatus::Renamed => ('R', Color::Cyan),
-        FileStatus::Unchanged => ('·', Color::DarkGray),
+        FileStatus::Unchanged => ('·', palette::FG_DIM),
     }
 }
 

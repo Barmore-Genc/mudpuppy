@@ -16,6 +16,7 @@
 // Re-exported (rather than plain `use`) so the submodules can pull the whole
 // toolbox in with `use super::*` regardless of which names each one touches.
 pub(super) use super::app::{App, FileView, Focus, GapExpansion, Row, Sidebar, ViewPlan};
+pub(super) use super::palette;
 pub(super) use super::render::{render, MARK};
 pub(super) use crate::blob::BlobSide;
 pub(super) use crate::diff::{parse_diff, DiffLine, FileDiff, FileStatus, LineKind};

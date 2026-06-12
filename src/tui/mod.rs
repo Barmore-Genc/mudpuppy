@@ -36,7 +36,9 @@
 mod annotate;
 mod app;
 mod composer;
+pub mod debug;
 mod interleave;
+mod palette;
 mod prompt;
 mod render;
 #[cfg(test)]
