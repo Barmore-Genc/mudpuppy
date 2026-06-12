@@ -411,9 +411,9 @@ fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
 
 /// The first-contact approval banner (PLAN.md §6): a full-width highlighted row
 /// telling the user an agent wants to collaborate and that releasing the turn
-/// (`r`) approves it. Shown only while [`App::awaiting_approval`] holds.
+/// (`Space t r`) approves it. Shown only while [`App::awaiting_approval`] holds.
 fn render_approval_banner(frame: &mut Frame, area: Rect) {
-    let text = " An agent wants to collaborate on this review — press r to approve and hand it the first turn ";
+    let text = " An agent wants to collaborate on this review — press Space t r to approve and hand it the first turn ";
     let banner = Paragraph::new(Line::from(Span::styled(
         text,
         Style::default()
@@ -511,8 +511,8 @@ fn render_status(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 
     // When an agent is blocked in `agent wait`, make it impossible to miss and
-    // advertise the release key (PLAN.md §6). Before first-contact approval the
-    // same `r` press approves, so the hint says so (the banner spells it out).
+    // advertise the release chord (PLAN.md §6). Before first-contact approval the
+    // same release approves, so the hint says so (the banner spells it out).
     if app.turn.agent_waiting {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
@@ -523,17 +523,19 @@ fn render_status(frame: &mut Frame, area: Rect, app: &mut App) {
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::raw("  "));
-        // Record the clickable span over "r release"/"r approve" so a mouse
+        // Record the clickable span over "Space t r release"/"approve" so a mouse
         // click on the call-to-action triggers release_turn (issue #29).
         let x_start = area.x + span_total_width(&spans).min(area.width);
-        spans.push(Span::styled("r", Style::default().fg(Color::Yellow)));
+        let key = "Space t r";
+        spans.push(Span::styled(key, Style::default().fg(Color::Yellow)));
         let action = if app.turn.approved {
             " release  "
         } else {
             " approve  "
         };
         spans.push(Span::raw(action));
-        let label_chars = 1 + action.trim().chars().count();
+        // Span the key plus the action word (drop only the trailing padding).
+        let label_chars = key.chars().count() + action.trim_end().chars().count();
         let x_end = (x_start + label_chars as u16).min(area.x + area.width);
         app.hits.release_span = Some((area.y, x_start, x_end));
     } else {
@@ -846,7 +848,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &mut App) -> Rect {
         Line::raw("  wheel         scroll the pane / overlay under the cursor"),
         Line::raw("  click         focus a pane; pick a file / annotation row"),
         Line::raw("  click title   switch sidebar tabs (Files ↔ Annotations)"),
-        Line::raw("  click r       release / approve the turn (status bar)"),
+        Line::raw("  click waiting release / approve the turn (status bar)"),
         Line::raw("  drag (diff)   enter visual mode and select lines"),
         Line::raw("  dbl-click     open file (tree) · comment line (diff)"),
         Line::raw(""),
