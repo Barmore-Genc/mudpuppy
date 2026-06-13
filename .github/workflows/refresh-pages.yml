@@ -1,0 +1,34 @@
+name: Refresh Pages
+
+# Custom dist post-announce job: after the Release workflow publishes a new
+# GitHub Release, dispatch the Pages workflow so the published site picks up the
+# new release's dist-manifest.json (the source for the in-app update check).
+#
+# The release is created with GITHUB_TOKEN, and GitHub suppresses workflow runs
+# triggered by that token, so pages.yml's `release: published` trigger never
+# fires. workflow_dispatch is exempt from that no-trigger rule, so we dispatch
+# pages.yml explicitly here.
+
+on:
+  workflow_call:
+    # dist passes the release plan to every custom job; accept and ignore it.
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  # actions: write lets us dispatch the Pages workflow.
+  actions: write
+
+jobs:
+  refresh-pages:
+    runs-on: ubuntu-22.04
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Refresh Pages site with the new release manifest
+        run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY"

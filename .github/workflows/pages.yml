@@ -8,7 +8,10 @@ name: Pages
 #     plain HTTPS GET, with no `gh` needed on the user's machine.
 #
 # Runs on a push to main (README changed), when a release is published (manifest
-# changed), and on demand.
+# changed), and on demand. Note: the `release` trigger does NOT fire for releases
+# cut by our Release workflow, because GitHub suppresses workflow runs triggered by
+# GITHUB_TOKEN. release.yml therefore dispatches this workflow explicitly (via
+# `gh workflow run`, using the workflow_dispatch trigger below) once it publishes.
 
 on:
   push:

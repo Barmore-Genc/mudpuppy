@@ -102,6 +102,17 @@ two-face = { version = "0.5", default-features = false, features = ["syntect-fan
 # loaded on top. The interpreter is sandboxed: no io/os/network/subprocess.
 mlua = { version = "0.10", features = ["luau", "vendored"] }
 
+# Self-update install (update.rs). The updater downloads the prebuilt release
+# archive for this build's target and swaps it in, so a user with no Rust
+# toolchain can still update (we no longer shell out to `cargo install`).
+# `sha2` verifies the archive against the checksum carried in the manifest before
+# we trust it; `self-replace` performs the swap of the *running* executable
+# correctly on both Unix and Windows (a plain rename can't replace a running .exe
+# on Windows). Both are pure-Rust and cross-compile cleanly to every target. The
+# archive codecs themselves are platform-split below (.tar.xz vs .zip).
+sha2 = "0.10"
+self-replace = "1"
+
 # Update check (update.rs). A tiny blocking HTTP+TLS client used for the single
 # launch-time GET of the release `dist-manifest.json` published to GitHub Pages —
 # so the check needs no `gh` (not a hard dependency of mudpuppy). The fetch runs on
@@ -112,6 +123,10 @@ mlua = { version = "0.10", features = ["luau", "vendored"] }
 # Non-Windows: rustls keeps the TLS stack pure-Rust and toolchain-light.
 [target.'cfg(not(windows))'.dependencies]
 ureq = "2"
+# macOS and Linux releases ship `.tar.xz`. `lzma-rs` is a pure-Rust xz decoder
+# (no liblzma C build) and `tar` unpacks the archive — both cross-compile cleanly.
+lzma-rs = "0.3"
+tar = "0.4"
 
 # Windows: rustls pulls in `ring`, whose C/asm build fails to cross-compile for
 # aarch64-pc-windows-msvc under cargo-dist's cargo-xwin toolchain (`/imsvc` is
@@ -120,6 +135,10 @@ ureq = "2"
 # cleanly. We keep `gzip` (the only other default feature we rely on).
 [target.'cfg(windows)'.dependencies]
 ureq = { version = "2", default-features = false, features = ["native-tls", "gzip"] }
+# Windows releases ship `.zip`. `default-features = false` + `deflate` keeps the
+# pure-Rust `miniz_oxide` codec and drops the optional bzip2/zstd C backends, so
+# this stays consistent with the no-C-build, cross-compilable stance above.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 serde_json = "1"

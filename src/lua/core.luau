@@ -172,8 +172,10 @@ m.map("help", "q", function() m.toggle_help() end)
 -- the found version; the `:check-updates` command runs a check on demand.
 
 -- Offer to install `version`. "Install" updates now; "Ignore" dismisses until the
--- next launch; "Skip" stops checking and records that in the user config.
-local function offer_update(version)
+-- next launch; "Skip" stops checking and records that in the user config. The
+-- optional `changelog` (release notes from the manifest) renders as a scrollable
+-- body in the prompt so the user can see what changed before updating.
+local function offer_update(version, changelog)
   m.prompt("mudpuppy " .. version .. " is available. Update now?", {
     { "Install", function()
         m.updates.update(version)
@@ -181,20 +183,20 @@ local function offer_update(version)
       end },
     { "Ignore for now", function() end },
     { "Skip", function() m.updates.disable() end },
-  })
+  }, changelog)
 end
 
 -- Launch-time check: the event loop already did the (off-thread) fetch and only
 -- fires this when a newer release exists, passing it in the payload.
 m.on("update_check", function(ev)
-  if ev.version then offer_update(ev.version) end
+  if ev.version then offer_update(ev.version, ev.changelog) end
 end)
 
 -- Manual check from the `:` palette; reports when already current.
 m.command("check-updates", function()
-  local version = m.updates.check()
-  if version then
-    offer_update(version)
+  local info = m.updates.check()
+  if info then
+    offer_update(info.version, info.changelog)
   else
     print("mudpuppy is up to date.")
   end
