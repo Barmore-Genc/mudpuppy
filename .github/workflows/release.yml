@@ -287,10 +287,6 @@ jobs:
     # "host" however must run to completion, no skipping allowed!
     if: ${{ always() && needs.host.result == 'success' }}
     runs-on: "ubuntu-22.04"
-    # actions: write lets us dispatch the Pages workflow below.
-    permissions:
-      contents: write
-      actions: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -298,10 +294,12 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-      # The release was created with GITHUB_TOKEN, and GitHub suppresses workflow
-      # runs triggered by that token, so pages.yml's `release: published` trigger
-      # never fires. Dispatch it explicitly so the published site picks up the new
-      # release's dist-manifest.json (the source for the in-app update check).
-      # workflow_dispatch is exempt from the GITHUB_TOKEN no-trigger rule.
-      - name: Refresh Pages site with the new release manifest
-        run: gh workflow run pages.yml --repo "$GITHUB_REPOSITORY"
+
+  custom-refresh-pages:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/refresh-pages.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
