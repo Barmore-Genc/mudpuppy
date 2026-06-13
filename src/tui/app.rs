@@ -888,6 +888,17 @@ impl App {
         self.select(next.clamp(0, last) as usize);
     }
 
+    /// Move the cursor to an absolute row (clamped) and scroll so it sits in the
+    /// vertical middle of the diff viewport — used when jumping to an annotation,
+    /// so its surrounding context shows above and below rather than the line
+    /// landing flush against the bottom edge.
+    pub(crate) fn set_cursor_centered(&mut self, n: i64) {
+        self.cursor = n.clamp(0, self.last_row() as i64) as usize;
+        let height = self.diff_height.max(1) as i64;
+        let target = self.cursor as i64 - height / 2;
+        self.scroll = target.clamp(0, self.max_scroll() as i64) as usize;
+    }
+
     /// Move the cursor to an absolute row (clamped), keeping it visible.
     pub(crate) fn set_cursor(&mut self, n: i64) {
         self.cursor = n.clamp(0, self.last_row() as i64) as usize;
@@ -1136,7 +1147,7 @@ impl App {
         }
         if scope == AnchorScope::Line {
             if let Some(row) = self.row_for_anchor(side, line) {
-                self.set_cursor(row as i64);
+                self.set_cursor_centered(row as i64);
             }
         }
     }
