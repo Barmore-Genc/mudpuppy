@@ -148,6 +148,76 @@ fn navigating_the_tab_previews_without_changing_focus() {
 }
 
 #[test]
+fn long_annotation_list_scrolls_to_reach_the_last_item() {
+    // Regression: the list scroll math counted logical lines while the pane
+    // wrapped, so once bodies wrapped the bottom annotations became unreachable.
+    // With wrap-aware scrolling, jumping to the last note (G) keeps it on screen.
+    let mut notes = Vec::new();
+    for i in 1..=15u32 {
+        let mut n = note(
+            &format!("note{i:04}"),
+            Author::User,
+            "src/long.rs",
+            Side::Right,
+            i,
+            Severity::Info,
+        );
+        n.body =
+            "a deliberately long body that wraps across several rows in the narrow sidebar pane"
+                .to_string();
+        notes.push(n);
+    }
+    let mut a = annotated_app(notes);
+    let term = drive(
+        &mut a,
+        100,
+        24,
+        &[
+            key(KeyCode::Char(' ')),
+            key(KeyCode::Char('a')),
+            key(KeyCode::Char('G')),
+        ],
+    );
+    // The 15th note (RIGHT line 15) is selected and visible, not scrolled past.
+    assert_eq!(a.annotation_selected, 14);
+    assert!(
+        screen(&term).contains("L15 user"),
+        "the last annotation should be on screen after jumping to it"
+    );
+}
+
+#[test]
+fn selecting_an_annotation_centers_it_in_the_diff() {
+    // Regression: previewing a note jumped the diff so the anchored line landed
+    // flush at the bottom edge; it should sit near the vertical middle instead.
+    let mut a = annotated_app(vec![note(
+        "mid00001",
+        Author::User,
+        "src/long.rs",
+        Side::Right,
+        15,
+        Severity::Info,
+    )]);
+    drive(
+        &mut a,
+        100,
+        24,
+        &[key(KeyCode::Char(' ')), key(KeyCode::Char('a'))],
+    );
+    let height = a.diff_height;
+    let offset = a.cursor - a.scroll; // cursor's row within the viewport
+    assert!(
+        offset != height - 1,
+        "the anchored line should not be pinned to the bottom row"
+    );
+    let mid = height / 2;
+    assert!(
+        offset.abs_diff(mid) <= 1,
+        "expected the anchored line near the middle (row {mid}), got row {offset}"
+    );
+}
+
+#[test]
 fn status_bar_shows_annotation_count() {
     let term = drive(&mut annotated_app(alpha_notes()), 100, 24, &[]);
     // Two annotations, both open.

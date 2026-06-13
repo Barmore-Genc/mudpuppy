@@ -16,6 +16,7 @@ use ratatui::Frame;
 
 use super::app::{App, CommentLine, Focus, Hits, Row, Sidebar};
 use super::composer::{Composer, ComposerTarget, Mode};
+use super::interleave::wrap_text;
 use super::palette;
 use crate::command::CommandPalette;
 use crate::diff::{DiffLine, FileStatus, LineKind};
@@ -440,11 +441,23 @@ fn render_diff(frame: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
+/// Wrap `text` to `width` columns for the annotations list, but leave a line
+/// that already fits untouched — `wrap_text` collapses internal whitespace, so
+/// passing every (mostly short) header through it would drop the deliberate
+/// double-space separators. Only over-long lines are reflowed.
+fn wrap_pane(text: &str, width: usize) -> Vec<String> {
+    if text.chars().count() <= width {
+        vec![text.to_string()]
+    } else {
+        wrap_text(text, width)
+    }
+}
+
 /// The annotations sidebar tab: every annotation in the store across all files,
 /// grouped under a bold file header, each row a severity-coloured mark with its
 /// anchor, author, optional tag, status, and the full (wrapped) body. Threaded
-/// replies are indented under their parent. The selected row is highlighted and
-/// the list scrolls to keep it visible. Replaces the file tree when toggled on.
+/// replies are indented under their parent. The selected row is centred and
+/// highlighted. Replaces the file tree when toggled on.
 fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
     let focused = app.focus == Focus::Tree;
     let height = (area.height.saturating_sub(2) as usize).max(1);
@@ -466,6 +479,11 @@ fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
 
     let selected = app.annotation_selected.min(total - 1);
     let sel_bg = palette::BG_SELECTION;
+    // Pre-wrap to the pane's text width so `lines` counts true rendered rows.
+    // Letting the `Paragraph` wrap instead would desync the scroll math (which
+    // works in rows) from what's drawn, leaving the bottom annotations
+    // unreachable once any body wraps.
+    let width = (area.width.saturating_sub(2) as usize).max(1);
 
     // Build the flat line list: a dim bold header before each new file's run,
     // then a header plus the full (wrapped) body per annotation. `block_start[i]`
@@ -480,23 +498,31 @@ fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
             if !lines.is_empty() {
                 lines.push(Line::raw(""));
             }
-            lines.push(Line::from(Span::styled(
-                a.file.clone(),
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            )));
+            for piece in wrap_pane(&a.file, width) {
+                lines.push(Line::from(Span::styled(
+                    piece,
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
         }
 
         block_start.push(lines.len());
         let sel = i == selected;
-        let indent = if a.is_reply() { "  " } else { "" };
+        // Replies sit two columns in; the body is indented two further than its
+        // header so it tucks under the mark.
+        let (header_indent, body_indent) = if a.is_reply() {
+            ("  ", "    ")
+        } else {
+            ("", "  ")
+        };
         let tag = a
             .tag
             .map(|t| format!(" {}", tag_symbol(t)))
             .unwrap_or_default();
         let header = format!(
-            "{indent}{MARK} {} {}{}  {}",
+            "{header_indent}{MARK} {} {}{}  {}",
             panel_anchor(a),
             author_word(a.author),
             tag,
@@ -506,35 +532,45 @@ fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
         if sel {
             header_style = header_style.bg(sel_bg).add_modifier(Modifier::BOLD);
         }
-        lines.push(Line::from(Span::styled(header, header_style)));
+        for piece in wrap_pane(&header, width) {
+            lines.push(Line::from(Span::styled(piece, header_style)));
+        }
 
-        // The full body; the panel `Paragraph` wraps each line to the pane width.
         let mut body_style = Style::default().fg(Color::Gray);
         if sel {
             body_style = body_style.bg(sel_bg);
         }
+        // Wrap the body content to the width left after the indent, then re-apply
+        // the indent to each wrapped row so continuation lines stay aligned (and
+        // `wrap_text`'s whitespace-collapsing doesn't eat the leading indent).
+        let body_width = width.saturating_sub(body_indent.len()).max(1);
         for body_line in a.body.lines() {
-            lines.push(Line::from(Span::styled(
-                format!("{indent}  {body_line}"),
-                body_style,
-            )));
+            for piece in wrap_pane(body_line, body_width) {
+                lines.push(Line::from(Span::styled(
+                    format!("{body_indent}{piece}"),
+                    body_style,
+                )));
+            }
         }
     }
 
-    // Keep the selected block within the viewport. The block runs from its start
-    // up to the next annotation's start (or the end of the list).
+    // Centre the selected block in the viewport (its lines span its start up to
+    // the next annotation's start), so jumping to an annotation shows context
+    // around it rather than pinning it to the bottom edge. Blocks taller than
+    // the viewport anchor at their header. The end-of-list clamp lets the last
+    // annotation sit lower than centre once there's nothing more to scroll to.
     let start = block_start[selected];
     let end = block_start
         .get(selected + 1)
         .copied()
         .unwrap_or(lines.len());
-    let mut scroll = app.annotation_scroll;
-    if start < scroll {
-        scroll = start;
-    } else if end > scroll + height {
-        scroll = end - height;
-    }
-    scroll = scroll.min(lines.len().saturating_sub(height));
+    let block_h = end - start;
+    let scroll = if block_h >= height {
+        start
+    } else {
+        start.saturating_sub((height - block_h) / 2)
+    };
+    let scroll = scroll.min(lines.len().saturating_sub(height));
     app.annotation_scroll = scroll;
     // Record the per-annotation start lines (in unscrolled coordinates) and the
     // scroll offset so a click can map y → annotation index.
@@ -545,12 +581,7 @@ fn render_annotations(frame: &mut Frame, area: Rect, app: &mut App) {
     let visible: Vec<Line> = visible.into_iter().take(height).collect();
 
     let block = sidebar_tabs_block(area, app, focused);
-    frame.render_widget(
-        Paragraph::new(visible)
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    frame.render_widget(Paragraph::new(visible).block(block), area);
 }
 
 /// The first-contact approval banner (PLAN.md §6): a full-width highlighted row
