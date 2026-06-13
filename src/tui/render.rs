@@ -126,23 +126,120 @@ pub(crate) fn render(frame: &mut Frame, app: &mut App) {
     }
 }
 
-/// The modal prompt overlay (opened by `mudpuppy.prompt`): a wrapped question
-/// above a row of labelled option chips, the highlighted one styled like a button.
-/// A footer spells out the keys. The matching callbacks run in the scripting
-/// engine when the user confirms.
+/// The modal prompt overlay (opened by `mudpuppy.prompt`). A prompt with a details
+/// body (a release changelog, say) gets the larger scrollable layout; a plain
+/// yes/no prompt keeps the compact one.
 fn render_prompt(frame: &mut Frame, area: Rect, prompt: &super::prompt::Prompt) {
+    if prompt.details.is_some() {
+        render_detailed_prompt(frame, area, prompt);
+    } else {
+        render_simple_prompt(frame, area, prompt);
+    }
+}
+
+/// The compact prompt: a wrapped question above a row of labelled option chips, the
+/// highlighted one styled like a button. A footer spells out the keys. The matching
+/// callbacks run in the scripting engine when the user confirms.
+fn render_simple_prompt(frame: &mut Frame, area: Rect, prompt: &super::prompt::Prompt) {
     let area = centered_rect(64, (area.height * 4 / 10).max(7), area);
     let block = bordered(" mudpuppy ", true);
 
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        prompt.message.clone(),
-        Style::default().add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::raw(""));
+    let lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            prompt.message.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(option_chips(prompt)),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "←/→ choose  ·  1-9 pick  ·  Enter confirm  ·  Esc dismiss",
+            Style::default().fg(palette::FG_DIM),
+        )),
+    ];
 
-    // One chip per option, numbered (`1`–) so a digit key picks it directly. The
-    // highlighted option reads as a button; the rest are dim.
+    clear_themed(frame, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+/// The detailed prompt: the question, a scrollable details body (e.g. the release
+/// changelog), then the pinned option chips. Up/down scroll the body; the chips and
+/// footer stay put.
+fn render_detailed_prompt(frame: &mut Frame, area: Rect, prompt: &super::prompt::Prompt) {
+    let width = 76.min(area.width.saturating_sub(2)).max(24);
+    let height = (area.height * 7 / 10).clamp(12, area.height.max(12));
+    let outer = centered_rect(width, height, area);
+
+    let block = bordered(" mudpuppy ", true);
+    let inner = block.inner(outer);
+    clear_themed(frame, outer);
+    frame.render_widget(block, outer);
+
+    // question (+ blank) | scrolling body | blank + chips + key hint
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(1),
+        Constraint::Length(3),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(Span::styled(
+                prompt.message.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::raw(""),
+        ])
+        .wrap(Wrap { trim: false }),
+        chunks[0],
+    );
+
+    // Pre-wrap the body to the body width so the scroll offset is in real display
+    // lines; clamp the offset to the content so over-scrolling shows no blank gap.
+    let body = chunks[1];
+    let details = prompt.details.as_deref().unwrap_or_default();
+    let wrapped = super::interleave::wrap_text(details, body.width.max(1) as usize);
+    let view_h = body.height as usize;
+    let max_scroll = wrapped.len().saturating_sub(view_h) as u16;
+    let offset = prompt.scroll.min(max_scroll);
+    let lines: Vec<Line> = wrapped
+        .iter()
+        .skip(offset as usize)
+        .take(view_h)
+        .map(|l| {
+            Line::from(Span::styled(
+                l.clone(),
+                Style::default().fg(palette::FG_DIM),
+            ))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), body);
+
+    let hint = if max_scroll > 0 {
+        "↑/↓ scroll  ·  ←/→ choose  ·  Enter confirm  ·  Esc dismiss"
+    } else {
+        "←/→ choose  ·  Enter confirm  ·  Esc dismiss"
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::raw(""),
+            Line::from(option_chips(prompt)),
+            Line::from(Span::styled(hint, Style::default().fg(palette::FG_DIM))),
+        ])
+        .wrap(Wrap { trim: false }),
+        chunks[2],
+    );
+}
+
+/// One chip per option, numbered (`1`–) so a digit key picks it directly. The
+/// highlighted option reads as a button; the rest are dim.
+fn option_chips(prompt: &super::prompt::Prompt) -> Vec<Span<'static>> {
     let mut chips: Vec<Span> = Vec::new();
     for (i, label) in prompt.options.iter().enumerate() {
         if i > 0 {
@@ -159,21 +256,7 @@ fn render_prompt(frame: &mut Frame, area: Rect, prompt: &super::prompt::Prompt) 
         };
         chips.push(Span::styled(text, style));
     }
-    lines.push(Line::from(chips));
-
-    lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled(
-        "←/→ choose  ·  1-9 pick  ·  Enter confirm  ·  Esc dismiss",
-        Style::default().fg(palette::FG_DIM),
-    )));
-
-    clear_themed(frame, area);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    chips
 }
 
 /// The left-hand file tree, with status markers and `+`/`-` counts.

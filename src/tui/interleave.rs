@@ -205,8 +205,8 @@ fn emit_comment(rows: &mut Vec<Row>, a: &Annotation, depth: usize, inner_width: 
 /// Greedy word-wrap of `text` to `width` columns, breaking on whitespace and
 /// hard-splitting any single word longer than `width`. Always yields at least
 /// one line per input line so a header still renders for an empty body. Shared
-/// with the all-annotations sidebar list, which pre-wraps to keep its scroll
-/// math in rendered-row units.
+/// with the prompt overlay's scrollable details body and the all-annotations
+/// sidebar list, which pre-wraps to keep its scroll math in rendered-row units.
 pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out: Vec<String> = Vec::new();

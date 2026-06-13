@@ -18,3 +18,5 @@ targets = [
     "x86_64-pc-windows-msvc",
     "aarch64-pc-windows-msvc",
 ]
+# Refresh the Pages site (and its dist-manifest.json) after a release publishes.
+post-announce-jobs = ["./refresh-pages"]

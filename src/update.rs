@@ -9,14 +9,22 @@
 //! drive the parse + comparison with a mocked fetcher instead of touching the
 //! network.
 //!
-//! Installing still shells out to `cargo`. Security: [`install`] only ever runs
-//! after [`is_valid_version_tag`] accepts the argument — a strict
-//! `vMAJOR.MINOR.PATCH` shape, digits only. Combined with arg-separated spawning
-//! (never a shell string) this keeps a version value, even one that reached us
-//! from a script or the network, from smuggling extra arguments or shell
-//! metacharacters into the subprocess.
+//! Installing downloads the **prebuilt** release binary and swaps it in — it does
+//! *not* shell out to `cargo`, so a user with no Rust toolchain can still update.
+//! [`install`] re-reads the same manifest to find the archive built for this
+//! binary's target triple (captured at build time, see `build.rs`), downloads it
+//! over HTTPS from the GitHub release, verifies it against the SHA-256 the
+//! manifest carries, extracts the executable, and replaces the running binary in
+//! place (`self_replace`, which handles the running-process specifics on both
+//! Unix and Windows). The macOS/Linux archives are `.tar.xz`, Windows ships
+//! `.zip`; the codec is chosen per-platform.
+//!
+//! Security: [`install`] only proceeds after [`is_valid_version_tag`] accepts the
+//! requested version — a strict `vMAJOR.MINOR.PATCH` shape, digits only — and the
+//! download is rejected unless its checksum matches the manifest. The version
+//! never reaches a shell, so it can't smuggle arguments or metacharacters.
 
-use std::process::Command;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -30,6 +38,18 @@ pub const MANIFEST_URL_ENV: &str = "MUDPUPPY_UPDATE_MANIFEST_URL";
 /// How long the launch-time manifest GET may take before giving up. Bounded so a
 /// hung connection can't wedge a caller (and the spawn_blocking thread) forever.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// How long an artifact download may take. Larger than [`FETCH_TIMEOUT`] (a
+/// release archive is a few MB, not a few KB), but still bounded so an update
+/// can't hang indefinitely.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The target triple this binary was built for (e.g. `aarch64-apple-darwin`),
+/// captured from cargo's `TARGET` by `build.rs`. Used to pick the matching
+/// prebuilt artifact out of the release manifest.
+fn target_triple() -> &'static str {
+    env!("MUDPUPPY_TARGET_TRIPLE")
+}
 
 /// This build's version, e.g. `"0.1.1"` (no leading `v`), from Cargo.
 pub fn current_version() -> &'static str {
@@ -63,11 +83,20 @@ pub fn manifest_url() -> Option<String> {
     ))
 }
 
-/// Check for a newer release. Returns `Some(tag)` (e.g. `"v1.2.3"`) when the
+/// A newer release the user can install: its tag and, when the manifest carries
+/// one, the release changelog (the dist `announcement_changelog`, markdown text)
+/// so the update prompt can show what changed.
+#[derive(Debug, Clone)]
+pub struct ReleaseInfo {
+    pub version: String,
+    pub changelog: Option<String>,
+}
+
+/// Check for a newer release. Returns the release (tag + changelog) when the
 /// published manifest names a version newer than this build, else `None`. Errors
 /// only when the network fetch or the manifest parse fails — the TUI's Lua wrapper
 /// turns those into "no update" so a transient failure never disturbs a session.
-pub fn check() -> Result<Option<String>> {
+pub fn check() -> Result<Option<ReleaseInfo>> {
     check_with(http_get)
 }
 
@@ -75,49 +104,124 @@ pub fn check() -> Result<Option<String>> {
 /// parse the result, and compare against the running version. `fetch` is the seam
 /// tests mock — they pass a closure returning canned manifest JSON (or an error)
 /// instead of hitting the network.
-fn check_with(fetch: impl FnOnce(&str) -> Result<String>) -> Result<Option<String>> {
+fn check_with(fetch: impl FnOnce(&str) -> Result<String>) -> Result<Option<ReleaseInfo>> {
     let Some(url) = manifest_url() else {
         return Ok(None);
     };
     let body = fetch(&url)?;
-    let latest = version_from_manifest(&body)?;
-    Ok(latest.filter(|tag| is_newer(tag, current_version())))
+    let Some(release) = release_from_manifest(&body)? else {
+        return Ok(None);
+    };
+    Ok(is_newer(&release.version, current_version()).then_some(release))
 }
 
-/// The slice of a dist `dist-manifest.json` we read: the announcement tag and the
-/// per-app releases. Everything else (artifacts, hashes, …) is ignored.
+/// The slice of a dist `dist-manifest.json` we read: the announcement tag, the
+/// per-app releases, and the artifact table the install step resolves against.
 #[derive(Deserialize)]
 struct DistManifest {
     #[serde(default)]
     announcement_tag: Option<String>,
+    /// The release changelog (markdown), shown in the update prompt.
+    #[serde(default)]
+    announcement_changelog: Option<String>,
     #[serde(default)]
     releases: Vec<ManifestRelease>,
+    /// Keyed by artifact file name (e.g. `mudpuppy-aarch64-apple-darwin.tar.xz`).
+    #[serde(default)]
+    artifacts: HashMap<String, ManifestArtifact>,
 }
 
 #[derive(Deserialize)]
 struct ManifestRelease {
     app_name: String,
     app_version: String,
+    /// Names of the artifacts belonging to this release (keys into `artifacts`).
+    #[serde(default)]
+    artifacts: Vec<String>,
+    #[serde(default)]
+    hosting: Hosting,
 }
 
-/// Pull the released version (as a `vX.Y.Z` tag) out of a `dist-manifest.json`.
-/// Prefers the manifest's `announcement_tag`; falls back to the `app_version` of
-/// the release matching this crate (or the first release). `None` if the manifest
-/// names no version.
-fn version_from_manifest(json: &str) -> Result<Option<String>> {
+#[derive(Deserialize, Default)]
+struct Hosting {
+    #[serde(default)]
+    github: Option<GithubHosting>,
+}
+
+/// Where a GitHub-hosted release's files live. The download URL is
+/// `artifact_base_url` + `artifact_download_path` + `/` + the artifact name.
+#[derive(Deserialize)]
+struct GithubHosting {
+    artifact_base_url: String,
+    artifact_download_path: String,
+}
+
+#[derive(Deserialize)]
+struct ManifestArtifact {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    target_triples: Vec<String>,
+    #[serde(default)]
+    assets: Vec<ArtifactAsset>,
+    /// Checksums keyed by algorithm; we use `sha256`.
+    #[serde(default)]
+    checksums: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct ArtifactAsset {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    kind: String,
+}
+
+/// Parse `json` into the release (tag + changelog) it names, or `None` if it names
+/// no version. The changelog is trimmed and dropped if empty.
+fn release_from_manifest(json: &str) -> Result<Option<ReleaseInfo>> {
     let manifest: DistManifest =
         serde_json::from_str(json).context("parsing dist-manifest.json")?;
+    let Some(version) = manifest_version(&manifest) else {
+        return Ok(None);
+    };
+    let changelog = manifest
+        .announcement_changelog
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_string);
+    Ok(Some(ReleaseInfo { version, changelog }))
+}
 
-    if let Some(tag) = manifest.announcement_tag.filter(|t| !t.trim().is_empty()) {
-        return Ok(Some(normalize_tag(tag.trim())));
+/// The released version (as a `vX.Y.Z` tag) named by a parsed manifest. Prefers
+/// the `announcement_tag`; falls back to the `app_version` of the release matching
+/// this crate (or the first release). `None` if the manifest names no version.
+fn manifest_version(manifest: &DistManifest) -> Option<String> {
+    if let Some(tag) = manifest
+        .announcement_tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        return Some(normalize_tag(tag));
     }
-    let version = manifest
+    manifest
         .releases
         .iter()
         .find(|r| r.app_name == env!("CARGO_PKG_NAME"))
         .or_else(|| manifest.releases.first())
-        .map(|r| normalize_tag(r.app_version.trim()));
-    Ok(version)
+        .map(|r| normalize_tag(r.app_version.trim()))
+}
+
+/// Pull the released version (as a `vX.Y.Z` tag) out of a `dist-manifest.json`.
+/// `None` if the manifest names no version. A thin JSON wrapper over
+/// `manifest_version`, kept for the focused tag-extraction tests.
+#[cfg(test)]
+fn version_from_manifest(json: &str) -> Result<Option<String>> {
+    let manifest: DistManifest =
+        serde_json::from_str(json).context("parsing dist-manifest.json")?;
+    Ok(manifest_version(&manifest))
 }
 
 /// Ensure a version string carries the leading `v` the rest of the module (and
@@ -143,40 +247,251 @@ fn http_get(url: &str) -> Result<String> {
     Ok(body)
 }
 
-/// Install `version` (a `vMAJOR.MINOR.PATCH` tag), replacing the current binary.
+/// Fetch `url` over HTTPS, returning the raw bytes. Used for the (binary) release
+/// archive. Bounded by [`DOWNLOAD_TIMEOUT`].
+fn http_get_bytes(url: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let agent = ureq::AgentBuilder::new().timeout(DOWNLOAD_TIMEOUT).build();
+    let mut buf = Vec::new();
+    agent
+        .get(url)
+        .call()
+        .with_context(|| format!("downloading {url}"))?
+        .into_reader()
+        .read_to_end(&mut buf)
+        .context("reading the downloaded archive")?;
+    Ok(buf)
+}
+
+/// Install `version` (a `vMAJOR.MINOR.PATCH` tag), replacing the running binary
+/// with the prebuilt release for it.
 ///
-/// The version is validated by [`is_valid_version_tag`] before it reaches the
-/// subprocess; an invalid value is refused outright. Shells out to
-/// `cargo install mudpuppy --locked --version <semver>` (crates.io is the
-/// canonical published source). The running process keeps executing the old code
-/// until it is restarted.
+/// The version is validated by [`is_valid_version_tag`] first; an invalid value
+/// is refused outright. We then download the matching prebuilt archive, verify
+/// its checksum, and swap the binary in place — no Rust toolchain required. The
+/// running process keeps executing the old code until it is restarted.
 pub fn install(version: &str) -> Result<()> {
     if !is_valid_version_tag(version) {
         bail!("refusing to update to {version:?}: not a vMAJOR.MINOR.PATCH version tag");
     }
-    // Safe: `is_valid_version_tag` guaranteed the leading `v`.
-    let semver = version.strip_prefix('v').unwrap();
-    let status = Command::new("cargo")
-        .args([
-            "install",
-            env!("CARGO_PKG_NAME"),
-            "--locked",
-            "--version",
-            semver,
-        ])
-        .status()
-        .context("running `cargo install` to update mudpuppy")?;
-    if !status.success() {
-        bail!("`cargo install` exited unsuccessfully ({status})");
+    install_with(version, http_get, http_get_bytes)
+}
+
+/// The testable core of [`install`]: `fetch_manifest` and `download` are the
+/// network seams. Resolves the artifact for this build's target, downloads and
+/// verifies it, extracts the executable, and replaces the running binary.
+fn install_with(
+    version: &str,
+    fetch_manifest: impl FnOnce(&str) -> Result<String>,
+    download: impl FnOnce(&str) -> Result<Vec<u8>>,
+) -> Result<()> {
+    let url = manifest_url().context("no update manifest URL (unknown repository)")?;
+    let manifest = fetch_manifest(&url)?;
+    let artifact = resolve_artifact(&manifest, version, target_triple())?;
+    let bytes = download_and_verify(&artifact.download_url, artifact.sha256.as_deref(), download)?;
+    let exe = extract_executable(&bytes, &artifact.exe_name)?;
+    replace_running_exe(&exe)
+}
+
+/// What [`install_with`] needs to fetch and unpack one platform's binary,
+/// resolved from the manifest for a given target triple.
+#[derive(Debug)]
+struct ResolvedArtifact {
+    download_url: String,
+    /// Expected SHA-256 (hex) of the archive, if the manifest carries one.
+    sha256: Option<String>,
+    /// File name of the executable inside the archive (e.g. `mudpuppy` or
+    /// `mudpuppy.exe`). Matched by basename, since dist nests it under a
+    /// per-target directory.
+    exe_name: String,
+}
+
+/// Locate, in `json`, the prebuilt archive for `triple` belonging to release
+/// `version`. Errors if the manifest has moved past `version` (we only host the
+/// latest manifest on Pages), names no release, or has no build for this platform.
+fn resolve_artifact(json: &str, version: &str, triple: &str) -> Result<ResolvedArtifact> {
+    let manifest: DistManifest =
+        serde_json::from_str(json).context("parsing dist-manifest.json")?;
+
+    // The Pages site only ever carries the latest release's manifest, so install
+    // can only deliver that version. If a newer release landed between the check
+    // and now, say so rather than silently installing something else.
+    if let Some(tag) = manifest
+        .announcement_tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        if normalize_tag(tag) != normalize_tag(version) {
+            bail!(
+                "the published manifest now advertises {}, not the requested {version}; re-run the update check",
+                normalize_tag(tag)
+            );
+        }
     }
-    Ok(())
+
+    let release = manifest
+        .releases
+        .iter()
+        .find(|r| r.app_name == env!("CARGO_PKG_NAME"))
+        .or_else(|| manifest.releases.first())
+        .context("the manifest names no releases to install from")?;
+
+    let github = release
+        .hosting
+        .github
+        .as_ref()
+        .context("the release carries no GitHub hosting info")?;
+
+    let (name, artifact) = release
+        .artifacts
+        .iter()
+        .filter_map(|n| manifest.artifacts.get(n).map(|a| (n, a)))
+        .find(|(_, a)| a.kind == "executable-zip" && a.target_triples.iter().any(|t| t == triple))
+        .with_context(|| {
+            format!("the release has no prebuilt binary for this platform ({triple})")
+        })?;
+
+    let exe_name = artifact
+        .assets
+        .iter()
+        .find(|a| a.kind == "executable")
+        .map(|a| a.name.clone())
+        .unwrap_or_else(|| env!("CARGO_PKG_NAME").to_string());
+
+    let download_url = format!(
+        "{}{}/{name}",
+        github.artifact_base_url.trim_end_matches('/'),
+        github.artifact_download_path,
+    );
+
+    Ok(ResolvedArtifact {
+        download_url,
+        sha256: artifact.checksums.get("sha256").cloned(),
+        exe_name,
+    })
+}
+
+/// Download the archive at `url` and, if `sha256` is given, reject it unless its
+/// SHA-256 matches. `download` is the network seam mocked in tests.
+fn download_and_verify(
+    url: &str,
+    sha256: Option<&str>,
+    download: impl FnOnce(&str) -> Result<Vec<u8>>,
+) -> Result<Vec<u8>> {
+    let bytes = download(url)?;
+    if let Some(expected) = sha256 {
+        use sha2::{Digest, Sha256};
+        let got = hex_encode(&Sha256::digest(&bytes));
+        if !got.eq_ignore_ascii_case(expected.trim()) {
+            bail!("checksum mismatch for {url}: manifest expected {expected}, download was {got}");
+        }
+    }
+    Ok(bytes)
+}
+
+/// Lowercase hex, to compare a computed digest against the manifest's checksum
+/// string without pulling in a hex crate.
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Extract the bytes of the executable named `exe_name` from a `.tar.xz` release
+/// archive (macOS/Linux). Matched by file name so the per-target wrapper
+/// directory dist adds doesn't matter.
+#[cfg(not(windows))]
+fn extract_executable(archive: &[u8], exe_name: &str) -> Result<Vec<u8>> {
+    use std::io::{Cursor, Read};
+    let mut decompressed = Vec::new();
+    lzma_rs::xz_decompress(&mut Cursor::new(archive), &mut decompressed)
+        .context("decompressing the .tar.xz release archive")?;
+    let mut tar = tar::Archive::new(Cursor::new(decompressed));
+    for entry in tar.entries().context("reading the release tarball")? {
+        let mut entry = entry.context("reading a tarball entry")?;
+        let is_match = entry
+            .path()
+            .ok()
+            .and_then(|p| p.file_name().map(|f| f.to_str() == Some(exe_name)))
+            .unwrap_or(false);
+        if is_match {
+            let mut buf = Vec::new();
+            entry
+                .read_to_end(&mut buf)
+                .context("reading the binary from the tarball")?;
+            return Ok(buf);
+        }
+    }
+    bail!("the release archive did not contain an executable named {exe_name:?}");
+}
+
+/// Extract the bytes of the executable named `exe_name` from a `.zip` release
+/// archive (Windows). Matched by file name, as for the tarball.
+#[cfg(windows)]
+fn extract_executable(archive: &[u8], exe_name: &str) -> Result<Vec<u8>> {
+    use std::io::{Cursor, Read};
+    let mut zip =
+        zip::ZipArchive::new(Cursor::new(archive)).context("opening the .zip release archive")?;
+    for i in 0..zip.len() {
+        let mut file = zip.by_index(i).context("reading a zip entry")?;
+        let is_match = std::path::Path::new(file.name())
+            .file_name()
+            .and_then(|f| f.to_str())
+            .map(|f| f == exe_name)
+            .unwrap_or(false);
+        if is_match {
+            let mut buf = Vec::new();
+            file.read_to_end(&mut buf)
+                .context("reading the binary from the zip")?;
+            return Ok(buf);
+        }
+    }
+    bail!("the release archive did not contain an executable named {exe_name:?}");
+}
+
+/// Replace the running executable with `exe_bytes`. Stages the new binary beside
+/// the current one (so the swap is a same-filesystem operation), marks it
+/// executable on Unix, then hands off to `self_replace`, which knows how to
+/// replace a *running* binary on each platform.
+fn replace_running_exe(exe_bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let current = std::env::current_exe().context("locating the running executable")?;
+    let dir = current
+        .parent()
+        .context("the running executable has no parent directory")?;
+
+    let mut staged =
+        tempfile::NamedTempFile::new_in(dir).context("staging the downloaded binary")?;
+    staged
+        .write_all(exe_bytes)
+        .context("writing the downloaded binary")?;
+    staged.flush().context("flushing the downloaded binary")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(staged.path(), std::fs::Permissions::from_mode(0o755))
+            .context("making the new binary executable")?;
+    }
+
+    let (_file, staged_path) = staged.keep().context("persisting the staged binary")?;
+    let result = self_replace::self_replace(&staged_path)
+        .context("replacing the running executable with the update");
+    // self_replace copies the staged file into place; remove our staging copy
+    // either way (ignore failure — it's a temp file, and the update has landed).
+    let _ = std::fs::remove_file(&staged_path);
+    result
 }
 
 /// Whether `tag` is a release tag we will pass to [`install`]: exactly
 /// `v<digits>.<digits>.<digits>`. Rejects anything with extra components, missing
-/// parts, non-digits, or stray characters (slashes, shell metacharacters, version
-/// ranges) — the validation boundary keeping a version value from becoming an
-/// argument- or shell-injection vector.
+/// parts, non-digits, or stray characters (slashes, path traversal, ranges) — the
+/// input gate that keeps a version value, even one from the network, from steering
+/// the update toward an unintended download.
 pub fn is_valid_version_tag(tag: &str) -> bool {
     let Some(rest) = tag.strip_prefix('v') else {
         return false;
@@ -270,10 +585,137 @@ mod tests {
     }
 
     #[test]
-    fn install_refuses_invalid_versions_without_spawning() {
-        // The guard fires before any subprocess; the error names the offender.
+    fn install_refuses_invalid_versions_before_any_network() {
+        // The guard fires before any fetch/download; the error names the offender.
         let err = install("v1.2.3; rm -rf /").unwrap_err();
         assert!(err.to_string().contains("refusing to update"));
+    }
+
+    /// A manifest with one darwin (.tar.xz) and one windows (.zip) prebuilt
+    /// artifact, mirroring the real dist-manifest.json shape we resolve against.
+    fn manifest_with_artifacts(tag: &str) -> String {
+        format!(
+            r#"{{
+              "announcement_tag": "{tag}",
+              "releases": [{{
+                "app_name": "mudpuppy",
+                "app_version": "1.2.3",
+                "artifacts": ["mudpuppy-aarch64-apple-darwin.tar.xz", "mudpuppy-x86_64-pc-windows-msvc.zip"],
+                "hosting": {{ "github": {{
+                  "artifact_base_url": "https://github.com",
+                  "artifact_download_path": "/o/mudpuppy/releases/download/{tag}"
+                }} }}
+              }}],
+              "artifacts": {{
+                "mudpuppy-aarch64-apple-darwin.tar.xz": {{
+                  "kind": "executable-zip",
+                  "target_triples": ["aarch64-apple-darwin"],
+                  "assets": [{{ "name": "mudpuppy", "kind": "executable" }}],
+                  "checksums": {{ "sha256": "abc123" }}
+                }},
+                "mudpuppy-x86_64-pc-windows-msvc.zip": {{
+                  "kind": "executable-zip",
+                  "target_triples": ["x86_64-pc-windows-msvc"],
+                  "assets": [{{ "name": "mudpuppy.exe", "kind": "executable" }}],
+                  "checksums": {{ "sha256": "def456" }}
+                }}
+              }}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn resolve_artifact_builds_the_download_url_for_a_target() {
+        let json = manifest_with_artifacts("v1.2.3");
+        let darwin = resolve_artifact(&json, "v1.2.3", "aarch64-apple-darwin").unwrap();
+        assert_eq!(
+            darwin.download_url,
+            "https://github.com/o/mudpuppy/releases/download/v1.2.3/mudpuppy-aarch64-apple-darwin.tar.xz"
+        );
+        assert_eq!(darwin.sha256.as_deref(), Some("abc123"));
+        assert_eq!(darwin.exe_name, "mudpuppy");
+
+        // A different triple selects a different artifact (and exe name).
+        let win = resolve_artifact(&json, "v1.2.3", "x86_64-pc-windows-msvc").unwrap();
+        assert!(win
+            .download_url
+            .ends_with("mudpuppy-x86_64-pc-windows-msvc.zip"));
+        assert_eq!(win.exe_name, "mudpuppy.exe");
+    }
+
+    #[test]
+    fn resolve_artifact_errors_when_no_build_for_platform() {
+        let json = manifest_with_artifacts("v1.2.3");
+        let err = resolve_artifact(&json, "v1.2.3", "sparc-unknown-none").unwrap_err();
+        assert!(err.to_string().contains("no prebuilt binary"), "{err}");
+    }
+
+    #[test]
+    fn resolve_artifact_errors_when_manifest_moved_past_requested_version() {
+        // The Pages manifest advertises a newer release than the one we were asked
+        // to install — refuse rather than install the wrong thing.
+        let json = manifest_with_artifacts("v1.2.4");
+        let err = resolve_artifact(&json, "v1.2.3", "aarch64-apple-darwin").unwrap_err();
+        assert!(err.to_string().contains("now advertises v1.2.4"), "{err}");
+    }
+
+    #[test]
+    fn download_and_verify_accepts_a_matching_checksum() {
+        use sha2::{Digest, Sha256};
+        let body = b"prebuilt-archive-bytes".to_vec();
+        let sum = hex_encode(&Sha256::digest(&body));
+        let got = download_and_verify("http://x", Some(&sum), |_| Ok(body.clone())).unwrap();
+        assert_eq!(got, body);
+    }
+
+    #[test]
+    fn download_and_verify_rejects_a_mismatched_checksum() {
+        let err = download_and_verify("http://x", Some("deadbeef"), |_| Ok(b"bytes".to_vec()))
+            .unwrap_err();
+        assert!(err.to_string().contains("checksum mismatch"), "{err}");
+    }
+
+    /// Round-trip the platform archive format: pack a fake binary under a wrapper
+    /// directory (as dist does) and confirm extraction finds it by basename.
+    #[test]
+    #[cfg(not(windows))]
+    fn extract_executable_pulls_the_binary_from_a_tar_xz() {
+        use std::io::Cursor;
+        let payload = b"#!/fake/elf\x00binary".to_vec();
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o755);
+            builder
+                .append_data(&mut header, "mudpuppy-x/mudpuppy", payload.as_slice())
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let mut xz = Vec::new();
+        lzma_rs::xz_compress(&mut Cursor::new(&tar_bytes), &mut xz).unwrap();
+
+        assert_eq!(extract_executable(&xz, "mudpuppy").unwrap(), payload);
+        assert!(extract_executable(&xz, "other").is_err());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn extract_executable_pulls_the_binary_from_a_zip() {
+        use std::io::{Cursor, Write};
+        let payload = b"MZ\x90\x00fake-pe".to_vec();
+        let mut buf = Vec::new();
+        {
+            let mut zw = zip::ZipWriter::new(Cursor::new(&mut buf));
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zw.start_file("mudpuppy-x/mudpuppy.exe", opts).unwrap();
+            zw.write_all(&payload).unwrap();
+            zw.finish().unwrap();
+        }
+        assert_eq!(extract_executable(&buf, "mudpuppy.exe").unwrap(), payload);
+        assert!(extract_executable(&buf, "other.exe").is_err());
     }
 
     #[test]
@@ -324,15 +766,37 @@ mod tests {
     fn check_with_offers_only_a_strictly_newer_version() {
         // A far-future manifest → an update is offered.
         let newer = check_with(|_url| Ok(manifest_with_tag("v9.9.9"))).unwrap();
-        assert_eq!(newer.as_deref(), Some("v9.9.9"));
+        assert_eq!(newer.map(|r| r.version).as_deref(), Some("v9.9.9"));
 
         // The running version itself → nothing to offer.
         let same = check_with(|_url| Ok(manifest_with_tag(current_version()))).unwrap();
-        assert_eq!(same, None);
+        assert!(same.is_none());
 
         // An older version → nothing to offer.
         let older = check_with(|_url| Ok(manifest_with_tag("v0.0.0"))).unwrap();
-        assert_eq!(older, None);
+        assert!(older.is_none());
+    }
+
+    #[test]
+    fn check_with_surfaces_the_changelog() {
+        // Embed an escaped newline in the changelog the way the real manifest does.
+        let json = "{ \"announcement_tag\": \"v9.9.9\", \
+             \"announcement_changelog\": \"### Added\\n- a shiny thing\\n\", \
+             \"releases\": [] }";
+        let info = check_with(|_url| Ok(json.to_string())).unwrap().unwrap();
+        assert_eq!(info.version, "v9.9.9");
+        // Trimmed, but the body is preserved for the prompt to render.
+        let changelog = info.changelog.expect("changelog present");
+        assert!(changelog.contains("a shiny thing"));
+        assert!(!changelog.ends_with('\n'), "trailing whitespace trimmed");
+    }
+
+    #[test]
+    fn release_from_manifest_drops_an_empty_changelog() {
+        let json =
+            "{ \"announcement_tag\": \"v9.9.9\", \"announcement_changelog\": \"  \\n \", \"releases\": [] }";
+        let info = release_from_manifest(json).unwrap().unwrap();
+        assert!(info.changelog.is_none());
     }
 
     #[test]

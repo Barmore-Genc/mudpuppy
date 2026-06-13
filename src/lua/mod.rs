@@ -111,8 +111,8 @@ pub enum EventKind {
     AnnotationAdded,
     /// The turn's `seq` or `owner` changed.
     TurnChange,
-    /// A newer release was found by the launch-time check. Payload: `{ version }`.
-    /// `core.luau` subscribes to it to prompt the user.
+    /// A newer release was found by the launch-time check. Payload:
+    /// `{ version, changelog? }`. `core.luau` subscribes to it to prompt the user.
     UpdateCheck,
     /// Installed Claude Code skills are stale (an older version than the binary
     /// ships). Fired at launch when a refresh is worth offering. Payload:
@@ -488,13 +488,22 @@ impl LuaEngine {
         })
     }
 
-    /// Fire `update_check{version=…}` after the launch-time check found a newer
-    /// release. `core.luau` handles the prompt; the event loop did the fetch.
-    pub(crate) fn fire_update_check(&self, app: &mut App, version: &str) -> Result<()> {
+    /// Fire `update_check{version, changelog?}` after the launch-time check found a
+    /// newer release. `core.luau` handles the prompt; the event loop did the fetch.
+    pub(crate) fn fire_update_check(
+        &self,
+        app: &mut App,
+        version: &str,
+        changelog: Option<&str>,
+    ) -> Result<()> {
         let version = version.to_string();
+        let changelog = changelog.map(str::to_string);
         self.fire(app, EventKind::UpdateCheck, move |lua, _| {
             let t = lua.create_table()?;
             t.set("version", version)?;
+            if let Some(changelog) = changelog {
+                t.set("changelog", changelog)?;
+            }
             Ok(t)
         })
     }
@@ -730,7 +739,7 @@ Actions (call these from inside a binding or hook):
   mudpuppy.edit_comment()        edit your annotation on the cursor line
   mudpuppy.delete_comment()      delete your annotation (confirm with y)
   mudpuppy.cycle_status()        open → resolved → wontfix for the cursor line
-  mudpuppy.prompt(msg, options)  open a modal question (see Prompts below)
+  mudpuppy.prompt(msg, options[, details])  open a modal question (see Prompts)
 
 The count-aware verbs multiply/repeat by the pending count (see Counts below);
 the absolute verbs (select_file, set_scroll, set_cursor, cursor_to_*) ignore it.
@@ -802,12 +811,15 @@ GitHub for a newer release on demand.
 
 Prompts
 -------
-`mudpuppy.prompt(message, options)` opens a modal question. `options` is an
-ordered array; each option is either a `{ "Label", function() ... end }` pair or
-a `{ label = "Label", action = function() ... end }` table. The labels render as
-numbered chips; ←/→ (or h/l, j/k) move the highlight, 1-9 pick directly, Enter
-confirms the highlighted option and runs its function, Esc dismisses without
-running anything. It is a general primitive — the auto-update flow is one user.
+`mudpuppy.prompt(message, options[, details])` opens a modal question. `options`
+is an ordered array; each option is either a `{ "Label", function() ... end }`
+pair or a `{ label = "Label", action = function() ... end }` table. The labels
+render as numbered chips; ←/→ (or h/l) move the highlight, 1-9 pick directly,
+Enter confirms the highlighted option and runs its function, Esc dismisses
+without running anything. The optional `details` string renders as a scrollable
+body between the question and the chips (↑/↓, j/k, or PageUp/PageDown scroll it);
+the auto-update flow passes the release changelog here. It is a general
+primitive — the auto-update flow is one user.
 
 Updates
 -------
@@ -815,9 +827,11 @@ Once per launch mudpuppy checks for a newer release (by reading the published
 release manifest over HTTPS — no `gh` needed) and, when one exists, prompts you
 to install it, ignore it for now, or skip (stop checking — this writes a line to
 your config). The same primitives are scriptable:
-  mudpuppy.updates.check()              -> a "vX.Y.Z" string if a newer release
-                                           exists, else nil (does a blocking
-                                           fetch; the launch check runs off-thread)
+  mudpuppy.updates.check()              -> { version = "vX.Y.Z", changelog = "…" }
+                                           if a newer release exists (changelog
+                                           absent if the manifest has none), else
+                                           nil (a blocking fetch; the launch check
+                                           runs off-thread)
   mudpuppy.updates.update(version)      install `version`; it must be a strict
                                            "vMAJOR.MINOR.PATCH" tag (validated
                                            before anything is run)
@@ -865,7 +879,8 @@ Events
   turn_change       when the turn's owner or seq changes
                     payload: { turn = { ... } }
   update_check      once per launch, when the check found a newer release
-                    payload: { version = "vX.Y.Z" }  (the default handler prompts)
+                    payload: { version = "vX.Y.Z", changelog = "…"? }
+                    (the default handler prompts, showing the changelog)
   skill_update_check once per launch, when the installed Claude Code skills are
                     stale and not skipped
                     payload: { version = N, message = "…" }  (default: prompts)
