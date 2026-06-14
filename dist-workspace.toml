@@ -20,3 +20,7 @@ targets = [
 ]
 # Refresh the Pages site (and its dist-manifest.json) after a release publishes.
 post-announce-jobs = ["./refresh-pages"]
+# The refresh-pages job dispatches pages.yml, which needs actions:write; without
+# this the reusable workflow requests more than the caller's contents:write token
+# and GitHub fails the whole release run at startup.
+github-custom-job-permissions = { "refresh-pages" = { contents = "read", actions = "write" } }

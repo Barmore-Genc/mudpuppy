@@ -18,7 +18,10 @@ on:
         type: string
 
 permissions:
-  # actions: write lets us dispatch the Pages workflow.
+  # actions: write lets us dispatch the Pages workflow. contents: read is for
+  # the checkout below — an explicit permissions block zeroes every scope it
+  # omits, so without this the checkout would have no repo-read access.
+  contents: read
   actions: write
 
 jobs:
