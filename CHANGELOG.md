@@ -8,6 +8,27 @@ The release pipeline (cargo-dist) extracts the section matching the tagged
 version and uses it as the GitHub Release notes, so every release needs a
 matching heading here.
 
+## 0.3.1 - 2026-06-14
+
+### Added
+
+- The update prompt now shows the new release's changelog, so you can read what
+  changed before choosing to update (#55).
+
+### Changed
+
+- Self-update downloads the prebuilt release binary and swaps it in place
+  instead of compiling from source, so updating no longer needs a Rust
+  toolchain installed (#55).
+
+### Fixed
+
+- The all-annotations sidebar can now scroll all the way to the bottom.
+  Previously, once any comment body wrapped, the lower annotations were
+  unreachable and pressing `G` scrolled the selection off-screen (#56).
+- Selecting an annotation centers it in both the list and the diff instead of
+  pinning it to the bottom edge (#56).
+
 ## 0.3.0 - 2026-06-12
 
 ### Added
