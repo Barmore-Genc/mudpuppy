@@ -139,9 +139,14 @@ m.map("diff", "J", function() m.move_selection(1) end)
 m.map("diff", "K", function() m.move_selection(-1) end)
 
 -- Horizontal scroll for over-long lines: `h`/`l` (or ←/→) pan the code left and
--- right. Pane focus moved to `<leader> p h/l` (and Tab) to free these keys.
-m.map("diff", "h", function() m.scroll_h(-hstep()) end)
-m.map("diff", "left", function() m.scroll_h(-hstep()) end)
+-- right. Pane focus moved to `<leader> p h/l` (and Tab) to free these keys, but
+-- panning left while already at the left edge steps focus back to the sidebar —
+-- the mirror of `l`/Enter in the sidebar stepping right into the diff.
+local function pan_left()
+  if m.state().h_scroll == 0 then m.set_focus("tree") else m.scroll_h(-hstep()) end
+end
+m.map("diff", "h", pan_left)
+m.map("diff", "left", pan_left)
 m.map("diff", "l", function() m.scroll_h(hstep()) end)
 m.map("diff", "right", function() m.scroll_h(hstep()) end)
 

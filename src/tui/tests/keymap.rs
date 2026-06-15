@@ -158,10 +158,72 @@ fn h_l_pan_the_code_horizontally_and_clamp() {
     }
     assert_eq!(a.h_scroll, max, "l clamps at the widest line");
 
+    // Pan left until we reach the edge. The press that lands exactly on 0 still
+    // scrolls (it had scroll left to give), so focus stays in the diff.
     for _ in 0..50 {
         a.handle_key(key(KeyCode::Char('h')));
+        if a.h_scroll == 0 {
+            break;
+        }
     }
     assert_eq!(a.h_scroll, 0, "h clamps at the left edge");
+    assert_eq!(
+        a.focus,
+        Focus::Diff,
+        "reaching the edge keeps focus in the diff"
+    );
+}
+
+#[test]
+fn h_at_the_left_edge_focuses_the_sidebar() {
+    // Wide line so the diff can scroll horizontally at all.
+    let long_line = "a".repeat(200);
+    let diff = format!(
+        "diff --git a/wide.rs b/wide.rs\n\
+         index 1111111..2222222 100644\n\
+         --- a/wide.rs\n\
+         +++ b/wide.rs\n\
+         @@ -1 +1 @@\n\
+         -short\n\
+         +{long_line}\n"
+    );
+    let mut a = App::new(
+        parse_diff(&diff),
+        Target::Local {
+            base: "main".to_string(),
+            head_sha: "deadbeefcafe".to_string(),
+        },
+    );
+    drive(&mut a, 100, 24, &[key(KeyCode::Char('l'))]); // open the file into the diff
+    assert_eq!(a.focus, Focus::Diff);
+
+    // While there is scroll to give, `h` pans the code and keeps diff focus.
+    // One `l` pans right by a step; one `h` pans exactly back to the edge.
+    a.handle_key(key(KeyCode::Char('l')));
+    assert!(a.h_scroll > 0);
+    a.handle_key(key(KeyCode::Char('h')));
+    assert_eq!(a.h_scroll, 0, "panned back to the left edge");
+    assert_eq!(a.focus, Focus::Diff, "still in the diff at the edge");
+
+    // Now at the edge, the next `h` steps focus out to the sidebar — the mirror
+    // of `l`/Enter in the sidebar stepping into the diff.
+    a.handle_key(key(KeyCode::Char('h')));
+    assert_eq!(
+        a.focus,
+        Focus::Tree,
+        "h at the left edge focuses the sidebar"
+    );
+    assert_eq!(a.h_scroll, 0, "and the diff stays at the left edge");
+
+    // Left arrow at the edge behaves the same as `h`.
+    a.handle_key(key(KeyCode::Char('l'))); // back into the diff
+    assert_eq!(a.focus, Focus::Diff);
+    a.handle_key(key(KeyCode::Left));
+    assert_eq!(
+        a.focus,
+        Focus::Tree,
+        "left arrow at the edge focuses the sidebar too"
+    );
 }
 
 #[test]

@@ -745,7 +745,7 @@ The count-aware verbs multiply/repeat by the pending count (see Counts below);
 the absolute verbs (select_file, set_scroll, set_cursor, cursor_to_*) ignore it.
 
 Readers (return tables describing the current state):
-  mudpuppy.state()        { focus, selected, scroll, cursor, count, show_help,
+  mudpuppy.state()        { focus, selected, scroll, h_scroll, cursor, count, show_help,
                             sidebar, selection = { lo, hi } | nil,
                             turn = { owner, seq, agent_waiting, approved },
                             viewport = { height, total, top } }

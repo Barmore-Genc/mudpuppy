@@ -16,7 +16,8 @@ use crate::tui::{App, Focus, Row, Sidebar};
 
 /// Read one field of the `state()` proxy from the live [`App`] — the `__index`
 /// side of `mudpuppy.state()`. Recognised fields: `focus`, `selected` (1-based,
-/// matching `select_file`), `scroll`, `cursor`, `count` (the pending count, or
+/// matching `select_file`), `scroll`, `h_scroll` (the diff's horizontal offset;
+/// `0` at the left edge), `cursor`, `count` (the pending count, or
 /// `nil`), `show_help`, `sidebar` (`"files"`/`"annotations"`), `selection`
 /// (`{lo, hi}` or `nil`), `turn`,
 /// and `viewport`. The nested `selection`/`turn`/`viewport` are plain read-only
@@ -26,6 +27,7 @@ pub fn state_field(lua: &Lua, app: &App, key: &str) -> Result<Value> {
         "focus" => focus_name(app.focus).into_lua(lua),
         "selected" => (app.selected + 1).into_lua(lua),
         "scroll" => app.scroll.into_lua(lua),
+        "h_scroll" => app.h_scroll.into_lua(lua),
         "cursor" => app.cursor.into_lua(lua),
         // The pending count is exposed as a plain number (or nil when unset), so a
         // binding can read `state().count` and write it back via `__newindex`.
