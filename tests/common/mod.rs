@@ -73,6 +73,12 @@ impl Session {
         // Never let the periodic update check shell out to `gh` (or pop a prompt
         // over a baseline) during tests; the timer is suppressed when this is set.
         cmd.env("MUDPUPPY_NO_UPDATE_CHECK", "1");
+        // Sandbox the user-level skills scan away from the host's real
+        // `~/.claude/skills`: the fixture repo carries no mudpuppy skills, so the
+        // TUI's skill-refresh prompt can't fire (and swallow keystrokes) just
+        // because the dev machine has an older install. Set before `extra_env` so
+        // a test that exercises skills can still override it.
+        cmd.env("CLAUDE_SKILLS_HOME", repo);
         for (key, value) in extra_env {
             cmd.env(key, value);
         }

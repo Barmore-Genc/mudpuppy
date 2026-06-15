@@ -30,13 +30,14 @@ use crate::source;
 /// installed copies are detected as stale and the user is offered a refresh; set
 /// [`SKILL_UPDATE_MESSAGE`] to say what changed. The version is stamped into each
 /// installed `SKILL.md`'s frontmatter as `mudpuppy-skill-version: N`.
-pub const SKILL_VERSION: u32 = 1;
+pub const SKILL_VERSION: u32 = 2;
 
 /// Human-readable "what changed" line for the refresh prompt. Rewrite this each
 /// time you bump [`SKILL_VERSION`] to describe the new skill content.
 pub const SKILL_UPDATE_MESSAGE: &str =
-    "mudpuppy's review skills now use a stdin heredoc for multi-line comments \
-     (no shell quoting that needs approval).";
+    "mudpuppy now prints an `annotated code:` excerpt of the surrounding source \
+     under each comment in `agent wait`/`comment list`, so you can find the lines \
+     a comment points at (tune with -A/-B/--context).";
 
 /// The frontmatter key the installed version is stamped under.
 const VERSION_KEY: &str = "mudpuppy-skill-version";
@@ -231,6 +232,14 @@ fn repo_root() -> Result<PathBuf> {
 
 /// The user's home directory, for a user-level install.
 fn home_dir() -> Result<PathBuf> {
+    // `CLAUDE_SKILLS_HOME` overrides the home directory used to locate user-level
+    // skills. When set, it wins outright (the real home is not consulted), which
+    // lets tests point the user-scope skill scan at an isolated tree so the
+    // host's real `~/.claude/skills` can't leak in — e.g. a stale installed
+    // version triggering the TUI's refresh prompt mid-test.
+    if let Some(dir) = std::env::var_os("CLAUDE_SKILLS_HOME") {
+        return Ok(PathBuf::from(dir));
+    }
     directories::BaseDirs::new()
         .map(|d| d.home_dir().to_path_buf())
         .context("could not determine your home directory for a user-level install")

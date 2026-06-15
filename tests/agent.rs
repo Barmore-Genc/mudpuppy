@@ -134,6 +134,59 @@ fn add_list_resolve_round_trip() {
     );
 }
 
+#[test]
+fn list_shows_annotated_code_by_default_and_respects_width() {
+    let repo = repo_with_changes();
+    let data = tempfile::tempdir().unwrap();
+    let (repo, data) = (repo.path(), data.path());
+
+    // Anchor a comment to line 3 of the right-side (working-tree) file. The
+    // fixture's a_app.rs reads `line 01 edited`, `line 02 edited`, …
+    let (_, stderr, ok) = run(
+        repo,
+        data,
+        &[
+            "agent", "comment", "add", "--file", "a_app.rs", "--line", "3", "--body", "here",
+        ],
+    );
+    assert!(ok, "add failed: {stderr}");
+
+    // Default list carries the surrounding source under an `annotated code`
+    // block, verbatim and without line numbers (just a 4-space indent).
+    let (stdout, stderr, ok) = run(repo, data, &["agent", "comment", "list"]);
+    assert!(ok, "list failed: {stderr}");
+    assert!(stdout.contains("annotated code:"), "no excerpt: {stdout}");
+    assert!(
+        stdout.contains("    line 03 edited\n"),
+        "anchor line not shown verbatim: {stdout}"
+    );
+    // Default width is 3 each side: line 3 pulls in through line 6 below.
+    assert!(
+        stdout.contains("line 06 edited"),
+        "missing after-context: {stdout}"
+    );
+
+    // A tighter `--context` narrows the excerpt to one line each side.
+    let (stdout, _, ok) = run(repo, data, &["agent", "comment", "list", "--context", "1"]);
+    assert!(ok);
+    assert!(
+        stdout.contains("line 02 edited") && stdout.contains("line 04 edited"),
+        "expected ±1 line of context: {stdout}"
+    );
+    assert!(
+        !stdout.contains("line 06 edited"),
+        "context not narrowed: {stdout}"
+    );
+
+    // `--context 0` suppresses the excerpt entirely.
+    let (stdout, _, ok) = run(repo, data, &["agent", "comment", "list", "--context", "0"]);
+    assert!(ok);
+    assert!(
+        !stdout.contains("annotated code:"),
+        "excerpt not disabled: {stdout}"
+    );
+}
+
 /// Read the body of the single annotation in the store under `data`.
 fn only_body(data: &Path) -> String {
     let store = find_store(data).expect("store file written");
