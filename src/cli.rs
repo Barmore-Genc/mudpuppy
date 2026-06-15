@@ -117,6 +117,8 @@ pub enum AgentCommand {
         /// Give up after this many seconds instead of blocking indefinitely.
         #[arg(long, value_name = "SECONDS")]
         timeout: Option<u64>,
+        #[command(flatten)]
+        context: ContextArgs,
     },
 
     /// Clear the current session's annotations and start a fresh round.
@@ -139,6 +141,8 @@ pub enum CommentCommand {
         /// Only annotations on this file.
         #[arg(long, value_name = "FILE")]
         file: Option<String>,
+        #[command(flatten)]
+        context: ContextArgs,
     },
 
     /// Revise one of the agent's own open annotations in place.
@@ -220,6 +224,28 @@ pub struct AddArgs {
     /// pass a multi-line body without ANSI-C shell quoting.
     #[arg(long, value_name = "PATH")]
     pub body_file: Option<String>,
+}
+
+/// Width of the `annotated code` excerpt printed beneath each annotation by
+/// `comment list` and `wait`, shared via `#[command(flatten)]`. Modeled on
+/// grep's `-A`/`-B`/`-C`, except `-C` is the global change-directory flag, so
+/// the both-sides knob is the long-only `--context`. The excerpt is on by
+/// default; `--context 0` (or any negative width) turns it off, so the agent
+/// gets the surrounding source for free but can opt out or widen it.
+#[derive(Debug, Args)]
+pub struct ContextArgs {
+    /// Lines of code to show *after* the annotated line(s). Defaults to the
+    /// `--context` width; 0 or negative shows none below.
+    #[arg(short = 'A', long = "after", value_name = "N")]
+    pub after: Option<i64>,
+    /// Lines of code to show *before* the annotated line(s). Defaults to the
+    /// `--context` width; 0 or negative shows none above.
+    #[arg(short = 'B', long = "before", value_name = "N")]
+    pub before: Option<i64>,
+    /// Lines of code to show on *both* sides of the annotated line(s). 0 or
+    /// negative suppresses the excerpt entirely.
+    #[arg(long = "context", value_name = "N")]
+    pub context: Option<i64>,
 }
 
 /// Parse the process arguments and dispatch.

@@ -55,9 +55,12 @@ below. Read it first, and trust it over this file if anything here has drifted.
    For a trivial one-liner, `--body "short note"` is fine.
 5. **Hand the turn to the user and wait** with `mudpuppy agent wait`. It blocks
    until they release the turn, then prints everything they changed — their
-   replies, status changes, and new comments. Read that, respond (`comment add
-   --reply-to <id>`, `comment resolve --id <id>`, …), and `wait` again. Loop
-   until the review is finished.
+   replies, status changes, and new comments. Each one is followed by an
+   `annotated code:` excerpt of the surrounding source, so you can locate the
+   exact lines a comment points at without re-reading the file; widen it with
+   `-A`/`-B`/`--context N` or turn it off with `--context 0` (same flags on
+   `comment list`). Read that, respond (`comment add --reply-to <id>`, `comment
+   resolve --id <id>`, …), and `wait` again. Loop until the review is finished.
 
 ## Surfacing mudpuppy
 

@@ -23,7 +23,7 @@ use anyhow::{bail, Context, Result};
 use jiff::Timestamp;
 use notify::{RecursiveMode, Watcher};
 
-use crate::cli::{AddArgs, AgentCommand, CommentCommand};
+use crate::cli::{AddArgs, AgentCommand, CommentCommand, ContextArgs};
 use crate::domain::{AnchorScope, Annotation, Author, Severity, Side, StateFile, Status, Tag};
 use crate::session::Session;
 use crate::{source, store};
@@ -33,7 +33,7 @@ pub fn dispatch(command: AgentCommand) -> Result<()> {
     match command {
         AgentCommand::Diff { file } => diff(file.as_deref()),
         AgentCommand::Comment { command } => comment(command),
-        AgentCommand::Wait { timeout } => wait(timeout),
+        AgentCommand::Wait { timeout, context } => wait(timeout, context),
         AgentCommand::Reset => reset(),
     }
 }
@@ -91,7 +91,12 @@ fn section_matches(section: &str, file: &str) -> bool {
 fn comment(command: CommentCommand) -> Result<()> {
     match command {
         CommentCommand::Add(args) => add(args),
-        CommentCommand::List { open, author, file } => list(open, author, file),
+        CommentCommand::List {
+            open,
+            author,
+            file,
+            context,
+        } => list(open, author, file, context),
         CommentCommand::Edit {
             id,
             body,
@@ -213,8 +218,14 @@ fn add(args: AddArgs) -> Result<()> {
 }
 
 /// `agent comment list [--open] [--author …] [--file F]` — read current state.
-fn list(open: bool, author: Option<String>, file: Option<String>) -> Result<()> {
+fn list(
+    open: bool,
+    author: Option<String>,
+    file: Option<String>,
+    context: ContextArgs,
+) -> Result<()> {
     let author = author.as_deref().map(str::parse::<Author>).transpose()?;
+    let width = CodeWidth::from_args(&context);
     let session = session()?;
     let Some(state) = store::load(&session.store_path)? else {
         println!("(no annotations yet)");
@@ -235,7 +246,8 @@ fn list(open: bool, author: Option<String>, file: Option<String>) -> Result<()> 
         if shown > 0 {
             println!();
         }
-        print!("{}", render(a));
+        let code = annotated_code(&session, a, width);
+        print!("{}", render(a, code.as_deref()));
         shown += 1;
     }
     if shown == 0 {
@@ -373,7 +385,8 @@ enum WaitOutcome {
 /// blocked only the user writes, so any difference from the snapshot is
 /// precisely their work. On any exit path we clear `agent_waiting` so a stale
 /// flag never lingers.
-fn wait(timeout: Option<u64>) -> Result<()> {
+fn wait(timeout: Option<u64>, context: ContextArgs) -> Result<()> {
+    let width = CodeWidth::from_args(&context);
     let session = session()?;
     let (recorded_seq, snapshot) = begin_wait(&session)?;
 
@@ -387,7 +400,10 @@ fn wait(timeout: Option<u64>) -> Result<()> {
         WaitOutcome::Released => {
             let state = store::load(&session.store_path)?
                 .context("the store vanished after the turn was released")?;
-            print!("{}", render_changes(&snapshot, &state));
+            print!(
+                "{}",
+                render_changes(&snapshot, &state, |a| annotated_code(&session, a, width))
+            );
             Ok(())
         }
         WaitOutcome::TimedOut => bail!(
@@ -508,7 +524,11 @@ fn turn_released(store_path: &Path, recorded_seq: u64) -> Result<bool> {
 /// `[~] changed`, or `[-] removed` and followed by the annotation as
 /// [`render`] would show it in `comment list`, so the agent reads one familiar
 /// format throughout.
-fn render_changes(snapshot: &HashMap<String, Annotation>, state: &StateFile) -> String {
+fn render_changes(
+    snapshot: &HashMap<String, Annotation>,
+    state: &StateFile,
+    code: impl Fn(&Annotation) -> Option<String>,
+) -> String {
     let mut out = String::new();
     let mut count = 0;
 
@@ -517,12 +537,12 @@ fn render_changes(snapshot: &HashMap<String, Annotation>, state: &StateFile) -> 
         match snapshot.get(&a.id) {
             None => {
                 out.push_str("[+] new\n");
-                out.push_str(&render(a));
+                out.push_str(&render(a, code(a).as_deref()));
                 count += 1;
             }
             Some(prev) if prev != a => {
                 out.push_str("[~] changed\n");
-                out.push_str(&render(a));
+                out.push_str(&render(a, code(a).as_deref()));
                 count += 1;
             }
             Some(_) => {}
@@ -539,7 +559,7 @@ fn render_changes(snapshot: &HashMap<String, Annotation>, state: &StateFile) -> 
     removed.sort_by(|a, b| a.id.cmp(&b.id));
     for a in removed {
         out.push_str("[-] removed\n");
-        out.push_str(&render(a));
+        out.push_str(&render(a, code(a).as_deref()));
         count += 1;
     }
 
@@ -549,9 +569,89 @@ fn render_changes(snapshot: &HashMap<String, Annotation>, state: &StateFile) -> 
     out
 }
 
+/// Default lines of surrounding code shown on each side of an annotation when no
+/// width flag is given. Matches the anchor signature's context width so the
+/// excerpt lines up with what relocation already reasons about.
+const DEFAULT_CODE_WIDTH: i64 = 3;
+
+/// How many lines of code to show around an annotation, per side. Resolved from
+/// the CLI's [`ContextArgs`]: `--context` sets both sides, `-A`/`-B` override one
+/// side each, and a negative request clamps to zero (which suppresses that side).
+#[derive(Clone, Copy)]
+struct CodeWidth {
+    before: usize,
+    after: usize,
+}
+
+impl CodeWidth {
+    fn from_args(args: &ContextArgs) -> Self {
+        let base = args.context.unwrap_or(DEFAULT_CODE_WIDTH);
+        let clamp = |n: i64| n.max(0) as usize;
+        CodeWidth {
+            before: clamp(args.before.unwrap_or(base)),
+            after: clamp(args.after.unwrap_or(base)),
+        }
+    }
+
+    /// Nothing to show on either side — suppress the excerpt entirely.
+    fn is_off(&self) -> bool {
+        self.before == 0 && self.after == 0
+    }
+}
+
+/// Build the `annotated code` excerpt for `a`: the current source around the
+/// annotated line(s), so the agent can locate the code the user is pointing at.
+/// Returns `None` when the excerpt is off, the note is whole-file, or the file
+/// content / stored line can't be resolved at the target's revision.
+fn annotated_code(session: &Session, a: &Annotation, width: CodeWidth) -> Option<String> {
+    if width.is_off() || a.scope == AnchorScope::File {
+        return None;
+    }
+    let lines = crate::blob::contents(
+        &session.target,
+        &session.repo_root,
+        &a.file,
+        crate::blob::blob_side(a.side),
+    )
+    .ok()
+    .flatten()?;
+    excerpt(&lines, a, width)
+}
+
+/// Slice the `annotated code` block out of a file's `lines` for `a`, without line
+/// numbers: `width.before` lines above the anchor, the annotated line (through
+/// `end_line` for a region), then `width.after` lines below. The source is kept
+/// verbatim so the agent can match it against the working tree. Returns `None`
+/// when the stored line falls outside the file (e.g. it shrank since capture).
+fn excerpt(lines: &[String], a: &Annotation, width: CodeWidth) -> Option<String> {
+    let total = lines.len();
+    if a.line == 0 || a.line as usize > total {
+        return None;
+    }
+    let start = a.line as usize; // 1-based
+    let end = a
+        .end_line
+        .map(|e| e as usize)
+        .filter(|&e| e >= start)
+        .unwrap_or(start)
+        .min(total);
+
+    let from = start.saturating_sub(width.before).max(1);
+    let to = (end + width.after).min(total);
+
+    let mut out = String::from("  annotated code:\n");
+    for line in &lines[from - 1..to] {
+        out.push_str("    ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    Some(out)
+}
+
 /// Render an annotation as an agent-readable block: a header line with id,
-/// author, severity, tag, status, and anchor, then the indented body.
-fn render(a: &Annotation) -> String {
+/// author, severity, tag, status, and anchor, then the indented body, then the
+/// optional `annotated code` excerpt (already formatted by [`annotated_code`]).
+fn render(a: &Annotation, code: Option<&str>) -> String {
     let tag = a
         .tag
         .map(|t| format!(" {}", tag_symbol(t)))
@@ -572,6 +672,9 @@ fn render(a: &Annotation) -> String {
         out.push_str("  ");
         out.push_str(line);
         out.push('\n');
+    }
+    if let Some(code) = code {
+        out.push_str(code);
     }
     out
 }
@@ -703,7 +806,7 @@ index 3..4 100644
             created_at: "2026-05-28T12:00:00Z".parse().unwrap(),
             updated_at: "2026-05-28T12:00:00Z".parse().unwrap(),
         };
-        let text = render(&a);
+        let text = render(&a, None);
         assert!(text.contains("[abc12345] agent warning ! open  src/lib.rs:42 (right)"));
         assert!(text.contains("\n  line one\n  line two\n"));
     }
@@ -714,17 +817,115 @@ index 3..4 100644
         let mut region = base.clone();
         region.end_line = Some(50);
         assert!(
-            render(&region).contains("src/lib.rs:1–50 (right)"),
+            render(&region, None).contains("src/lib.rs:1–50 (right)"),
             "{}",
-            render(&region)
+            render(&region, None)
         );
 
         let mut whole = base;
         whole.scope = AnchorScope::File;
         assert!(
-            render(&whole).contains("src/lib.rs (whole file)"),
+            render(&whole, None).contains("src/lib.rs (whole file)"),
             "{}",
-            render(&whole)
+            render(&whole, None)
+        );
+    }
+
+    #[test]
+    fn code_width_defaults_on_and_clamps_negatives() {
+        let args = |after, before, context| ContextArgs {
+            after,
+            before,
+            context,
+        };
+
+        // No flags → the default symmetric width, excerpt on.
+        let w = CodeWidth::from_args(&args(None, None, None));
+        assert_eq!(
+            (w.before, w.after),
+            (DEFAULT_CODE_WIDTH as usize, DEFAULT_CODE_WIDTH as usize)
+        );
+        assert!(!w.is_off());
+
+        // `--context 0` (or any negative width) suppresses the excerpt.
+        assert!(CodeWidth::from_args(&args(None, None, Some(0))).is_off());
+        assert!(CodeWidth::from_args(&args(None, None, Some(-5))).is_off());
+
+        // `-A`/`-B` override one side each, over `--context`'s both-sides value.
+        let w = CodeWidth::from_args(&args(Some(1), Some(7), Some(4)));
+        assert_eq!((w.before, w.after), (7, 1));
+
+        // An unset side falls back to `--context`, else the default.
+        let w = CodeWidth::from_args(&args(Some(2), None, None));
+        assert_eq!((w.before, w.after), (DEFAULT_CODE_WIDTH as usize, 2));
+    }
+
+    #[test]
+    fn excerpt_slices_without_line_numbers_and_clamps_at_edges() {
+        let lines: Vec<String> = (1..=6).map(|n| format!("line {n}")).collect();
+        let mut a = ann("excerpt0", Author::User, "look here");
+        a.line = 3;
+
+        // Two before, the anchor, two after — verbatim source, no line numbers.
+        let text = excerpt(
+            &lines,
+            &a,
+            CodeWidth {
+                before: 2,
+                after: 2,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            text,
+            "  annotated code:\n    line 1\n    line 2\n    line 3\n    line 4\n    line 5\n"
+        );
+
+        // Near the top, the before-context clamps at the first line.
+        a.line = 1;
+        let text = excerpt(
+            &lines,
+            &a,
+            CodeWidth {
+                before: 3,
+                after: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(text, "  annotated code:\n    line 1\n    line 2\n");
+
+        // A stored line past the end of the file yields no excerpt.
+        a.line = 99;
+        assert!(excerpt(
+            &lines,
+            &a,
+            CodeWidth {
+                before: 2,
+                after: 2
+            }
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn excerpt_covers_a_region_through_end_line() {
+        let lines: Vec<String> = (1..=8).map(|n| format!("line {n}")).collect();
+        let mut a = ann("region00", Author::User, "this block");
+        a.line = 3;
+        a.end_line = Some(5);
+        // One before (L2), the region (L3–L5), one after (L6).
+        let text = excerpt(
+            &lines,
+            &a,
+            CodeWidth {
+                before: 1,
+                after: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            text,
+            "  annotated code:\n    line 2\n    line 3\n    line 4\n    line 5\n    line 6\n"
         );
     }
 
@@ -777,7 +978,7 @@ index 3..4 100644
         snapshot.insert(removed.id.clone(), removed);
 
         let state = state_with(vec![edited, reply]);
-        let text = render_changes(&snapshot, &state);
+        let text = render_changes(&snapshot, &state, |_| None);
 
         assert!(text.contains("[~] changed\n[aaaaaaaa]"), "edited: {text}");
         assert!(text.contains("agent body (resolved)"));
@@ -793,7 +994,7 @@ index 3..4 100644
             [(a.id.clone(), a.clone())].into_iter().collect();
         let state = state_with(vec![a]);
         assert_eq!(
-            render_changes(&snapshot, &state),
+            render_changes(&snapshot, &state, |_| None),
             "(turn released with no changes)\n"
         );
     }
