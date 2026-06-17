@@ -537,6 +537,36 @@ fn a_thread_renders_inline_under_its_line() {
     }
 }
 
+/// Move the cursor onto the (header) comment row belonging to annotation `id`.
+fn cursor_to_comment(a: &App) -> usize {
+    a.view
+        .rows
+        .iter()
+        .position(|r| matches!(r, Row::Comment(_)))
+        .expect("an inline comment row")
+}
+
+#[test]
+fn adding_a_comment_on_an_inline_comment_row_anchors_to_its_line() {
+    // A comment sitting on new-side line 2 renders an inline thread under it.
+    let (mut a, _dir) = stored_app_with(vec![note(
+        "blk00001",
+        Author::Agent,
+        "src/alpha.rs",
+        Side::Right,
+        2,
+        Severity::Blocker,
+    )]);
+    let _ = drive(&mut a, 100, 24, &[]);
+
+    // Sitting on the comment body, not a code line, the new comment still lands
+    // on the line that comment anchors to (right side, line 2).
+    a.cursor = cursor_to_comment(&a);
+    assert_eq!(a.anchor_for_comment(), Some((Side::Right, 2, None)));
+    // ...and a reply targets the annotation anchored there.
+    assert_eq!(a.annotation_id_at_cursor().as_deref(), Some("blk00001"));
+}
+
 #[test]
 fn a_long_body_wraps_to_several_comment_rows() {
     let mut long = note(

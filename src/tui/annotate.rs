@@ -31,10 +31,29 @@ fn anchor_covers(a: &Annotation, old: Option<u32>, new: Option<u32>) -> bool {
 }
 
 impl App {
-    /// The cursor row's `(old_lineno, new_lineno)`, or `None` on a non-line row.
+    /// The annotation that the inline comment row at `idx` belongs to, looked up
+    /// by the id the row carries. `None` for non-comment rows or a dangling id.
+    fn row_comment_annotation(&self, idx: usize) -> Option<&Annotation> {
+        let Row::Comment(c) = self.view.rows.get(idx)? else {
+            return None;
+        };
+        self.annotations.iter().find(|a| a.id == c.id)
+    }
+
+    /// The cursor row's `(old_lineno, new_lineno)`. A row of an inline comment
+    /// resolves to the line its comment anchors to, so cursor-targeted verbs work
+    /// while sitting on a comment body. `None` on a hunk header, expander, or
+    /// notice.
     fn cursor_line_numbers(&self) -> Option<(Option<u32>, Option<u32>)> {
         match self.view.rows.get(self.cursor)? {
             Row::Line(l, _) => Some((l.old_lineno, l.new_lineno)),
+            Row::Comment(_) => {
+                let a = self.row_comment_annotation(self.cursor)?;
+                Some(match a.side {
+                    Side::Left => (Some(a.line), None),
+                    Side::Right => (None, Some(a.line)),
+                })
+            }
             _ => None,
         }
     }
@@ -66,8 +85,9 @@ impl App {
 
     /// Resolve the anchor for a new comment: a single `(side, line)` from the
     /// cursor, or a whole-line `(side, start, end)` region from the visual
-    /// selection. `None` when no diff line is in range (cursor on a hunk header,
-    /// expander, or notice).
+    /// selection. With the cursor on an inline comment row, the new comment lands
+    /// on the same line(s) as that comment. `None` when no diff line is in range
+    /// (cursor on a hunk header, expander, or notice).
     pub(crate) fn anchor_for_comment(&self) -> Option<(Side, u32, Option<u32>)> {
         match self.selection_span() {
             Some((lo, hi)) => {
@@ -82,10 +102,16 @@ impl App {
                 let end_line = (end > start).then_some(end);
                 Some((side, start, end_line))
             }
-            None => {
-                let (side, line) = self.row_line_anchor(self.cursor)?;
-                Some((side, line, None))
-            }
+            None => match self.view.rows.get(self.cursor)? {
+                Row::Comment(_) => {
+                    let a = self.row_comment_annotation(self.cursor)?;
+                    Some((a.side, a.line, a.end_line))
+                }
+                _ => {
+                    let (side, line) = self.row_line_anchor(self.cursor)?;
+                    Some((side, line, None))
+                }
+            },
         }
     }
 
