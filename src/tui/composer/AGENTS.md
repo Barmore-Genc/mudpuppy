@@ -1,0 +1,5 @@
+The modal comment composer: a small text buffer plus severity/tag, bound to a
+target captured when it was opened, that turns key presses into store writes.
+
+- `mod.rs`: `Composer`/`ComposerTarget`/`Mode`, the buffer state and accessors, the `handle_composer_key` key handler (captured in Rust before Lua; routes by mode, with `Ctrl-S`/`Ctrl-E`/`Ctrl-T`/`Ctrl-J`/`Ctrl-R` chords), `save_composer`, and the composer-opening verbs (`add_comment`/`comment_file`/`reply`/`open_reply`/`edit_comment`/`open_edit`/`reply_or_edit`).
+- `vim.rs`: the vim-like editing engine (`impl Composer`) — normal-mode dispatch (`normal_key`), motions (`h`/`j`/`k`/`l`, `w`/`b`/`e`/`W`/`B`/`E`, `0`/`^`/`$`, `gg`/`G`, `f`/`F`/`t`/`T`, `;`/`,`, counts), operators (`d`/`c`/`y` over motions, `dd`/`cc`/`yy`, `D`/`C`/`Y`/`S`), single-key edits (`x`/`X`/`s`/`r`/`~`/`J`/`p`/`P`), the yank/delete register, undo/redo, and the insert-mode buffer edits.

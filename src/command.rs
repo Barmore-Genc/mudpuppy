@@ -1,6 +1,6 @@
 //! The `:command` palette: state plus fuzzy filtering over registered command
 //! names. Mirrors [`crate::picker::Picker`] (and reuses its
-//! [`fuzzy_match`](crate::picker::fuzzy_match) matcher) — the TUI owns rendering
+//! [`crate::picker::fuzzy_match`] matcher) — the TUI owns rendering
 //! and key handling; this module is the pure, testable core.
 
 use crate::picker::fuzzy_match;

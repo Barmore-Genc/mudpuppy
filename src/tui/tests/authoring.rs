@@ -643,6 +643,249 @@ fn interleave_keeps_hunk_starts_pointing_at_hunk_rows() {
     assert!(comments >= 2, "both threads spliced their comment rows");
 }
 
+// --- vim-like editing in the composer -------------------------------------
+
+/// Send each char of `s` as a normal-mode key press.
+fn keys(a: &mut App, s: &str) {
+    for ch in s.chars() {
+        a.handle_key(key(KeyCode::Char(ch)));
+    }
+}
+
+/// Open the composer on new-side line 1, type `body`, and drop to normal mode.
+fn open_normal(a: &mut App, body: &str) {
+    cursor_to_new_line(a, 1);
+    leader(a, "cc");
+    type_body(a, body);
+    a.handle_key(key(KeyCode::Esc));
+}
+
+/// As [`open_normal`], but seed a multi-line body (joined with real newlines).
+fn open_multiline_normal(a: &mut App, lines: &[&str]) {
+    cursor_to_new_line(a, 1);
+    leader(a, "cc");
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            a.handle_key(ctrl('j'));
+        }
+        type_body(a, line);
+    }
+    a.handle_key(key(KeyCode::Esc));
+}
+
+/// The composer's cursor as `(row, col)`.
+fn cursor(a: &App) -> (usize, usize) {
+    let c = a.composer.as_ref().unwrap();
+    (c.row, c.col)
+}
+
+/// The body that would be saved right now.
+fn body(a: &App) -> String {
+    a.composer.as_ref().unwrap().body()
+}
+
+#[test]
+fn word_motions_w_b_e_land_on_word_boundaries() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "foo bar baz");
+    keys(&mut a, "gg"); // row 0, col 0
+    keys(&mut a, "w");
+    assert_eq!(cursor(&a), (0, 4), "w jumps to the next word start");
+    keys(&mut a, "e");
+    assert_eq!(cursor(&a), (0, 6), "e lands on the word end");
+    keys(&mut a, "b");
+    assert_eq!(cursor(&a), (0, 4), "b returns to the word start");
+}
+
+#[test]
+fn count_prefixed_motion_repeats() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "alpha beta gamma delta");
+    keys(&mut a, "gg");
+    keys(&mut a, "3w"); // alpha -> delta
+    assert_eq!(cursor(&a), (0, 17), "3w skips three words");
+}
+
+#[test]
+fn dollar_and_caret_and_zero_move_within_the_line() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "  indented");
+    keys(&mut a, "gg");
+    keys(&mut a, "$");
+    assert_eq!(
+        cursor(&a).1,
+        "  indented".chars().count(),
+        "$ to end of line"
+    );
+    keys(&mut a, "^");
+    assert_eq!(cursor(&a).1, 2, "^ to first non-blank");
+    keys(&mut a, "0");
+    assert_eq!(cursor(&a).1, 0, "0 to column zero");
+}
+
+#[test]
+fn gg_and_capital_g_jump_between_first_and_last_line() {
+    let (mut a, _dir) = stored_app();
+    open_multiline_normal(&mut a, &["one", "two", "three"]);
+    keys(&mut a, "gg");
+    assert_eq!(cursor(&a).0, 0, "gg to the first line");
+    keys(&mut a, "G");
+    assert_eq!(cursor(&a).0, 2, "G to the last line");
+    keys(&mut a, "2G");
+    assert_eq!(cursor(&a).0, 1, "2G to line two");
+}
+
+#[test]
+fn dw_deletes_a_word() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "foo bar baz");
+    keys(&mut a, "gg");
+    keys(&mut a, "dw");
+    assert_eq!(
+        body(&a),
+        "bar baz",
+        "dw removes the word and its trailing space"
+    );
+}
+
+#[test]
+fn de_deletes_to_the_word_end_inclusive() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "foo bar");
+    keys(&mut a, "gg");
+    keys(&mut a, "de");
+    assert_eq!(body(&a), " bar", "de deletes through the word's last char");
+}
+
+#[test]
+fn cw_changes_to_the_word_end_like_ce() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "foo bar");
+    keys(&mut a, "gg");
+    keys(&mut a, "cw"); // acts like ce: trailing space is kept
+    type_body(&mut a, "qux");
+    a.handle_key(ctrl('s'));
+    assert_eq!(a.annotations[0].body, "qux bar");
+}
+
+#[test]
+fn dt_deletes_up_to_a_found_char() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "hello world");
+    keys(&mut a, "gg");
+    keys(&mut a, "dt "); // delete till the space
+    assert_eq!(body(&a), " world");
+}
+
+#[test]
+fn df_deletes_through_a_found_char() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "hello world");
+    keys(&mut a, "gg");
+    keys(&mut a, "dfo"); // delete through the first 'o'
+    assert_eq!(body(&a), " world");
+}
+
+#[test]
+fn semicolon_repeats_the_last_find() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "a.b.c.d");
+    keys(&mut a, "gg");
+    keys(&mut a, "f."); // first dot, col 1
+    assert_eq!(cursor(&a).1, 1);
+    keys(&mut a, ";"); // next dot, col 3
+    assert_eq!(cursor(&a).1, 3);
+}
+
+#[test]
+fn count_prefixed_x_deletes_several_chars() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "abcdef");
+    keys(&mut a, "gg");
+    keys(&mut a, "3x");
+    assert_eq!(body(&a), "def");
+}
+
+#[test]
+fn r_replaces_the_char_under_the_cursor() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "cat");
+    keys(&mut a, "gg");
+    keys(&mut a, "rb");
+    assert_eq!(body(&a), "bat");
+}
+
+#[test]
+fn tilde_toggles_case_and_advances() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "abc");
+    keys(&mut a, "gg");
+    keys(&mut a, "~");
+    assert_eq!(body(&a), "Abc");
+    assert_eq!(cursor(&a).1, 1, "~ moves past the toggled char");
+}
+
+#[test]
+fn capital_j_joins_lines_with_a_space() {
+    let (mut a, _dir) = stored_app();
+    open_multiline_normal(&mut a, &["foo", "bar"]);
+    keys(&mut a, "gg");
+    keys(&mut a, "J");
+    assert_eq!(body(&a), "foo bar");
+}
+
+#[test]
+fn yy_and_p_duplicate_a_line() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "abc");
+    keys(&mut a, "gg");
+    keys(&mut a, "yyp");
+    assert_eq!(body(&a), "abc\nabc");
+}
+
+#[test]
+fn cc_changes_the_whole_line() {
+    let (mut a, _dir) = stored_app();
+    open_multiline_normal(&mut a, &["foo", "bar"]);
+    keys(&mut a, "gg");
+    keys(&mut a, "cc");
+    type_body(&mut a, "new");
+    a.handle_key(ctrl('s'));
+    assert_eq!(a.annotations[0].body, "new\nbar");
+}
+
+#[test]
+fn count_prefixed_dd_deletes_several_lines() {
+    let (mut a, _dir) = stored_app();
+    open_multiline_normal(&mut a, &["one", "two", "three"]);
+    keys(&mut a, "gg");
+    keys(&mut a, "2dd");
+    assert_eq!(body(&a), "three");
+}
+
+#[test]
+fn u_undoes_and_ctrl_r_redoes() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "keep me");
+    keys(&mut a, "gg");
+    keys(&mut a, "dd"); // line gone
+    assert_eq!(body(&a), "");
+    keys(&mut a, "u");
+    assert_eq!(body(&a), "keep me", "u restores the deleted line");
+    a.handle_key(ctrl('r'));
+    assert_eq!(body(&a), "", "Ctrl-R redoes the delete");
+}
+
+#[test]
+fn capital_d_deletes_to_end_of_line() {
+    let (mut a, _dir) = stored_app();
+    open_normal(&mut a, "keep this");
+    keys(&mut a, "gg");
+    keys(&mut a, "ft"); // land on the 't' of "this"
+    keys(&mut a, "D");
+    assert_eq!(body(&a), "keep ");
+}
+
 /// Two single-line notes on alpha.rs's first hunk, for the interleave test.
 fn alpha_notes_for_interleave() -> Vec<Annotation> {
     vec![

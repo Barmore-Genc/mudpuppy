@@ -36,7 +36,7 @@ use crate::{source, store};
 /// status-bar `release` word, the composer footer's save/cancel labels).
 pub(crate) type Hitspan = (u16, u16, u16);
 
-/// Per-frame interactive regions, populated by [`crate::tui::render`] and
+/// Per-frame interactive regions, populated by [`mod@crate::tui::render`] and
 /// consulted by [`App::handle_mouse_event`]. Layout-derived state only; the
 /// terminal has no notion of clickable widgets, so we record where each pane and
 /// in-line label landed during the last draw and map mouse coordinates against
@@ -206,7 +206,7 @@ pub(crate) struct FileView {
 
 /// The fixed gutter ahead of a content line's text: the annotation-mark column,
 /// the `"NNNNN NNNNN "` old/new line numbers, and the `"+/-/space "` marker.
-/// Kept in sync with [`crate::tui::render`]'s `diff_line`; used only to size the
+/// Kept in sync with [`mod@crate::tui::render`]'s `diff_line`; used only to size the
 /// horizontal-scroll extent, so being off by the rare narrow-gutter file is
 /// harmless.
 const DIFF_GUTTER_COLS: usize = 1 + 12 + 2;
@@ -626,7 +626,7 @@ impl App {
 
     /// Attach a resolved store path and its current state (annotations + turn).
     /// An absent state leaves the empty defaults in place. The store directory is
-    /// watched separately in [`run_loop`], which calls [`App::reload`] on a write.
+    /// watched separately in `run_loop`, which calls [`App::reload`] on a write.
     pub(crate) fn attach_store(&mut self, path: PathBuf, state: Option<StateFile>) {
         self.store_path = Some(path);
         if let Some(state) = state {
@@ -840,7 +840,7 @@ impl App {
     /// Reload annotations and turn state from the store, picking up another
     /// process's writes (the agent's comments, or our own turn release). Silent on
     /// errors so a transient read race never disturbs browsing; a no-op without a
-    /// store. Triggered by a store-watch tick in [`run_loop`].
+    /// store. Triggered by a store-watch tick in `run_loop`.
     pub(crate) fn reload(&mut self) {
         let Some(path) = &self.store_path else { return };
         if let Ok(Some(state)) = store::load(path) {
