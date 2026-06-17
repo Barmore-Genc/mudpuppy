@@ -489,6 +489,19 @@ pub(crate) struct App {
     /// Per-file context-reveal state, indexed parallel to `files`. Survives
     /// reloads so expanded regions stay open while the agent writes.
     plans: Vec<ViewPlan>,
+    /// The canonical, full, ordered file list `files` is projected from. File
+    /// filters hide entries here rather than dropping them, so toggling filters
+    /// off (the `unhide-files` command) restores every file in its original
+    /// order. `all_plans` is its parallel reveal-state list.
+    all_files: Vec<FileDiff>,
+    all_plans: Vec<ViewPlan>,
+    /// Display paths the Lua `filter_files` predicates hid, recomputed by the
+    /// engine ([`crate::lua::LuaEngine::apply_file_filters`]) and honoured by the
+    /// projection only while `filters_enabled`.
+    hidden_files: HashSet<String>,
+    /// Whether file filters are applied. The `unhide-files` command toggles it;
+    /// when off, every file shows regardless of `hidden_files`.
+    filters_enabled: bool,
     /// Lazily-fetched full file contents, keyed by `(path, side)`; a cached
     /// `None` records a known miss so we don't re-shell for it. Not invalidated
     /// on reload.
@@ -541,6 +554,10 @@ impl App {
         // still render their "show more" affordance.
         let view = FileView::build(&files[0], None, &ViewPlan::default());
         let plans = vec![ViewPlan::default(); files.len()];
+        // `files`/`plans` are the visible projection; `all_files`/`all_plans` are
+        // the canonical source. With no filter registered yet the two match.
+        let all_files = files.clone();
+        let all_plans = plans.clone();
         App {
             files,
             target,
@@ -575,6 +592,10 @@ impl App {
             status_msg: None,
             notice: None,
             plans,
+            all_files,
+            all_plans,
+            hidden_files: HashSet::new(),
+            filters_enabled: true,
             blob_cache: HashMap::new(),
             repo_root: None,
             picker: None,
@@ -676,45 +697,144 @@ impl App {
     ///
     /// Appends a synthetic [`FileDiff`] for each annotated path not already
     /// represented, and drops stale synthetic entries no annotation references.
-    /// Existing entries are never reordered and `selected` keeps pointing at the
-    /// same file.
+    /// Operates on the canonical `all_files` (so the change survives a filter
+    /// reprojection) and re-projects; existing entries are never reordered and the
+    /// open file stays selected.
     pub(crate) fn merge_synthetic_files(&mut self) {
-        let selected_path = self.current().display_path().to_string();
-
         // Drop synthetic entries whose annotations have all vanished. Picker-added
         // entries are exempt: the user reached for them deliberately, so they stay
-        // across reloads even with zero annotations.
+        // across reloads even with zero annotations. Keep `all_plans` parallel.
         let annotated: Vec<String> = self.annotations.iter().map(|a| a.file.clone()).collect();
-        self.files.retain(|f| {
-            !f.synthetic
+        let mut kept_files = Vec::with_capacity(self.all_files.len());
+        let mut kept_plans = Vec::with_capacity(self.all_files.len());
+        for (i, f) in std::mem::take(&mut self.all_files).into_iter().enumerate() {
+            let keep = !f.synthetic
                 || annotated.iter().any(|p| p == f.display_path())
-                || self.picker_added.contains(f.display_path())
-        });
+                || self.picker_added.contains(f.display_path());
+            if keep {
+                kept_plans.push(self.all_plans.get(i).cloned().unwrap_or_default());
+                kept_files.push(f);
+            }
+        }
+        self.all_files = kept_files;
+        self.all_plans = kept_plans;
 
-        // Append a synthetic entry for each annotated path not already present
-        // (deduped, so several comments on one file add only one entry).
+        // Append a synthetic entry (and its default plan) for each annotated path
+        // not already present (deduped, so several comments on one file add only
+        // one entry).
         let mut present: Vec<String> = self
-            .files
+            .all_files
             .iter()
             .map(|f| f.display_path().to_string())
             .collect();
         for path in &annotated {
             if !present.iter().any(|p| p == path) {
-                self.files.push(FileDiff::synthetic(path));
+                self.all_files.push(FileDiff::synthetic(path));
+                self.all_plans.push(ViewPlan::default());
                 present.push(path.clone());
             }
         }
 
-        // Keep the selection on the same file across the retain/append.
-        if let Some(idx) = self
+        self.reproject();
+    }
+
+    /// Record the set of display paths the Lua `filter_files` predicates hid
+    /// (see [`crate::lua::LuaEngine::apply_file_filters`]) and re-project the
+    /// visible file list. Called at launch, on every store reload (the file set
+    /// can change), on config reload, and when the `unhide-files` command toggles
+    /// filtering. The hidden files are kept in `all_files`, so a later unhide
+    /// restores them.
+    pub(crate) fn set_hidden_files(&mut self, hidden: HashSet<String>) {
+        self.hidden_files = hidden;
+        self.reproject();
+    }
+
+    /// Toggle whether file filters are applied (the `unhide-files` command). When
+    /// turned off every file shows, including the hidden ones; turning it back on
+    /// re-hides the last computed set.
+    pub(crate) fn toggle_file_filters(&mut self) {
+        self.filters_enabled = !self.filters_enabled;
+        self.reproject();
+    }
+
+    /// The canonical, full file list — what the engine runs the `filter_files`
+    /// predicates over (so a currently-hidden file is still re-evaluated).
+    pub(crate) fn all_files(&self) -> &[FileDiff] {
+        &self.all_files
+    }
+
+    /// Rebuild the visible `files`/`plans` projection from the canonical
+    /// `all_files`/`all_plans`, hiding any path in `hidden_files` while filters are
+    /// enabled. Picker-added files are exempt (the user pulled them in
+    /// deliberately, the same exemption [`App::merge_synthetic_files`] makes), and
+    /// the list is never emptied — if every file would be hidden, all are shown so
+    /// the viewer always has something to display. The open file is kept selected
+    /// across the reprojection when it survived, else the selection is clamped.
+    fn reproject(&mut self) {
+        let visible: Vec<usize> = self
+            .all_files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                let path = f.display_path();
+                !self.filters_enabled
+                    || !self.hidden_files.contains(path)
+                    || self.picker_added.contains(path)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        // Everything hidden: fall back to showing the whole list.
+        let visible: Vec<usize> = if visible.is_empty() {
+            (0..self.all_files.len()).collect()
+        } else {
+            visible
+        };
+
+        // Nothing to do when the visible set already matches — skip the clone and
+        // the view rebuild so a reload that doesn't change the file set is cheap.
+        let unchanged = {
+            let want = visible.iter().map(|&i| self.all_files[i].display_path());
+            let cur = self.files.iter().map(|f| f.display_path());
+            want.eq(cur)
+        };
+        if unchanged {
+            return;
+        }
+
+        // Persist reveal-state edits made on the visible plans back to the
+        // canonical list before re-deriving them, so expansions survive the
+        // reprojection (and thus reloads, as they did before filtering existed).
+        let updates: Vec<(usize, ViewPlan)> = self
             .files
             .iter()
-            .position(|f| f.display_path() == selected_path)
-        {
-            self.selected = idx;
-        } else if self.selected >= self.files.len() {
-            self.selected = self.files.len().saturating_sub(1);
+            .enumerate()
+            .filter_map(|(vi, f)| {
+                let path = f.display_path();
+                self.all_files
+                    .iter()
+                    .position(|g| g.display_path() == path)
+                    .map(|ai| (ai, self.plans[vi].clone()))
+            })
+            .collect();
+        for (ai, plan) in updates {
+            if let Some(p) = self.all_plans.get_mut(ai) {
+                *p = plan;
+            }
         }
+
+        let selected_path = self
+            .files
+            .get(self.selected)
+            .map(|f| f.display_path().to_string());
+        self.files = visible.iter().map(|&i| self.all_files[i].clone()).collect();
+        self.plans = visible
+            .iter()
+            .map(|&i| self.all_plans.get(i).cloned().unwrap_or_default())
+            .collect();
+        self.selected = selected_path
+            .and_then(|p| self.files.iter().position(|f| f.display_path() == p))
+            .unwrap_or_else(|| self.selected.min(self.files.len().saturating_sub(1)));
+        self.rebuild_view();
     }
 
     /// Reload annotations and turn state from the store, picking up another
@@ -1302,10 +1422,15 @@ impl App {
             self.select(idx);
             return;
         }
-        self.files.push(FileDiff::synthetic(&path));
-        self.plans.push(ViewPlan::default());
-        self.picker_added.insert(path);
-        self.select(self.files.len() - 1);
+        // Add to the canonical list (picker-added paths are exempt from filtering)
+        // and re-project, then open it.
+        self.all_files.push(FileDiff::synthetic(&path));
+        self.all_plans.push(ViewPlan::default());
+        self.picker_added.insert(path.clone());
+        self.reproject();
+        if let Some(idx) = self.files.iter().position(|f| f.display_path() == path) {
+            self.select(idx);
+        }
     }
 
     /// The current file's new/old-side path, preferring the new path.

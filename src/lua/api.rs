@@ -28,17 +28,24 @@ use mlua::{Function, Lua, Result, Scope, Table, Value};
 
 use super::keys::{KeyChord, KeySeq, Mode};
 use super::views;
-use super::{AnchorWindows, Bindings, Commands, EventKind, Events, Leader, Prompts, UpdateChecks};
+use super::{
+    AnchorWindows, Bindings, Commands, EventKind, Events, FileFilters, Leader, Prompts,
+    UpdateChecks,
+};
 use crate::tui::App;
 
 /// Build the persistent `mudpuppy` table with the `map`/`unmap`/`on`/`command`/
-/// `leader` registration functions wired to the shared registries.
+/// `leader`/`filter_files` registration functions wired to the shared registries.
+// One owned handle per shared registry — they're independent `Rc`s, so bundling
+// them into a struct would only move the argument list elsewhere.
+#[allow(clippy::too_many_arguments)]
 pub fn build_table(
     lua: &Lua,
     bindings: Bindings,
     events: Events,
     commands: Commands,
     leader: Leader,
+    file_filters: FileFilters,
     update_checks: UpdateChecks,
     anchor_windows: AnchorWindows,
 ) -> Result<Table> {
@@ -88,6 +95,17 @@ pub fn build_table(
         lua.create_function(move |_, (name, func): (String, Function)| {
             // Last registration for a name wins, mirroring `map`.
             c.borrow_mut().insert(name, func);
+            Ok(())
+        })?,
+    )?;
+
+    let filters = file_filters;
+    table.set(
+        "filter_files",
+        lua.create_function(move |_, func: Function| {
+            // Filters accumulate — each call adds a predicate, and a file is hidden
+            // when any of them returns true (see `LuaEngine::apply_file_filters`).
+            filters.borrow_mut().push(func);
             Ok(())
         })?,
     )?;
@@ -350,6 +368,13 @@ pub fn install_scoped<'scope>(
         "toggle_annotations",
         scope.create_function(move |_, ()| {
             cell.borrow_mut().toggle_annotations();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "toggle_file_filters",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().toggle_file_filters();
             Ok(())
         })?,
     )?;

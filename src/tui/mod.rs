@@ -142,6 +142,9 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     let (adv, fb) = engine.anchor_windows();
     app.set_anchor_windows(adv, fb);
     app.reload();
+    // Apply the config's `filter_files` predicates to the launch file list before
+    // the first frame, so hidden files never flash on screen.
+    engine.apply_file_filters(app);
 
     runtime.block_on(async move {
         // Store-change ticks: the watcher fires these from notify's own thread;
@@ -333,6 +336,9 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                 Some(()) = rx.recv() => {
                     let before = Snapshot::of(app);
                     app.reload();
+                    // A reload re-derives the file list (synthetic files may
+                    // reappear), so re-hide anything the filters reject.
+                    engine.apply_file_filters(app);
                     engine.fire_reload(app)?;
                     let after = Snapshot::of(app);
                     fire_changes(&engine, app, &before, &after)?;
@@ -346,6 +352,10 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                     let (adv, fb) = engine.anchor_windows();
                     app.set_anchor_windows(adv, fb);
                     app.reload();
+                    // Pick up a newly-added (or changed) `filter_files` predicate.
+                    // Note: a removed filter can't restore an already-hidden file
+                    // without a restart, since the diff file list isn't retained.
+                    engine.apply_file_filters(app);
                 }
                 // The launch-time update check found a newer release. Fire
                 // `update_check` so `core.luau` can prompt; its callbacks can
