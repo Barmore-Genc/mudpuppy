@@ -8,6 +8,44 @@ The release pipeline (cargo-dist) extracts the section matching the tagged
 version and uses it as the GitHub Release notes, so every release needs a
 matching heading here.
 
+## 0.4.0 - 2026-06-17
+
+### Added
+
+- The comment composer now has a full vim-like modal editor: normal and insert
+  modes, hjkl/word/line/find motions, d/c/y operators over any motion (and
+  dd/cc/yy), single-key edits (x/s/r/~/J/p), count prefixes like `3w` and
+  `d2j`, and undo/redo with `u`/`Ctrl-R` (#65).
+- `mudpuppy.filter_files(fn)` lets a config hide files from the tree and diff —
+  for example, generated files checked into the repo. Hidden files are folded
+  away, not dropped: editing or removing a filter restores them live on save,
+  and `:unhide-files` (or `mudpuppy.toggle_file_filters()`) reveals them
+  on demand. Files added by hand with the picker are never hidden (#63).
+- `mudpuppy agent comment list` and `mudpuppy agent wait` now print the source
+  code around each annotated line beneath the comment, so the agent can locate
+  what a comment points at without re-reading the file. On by default (±3
+  lines) and tuned with `-A`/`--after`, `-B`/`--before`, and `--context`;
+  `--context 0` suppresses it (#60).
+
+### Changed
+
+- Pressing `h`/`←` in the diff pane while already scrolled to the left edge now
+  moves focus to the sidebar, mirroring how `l`/Enter steps from the sidebar
+  into the diff. While the diff still has scroll to give, `h`/`←` pan the code
+  as before (#59).
+- Adding a comment while the cursor sits on an existing inline comment row now
+  anchors the new comment to the same line(s) as that comment, so you can reply
+  to a thread without navigating back to the annotated line (#64).
+
+### Fixed
+
+- Reviewing very large files no longer lags on every keypress: syntax
+  highlighting now runs on a background worker and is cached, so the file
+  appears instantly in plain colors and fills in highlighting on the next
+  frame (#66).
+- Long inline comment bodies no longer clip past the right edge of the diff
+  pane and silently drop words; they now wrap within the pane (#62).
+
 ## 0.3.1 - 2026-06-14
 
 ### Added
