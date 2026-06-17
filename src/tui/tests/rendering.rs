@@ -237,22 +237,23 @@ fn diff_rows_are_styled_by_kind() {
 }
 
 #[test]
-fn diff_content_is_syntax_highlighted() {
-    // alpha.rs (Rust) is open at launch. The diff body otherwise only ever
-    // uses *named* colours (cyan header, green/red markers, dark-gray line
-    // numbers), so a truecolor `Rgb` foreground anywhere in the body can
-    // only have come from syntect — proof the highlighter is wired through
-    // rendering, not just unit-tested in isolation.
-    let term = drive(&mut app(), 100, 24, &[]);
-    let buf = term.backend().buffer();
-    // Body rows only: 0 is the pane title, the last row is the status bar.
-    let highlighted = (1..23).any(|y| {
-        (29..buf.area.width).any(|x| {
-            buf.cell((x, y))
-                .is_some_and(|c| matches!(c.style().fg, Some(Color::Rgb(..))))
+fn structure_rows_start_plain_then_highlight_fills_in() {
+    // alpha.rs (Rust) is open at launch. Highlighting now runs off the UI
+    // thread, so the freshly-built structure starts with un-coloured rows; the
+    // worker (here run synchronously) fills them with syntect truecolor.
+    let mut a = app();
+    let body_has_rgb = |a: &App| {
+        a.base_view.rows.iter().any(|r| match r {
+            Row::Line(_, Some(hl)) => hl.iter().any(|(c, _)| matches!(c, Color::Rgb(..))),
+            _ => false,
         })
-    });
-    assert!(highlighted, "expected syntect truecolor in the diff body");
+    };
+    assert!(!body_has_rgb(&a), "structure should start un-highlighted");
+    a.highlight_sync();
+    assert!(
+        body_has_rgb(&a),
+        "the highlight pass should fill in truecolor"
+    );
 }
 
 #[test]

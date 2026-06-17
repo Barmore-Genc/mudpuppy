@@ -1,8 +1,9 @@
 //! Splicing inline comment threads (and the open composer) into the built diff
 //! rows.
 //!
-//! [`FileView::build`](super::app::FileView) stays annotation-free; this pass
-//! runs after it in the view rebuild, walking the code rows and emitting
+//! The cached structure [`base_view`](super::app::App) stays annotation-free;
+//! this pass runs after it in the view rebuild, cloning its rows and walking
+//! them to emit
 //! single-line [`Row::Comment`] rows under each annotated diff line plus a
 //! [`Row::Composer`] placeholder at the open composer's target. Bodies are
 //! pre-wrapped to single visual lines so the "1 row = 1 visual line" invariant
@@ -84,7 +85,10 @@ impl App {
             (slot, composer_reserved_rows(c.lines.len()))
         });
 
-        let base = std::mem::take(&mut self.view.rows);
+        // Interleave from a fresh clone of the annotation-free structure cache so
+        // `base_view` stays comment-free (and keeps its background highlight
+        // fills) for the next pass.
+        let base = self.base_view.rows.clone();
         let mut rows: Vec<Row> = Vec::with_capacity(base.len());
         let mut hunk_starts: Vec<usize> = Vec::new();
 

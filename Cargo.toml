@@ -27,6 +27,20 @@ path = "src/lib.rs"
 name = "mudpuppy"
 path = "src/main.rs"
 
+# Syntax-highlight regex engine. The *default* engine is picked per target in the
+# `[target.…]` tables below — onig (oniguruma, ~3.5× faster, a C dependency)
+# wherever its C build cross-compiles cleanly, and the pure-Rust `fancy-regex`
+# fallback on the two arm64 *cross* targets (aarch64 Linux + Windows) where it
+# doesn't. These features are explicit overrides on top of that default: pass
+# `--features onig` to force the C engine (e.g. to benchmark it on an
+# arm64-Linux box), or `--features fancy` for the pure-Rust one. They are not in
+# `default`, so a plain build follows the per-target choice;
+# `tests/highlight_bench.rs` reports whichever engine is active.
+[features]
+default = []
+fancy = ["syntect/default-fancy", "two-face/syntect-fancy"]
+onig = ["syntect/default-onig", "two-face/syntect-onig"]
+
 [dependencies]
 # CLI surface. The derived command tree *is* the agent's documentation surface
 # (`mudpuppy agent --help`), so it lives at the heart of the binary.
@@ -80,20 +94,19 @@ notify = "8"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "signal"] }
 tokio-stream = "0.1"
 
-# Syntax highlighting in the diff pane (PLAN.md §2). `default-features = false`
-# + `default-fancy` swaps oniguruma (a C dependency) for the pure-Rust
-# `fancy-regex` engine, keeping the build toolchain-light and consistent with
-# "entirely local, lean deps" — at a highlighting-speed cost we never feel since
-# we highlight only the opened file's visible hunks.
-syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+# Syntax highlighting in the diff pane (PLAN.md §2). The regex engine (and thus
+# whether we pull oniguruma's C build) is selected per target in the
+# `[target.…]` tables further down, not here — both crates carry only
+# `default-features = false` at the base so exactly one engine is added per
+# build. See those tables and `[features]` for the onig-vs-fancy split.
+syntect = { version = "5", default-features = false }
 
 # Broad language/theme coverage for `highlight.rs`. syntect's bundled defaults
 # cover only a handful of languages, so unfamiliar files rendered without
 # highlighting; `two-face` ships the full Sublime/bat syntax + theme set (the
-# same bundle `bat` uses). `default-features = false` + `syntect-fancy` keeps the
-# pure-Rust `fancy-regex` engine — two-face's default would otherwise turn on
-# syntect's oniguruma (a C dependency) we deliberately avoid above.
-two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+# same bundle `bat` uses). Its regex engine tracks syntect's, selected in the
+# same per-target tables below.
+two-face = { version = "0.5", default-features = false }
 
 # Embedded scripting/config layer (the Lua keymap + event hooks). Luau is mlua's
 # first-class, sandbox-oriented backend; `vendored` builds the interpreter from
@@ -119,6 +132,24 @@ self-replace = "1"
 # a `tokio::task::spawn_blocking` thread so it never stalls the event loop. The TLS
 # backend is split by platform (see the target tables below): rustls everywhere
 # except Windows, native-tls (SChannel) on Windows. See those tables for why.
+
+# Syntax-highlight engine, split by target (see the `[features]` note). These two
+# `cfg`s partition every target, so exactly one engine is compiled per build.
+#
+# arm64 Linux + arm64 Windows are *cross*-built (the latter through cargo-dist's
+# cargo-xwin/clang toolchain, which mishandles `/imsvc` for C/asm — the same wall
+# the `ring`/native-tls note below describes). oniguruma's C build is the fragile
+# piece there, so these two targets keep the pure-Rust `fancy` engine.
+[target.'cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "windows")))'.dependencies]
+syntect = { version = "5", default-features = false, features = ["default-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+
+# Everywhere else (x86_64 Linux/Windows, both macOS arches): the faster
+# oniguruma engine. These build natively (or, for x86_64 cross, with a C compiler
+# that handles it), so the C dependency cross-compiles cleanly.
+[target.'cfg(not(all(target_arch = "aarch64", any(target_os = "linux", target_os = "windows"))))'.dependencies]
+syntect = { version = "5", default-features = false, features = ["default-onig"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-onig"] }
 
 # Non-Windows: rustls keeps the TLS stack pure-Rust and toolchain-light.
 [target.'cfg(not(windows))'.dependencies]

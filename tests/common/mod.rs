@@ -181,6 +181,34 @@ impl Session {
         }
     }
 
+    /// Like [`wait_for_stable_screen`](Self::wait_for_stable_screen) but compares
+    /// successive [`screen_svg`](Self::screen_svg) outputs, which encode RGB
+    /// colour, instead of the colour-blind grid `contents()`. Syntax
+    /// highlighting now lands asynchronously (the worker fills colour in a frame
+    /// or two after the plain structure renders), so a baseline must wait for the
+    /// colours to settle, not just the characters.
+    pub fn wait_for_stable_svg(&self, stable_for: u32, timeout: Duration) -> bool {
+        let start = Instant::now();
+        let mut last = self.screen_svg();
+        let mut stable = 0;
+        loop {
+            thread::sleep(Duration::from_millis(40));
+            let now = self.screen_svg();
+            if now == last {
+                stable += 1;
+                if stable >= stable_for {
+                    return true;
+                }
+            } else {
+                stable = 0;
+                last = now;
+            }
+            if start.elapsed() >= timeout {
+                return false;
+            }
+        }
+    }
+
     /// Poll the screen until `needle` *disappears* or `timeout` elapses. The
     /// mirror of [`wait_for_screen`](Self::wait_for_screen).
     pub fn wait_until_absent(&self, needle: &str, timeout: Duration) -> bool {
