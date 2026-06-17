@@ -225,6 +225,35 @@ fn status_bar_shows_annotation_count() {
 }
 
 #[test]
+fn long_comment_body_wraps_without_clipping_at_the_pane_edge() {
+    // A wrapped inline comment must stay inside the diff pane: the wrap budget
+    // has to account for the full rendered prefix (the gutter pad, the "▏ "
+    // thread bar, and the body indent), not just the bar. When it under-counts,
+    // each wrapped line runs a few columns past the inner edge and the tail is
+    // clipped, silently dropping words from the comment.
+    let mut n = note(
+        "long0001",
+        Author::Agent,
+        "src/alpha.rs",
+        Side::Right,
+        2,
+        Severity::Info,
+    );
+    // Distinct tokens (none collide with the prefix label words) so a missing
+    // one unambiguously means the renderer clipped it off the right edge.
+    let tokens: Vec<String> = (0..60).map(|i| format!("W{i:02}")).collect();
+    n.body = tokens.join(" ");
+
+    let term = drive(&mut annotated_app(vec![n]), 100, 24, &[]);
+    let shown = screen(&term);
+    let missing: Vec<&String> = tokens.iter().filter(|t| !shown.contains(*t)).collect();
+    assert!(
+        missing.is_empty(),
+        "comment body words clipped at the pane edge: {missing:?}\n{shown}"
+    );
+}
+
+#[test]
 fn line_marks_keep_the_most_severe_per_line() {
     // A warning and a blocker collide on the same (side, line): blocker wins.
     let a = annotated_app(vec![
