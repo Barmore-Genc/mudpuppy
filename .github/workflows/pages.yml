@@ -3,9 +3,10 @@ name: Pages
 # Publishes the project site to GitHub Pages (source: GitHub Actions). The site is
 # two things:
 #   * index.html  — README.md rendered to HTML.
-#   * dist-manifest.json — copied from the latest GitHub Release, so mudpuppy's
-#     built-in update check (src/update.rs) can read the current version over a
-#     plain HTTPS GET, with no `gh` needed on the user's machine.
+#   * dist-manifest.json — copied from the latest GitHub Release. Current mudpuppy
+#     builds read the manifest straight from the release (src/update.rs), but
+#     versions shipped before that change still poll this Pages copy, so we keep
+#     publishing it here so they can keep self-updating.
 #
 # Runs on a push to main (README changed), when a release is published (manifest
 # changed), and on demand. Note: the `release` trigger does NOT fire for releases
