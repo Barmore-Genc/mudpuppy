@@ -9,13 +9,20 @@
 //!
 //! Editing is vim-like and modal. The composer opens in [`Mode::Insert`] (cursor
 //! at the end of any prefilled body) so typing works immediately; `Esc` drops to
-//! [`Mode::Normal`], where `Enter` saves, `i`/`a`/`o`/`O` re-enter insert, and the
-//! usual `h`/`j`/`k`/`l`/`x`/`dd` motions edit the buffer. `Ctrl-S` (save),
-//! `Ctrl-E`/`Ctrl-T` (severity/tag) and `Ctrl-J` (newline) work in either mode.
+//! [`Mode::Normal`], where `Enter` saves and a broad subset of vim drives the
+//! buffer — motions (`h`/`j`/`k`/`l`, `w`/`b`/`e`/`W`/`B`/`E`, `0`/`^`/`$`,
+//! `gg`/`G`, `f`/`F`/`t`/`T` and `;`/`,`, with count prefixes), operators
+//! (`d`/`c`/`y` over any motion, plus `dd`/`cc`/`yy` and `D`/`C`/`Y`/`S`),
+//! single-key edits (`x`/`X`/`s`/`r`/`~`/`J`/`p`/`P`) and undo/redo (`u`,
+//! `Ctrl-R`). The vim engine itself lives in the `vim` submodule. `Ctrl-S`
+//! (save), `Ctrl-E`/`Ctrl-T` (severity/tag) and `Ctrl-J` (newline) work in
+//! either mode.
 //!
 //! The composer-opening verbs (`add_comment`, `comment_file`, `reply`,
 //! `edit_comment`) live here too, since they construct the [`Composer`] from the
 //! cursor/selection anchor.
+
+mod vim;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -59,9 +66,28 @@ pub(crate) struct Composer {
     /// length, i.e. one past the last char).
     pub(crate) col: usize,
     pub(crate) mode: Mode,
-    /// A `d` operator in [`Mode::Normal`] awaiting its second `d` (the `dd`
-    /// line-delete).
-    pending_d: bool,
+    /// A pending normal-mode operator (`d`/`c`/`y`) awaiting its motion, or a
+    /// repeat of itself for the line-wise `dd`/`cc`/`yy`.
+    pending_op: Option<vim::Operator>,
+    /// A pending `f`/`F`/`t`/`T` awaiting the character to search for.
+    pending_find: Option<vim::PendingFind>,
+    /// Saw a leading `g`, awaiting the second key (e.g. `gg`).
+    pending_g: bool,
+    /// Saw `r`, awaiting the replacement character.
+    pending_replace: bool,
+    /// The count prefix accumulated for the next motion/operator (`3w`, `d2j`).
+    count: Option<usize>,
+    /// The count captured when an operator was pressed; multiplied with `count`
+    /// so `2d3w` deletes six words.
+    op_count: Option<usize>,
+    /// The last `f`/`t` search, for `;`/`,` repeats.
+    last_find: Option<vim::LastFind>,
+    /// The yank/delete register, replayed by `p`/`P`.
+    register: vim::Register,
+    /// Buffer snapshots for `u`; cleared on a fresh edit.
+    undo: Vec<vim::Snapshot>,
+    /// Snapshots popped by `u`, replayed by `Ctrl-R`.
+    redo: Vec<vim::Snapshot>,
     pub(crate) severity: Severity,
     pub(crate) tag: Option<Tag>,
     /// What gets written on save.
@@ -79,7 +105,16 @@ impl Composer {
             row: 0,
             col: 0,
             mode: Mode::Insert,
-            pending_d: false,
+            pending_op: None,
+            pending_find: None,
+            pending_g: false,
+            pending_replace: false,
+            count: None,
+            op_count: None,
+            last_find: None,
+            register: vim::Register::default(),
+            undo: Vec::new(),
+            redo: Vec::new(),
             severity: Severity::Suggestion,
             tag: None,
             target,
@@ -151,144 +186,6 @@ impl Composer {
             .map(|(b, _)| b)
             .unwrap_or(line.len())
     }
-
-    // --- Insert-mode edits ---
-
-    fn insert_char(&mut self, ch: char) {
-        let at = self.byte_at(self.col);
-        self.lines[self.row].insert(at, ch);
-        self.col += 1;
-    }
-
-    /// Split the current line at the cursor; the tail becomes a new line below.
-    fn insert_newline(&mut self) {
-        let at = self.byte_at(self.col);
-        let tail = self.lines[self.row].split_off(at);
-        self.lines.insert(self.row + 1, tail);
-        self.row += 1;
-        self.col = 0;
-    }
-
-    /// Delete the char before the cursor, joining with the previous line at a
-    /// line start.
-    fn backspace(&mut self) {
-        if self.col > 0 {
-            let at = self.byte_at(self.col - 1);
-            self.lines[self.row].remove(at);
-            self.col -= 1;
-        } else if self.row > 0 {
-            let line = self.lines.remove(self.row);
-            self.row -= 1;
-            self.col = self.line_len();
-            self.lines[self.row].push_str(&line);
-        }
-    }
-
-    // --- Normal-mode operators ---
-
-    /// `x` — delete the char under the cursor.
-    fn delete_char(&mut self) {
-        if self.col < self.line_len() {
-            let at = self.byte_at(self.col);
-            self.lines[self.row].remove(at);
-            self.clamp_col();
-        }
-    }
-
-    /// `dd` — delete the current line, keeping at least one empty line.
-    fn delete_line(&mut self) {
-        self.lines.remove(self.row);
-        if self.lines.is_empty() {
-            self.lines.push(String::new());
-        }
-        self.row = self.row.min(self.lines.len() - 1);
-        self.col = 0;
-    }
-
-    // --- Motions ---
-
-    fn move_left(&mut self) {
-        self.col = self.col.saturating_sub(1);
-    }
-
-    fn move_right(&mut self) {
-        if self.col < self.line_len() {
-            self.col += 1;
-        }
-    }
-
-    fn move_up(&mut self) {
-        if self.row > 0 {
-            self.row -= 1;
-            self.clamp_col();
-        }
-    }
-
-    fn move_down(&mut self) {
-        if self.row + 1 < self.lines.len() {
-            self.row += 1;
-            self.clamp_col();
-        }
-    }
-
-    /// Keep the cursor column within the current line after a vertical move or a
-    /// delete.
-    fn clamp_col(&mut self) {
-        self.col = self.col.min(self.line_len());
-    }
-
-    // --- Insert-mode entry points ---
-
-    fn enter_insert_after(&mut self) {
-        if self.col < self.line_len() {
-            self.col += 1;
-        }
-        self.mode = Mode::Insert;
-    }
-
-    /// `o` / `O` — open an empty line below / above and start inserting on it.
-    fn open_line(&mut self, below: bool) {
-        let at = if below { self.row + 1 } else { self.row };
-        self.lines.insert(at, String::new());
-        self.row = at;
-        self.col = 0;
-        self.mode = Mode::Insert;
-    }
-
-    /// Handle one key in [`Mode::Normal`]. `Enter` (save) and `Esc` (cancel) are
-    /// not here — they need [`App`] and are handled by the caller.
-    fn normal_key(&mut self, ev: KeyEvent) {
-        // A pending `d` only pairs with a second `d`; any other key abandons it.
-        if std::mem::take(&mut self.pending_d) {
-            if matches!(ev.code, KeyCode::Char('d')) {
-                self.delete_line();
-            }
-            return;
-        }
-        match ev.code {
-            KeyCode::Char('i') => self.mode = Mode::Insert,
-            KeyCode::Char('a') => self.enter_insert_after(),
-            KeyCode::Char('A') => {
-                self.col = self.line_len();
-                self.mode = Mode::Insert;
-            }
-            KeyCode::Char('I') => {
-                self.col = 0;
-                self.mode = Mode::Insert;
-            }
-            KeyCode::Char('o') => self.open_line(true),
-            KeyCode::Char('O') => self.open_line(false),
-            KeyCode::Char('h') | KeyCode::Left => self.move_left(),
-            KeyCode::Char('l') | KeyCode::Right => self.move_right(),
-            KeyCode::Char('k') | KeyCode::Up => self.move_up(),
-            KeyCode::Char('j') | KeyCode::Down => self.move_down(),
-            KeyCode::Char('0') | KeyCode::Home => self.col = 0,
-            KeyCode::Char('$') | KeyCode::End => self.col = self.line_len(),
-            KeyCode::Char('x') => self.delete_char(),
-            KeyCode::Char('d') => self.pending_d = true,
-            _ => {}
-        }
-    }
 }
 
 impl App {
@@ -323,6 +220,10 @@ impl App {
                 self.composer.as_mut().unwrap().insert_newline();
                 return true;
             }
+            KeyCode::Char('r') if ctrl && mode == Mode::Normal => {
+                self.composer.as_mut().unwrap().redo();
+                return true;
+            }
             _ => {}
         }
 
@@ -330,19 +231,26 @@ impl App {
             Mode::Insert => {
                 let c = self.composer.as_mut().unwrap();
                 match ev.code {
-                    KeyCode::Esc => c.mode = Mode::Normal,
+                    KeyCode::Esc => c.leave_insert(),
                     KeyCode::Enter => c.insert_newline(),
                     KeyCode::Backspace => c.backspace(),
                     KeyCode::Char(ch) if !ctrl => c.insert_char(ch),
                     _ => {}
                 }
             }
-            // `Enter` (save) and `Esc` (cancel) need `App`; the rest is buffer-local.
-            Mode::Normal => match ev.code {
-                KeyCode::Enter => self.save_composer(),
-                KeyCode::Esc => self.close_composer(),
-                _ => self.composer.as_mut().unwrap().normal_key(ev),
-            },
+            // `Enter` (save) and `Esc` (cancel) need `App`; the rest is
+            // buffer-local. While a multi-key command is mid-flight (an operator,
+            // a `f`/`r`/`g` awaiting its argument, or a count), `Enter`/`Esc`
+            // belong to that command, not to save/cancel.
+            Mode::Normal => {
+                let pending = self.composer.as_ref().unwrap().has_pending();
+                match ev.code {
+                    KeyCode::Enter if !pending => self.save_composer(),
+                    KeyCode::Esc if !pending => self.close_composer(),
+                    KeyCode::Esc => self.composer.as_mut().unwrap().clear_pending(),
+                    _ => self.composer.as_mut().unwrap().normal_key(ev),
+                }
+            }
         }
         true
     }
