@@ -49,6 +49,8 @@ use render::{render, target_desc};
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -189,6 +191,17 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
             });
         }
 
+        // Background syntax highlighting. The structure (plain rows) renders
+        // immediately; each file switch / context expansion queues a job that a
+        // `spawn_blocking` worker runs off the UI thread (so a 20k-line file
+        // never blocks input on `parse_line`). Results arrive on `hl_rx` and the
+        // next draw shows the colours. `cancel` carries the latest wanted
+        // generation: a newer structure overwrites it, and the in-flight job
+        // bails when it sees the mismatch.
+        let (hl_tx, mut hl_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::highlight::HighlightResult>();
+        let cancel = Arc::new(AtomicU64::new(0));
+
         // Initial events: `startup` once, then `file_open` for the file the
         // viewer opens on.
         engine.fire_startup(app)?;
@@ -214,6 +227,17 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
 
         loop {
             app.status_msg = engine.status_message();
+            // Hand any queued highlight job to a blocking worker. The structure
+            // is already on screen; the colour fills land on `hl_rx`. Storing the
+            // job's generation into `cancel` supersedes any older in-flight job.
+            if let Some(req) = app.take_highlight_request() {
+                cancel.store(req.generation, Ordering::Relaxed);
+                let tx = hl_tx.clone();
+                let cancel = Arc::clone(&cancel);
+                tokio::task::spawn_blocking(move || {
+                    let _ = tx.send(crate::highlight::run_request(&req, &cancel));
+                });
+            }
             terminal.draw(|frame| render(frame, app))?;
             tokio::select! {
                 // Terminal input. `EventStream::next` is cancel-safe, so the
@@ -356,6 +380,12 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                     // Note: a removed filter can't restore an already-hidden file
                     // without a restart, since the diff file list isn't retained.
                     engine.apply_file_filters(app);
+                }
+                // A background highlight job finished. Apply its colour fills
+                // (a stale result, superseded by a file switch or expansion, is
+                // dropped by the generation check) and let the next draw show them.
+                Some(result) = hl_rx.recv() => {
+                    app.apply_highlights(result);
                 }
                 // The launch-time update check found a newer release. Fire
                 // `update_check` so `core.luau` can prompt; its callbacks can

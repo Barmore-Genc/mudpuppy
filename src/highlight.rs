@@ -22,6 +22,7 @@
 //! does.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 use ratatui::style::Color;
@@ -33,6 +34,66 @@ use syntect::parsing::{SyntaxReference, SyntaxSet};
 /// text is exactly the original line (so the rendered characters never change,
 /// only their colour — see TESTING.md on why that keeps the `.snap` grid stable).
 pub type HlLine = Vec<(Color, String)>;
+
+/// One contiguous block of lines to highlight off the UI thread, plus the
+/// base-view row indices each highlighted line fills. Parse state is local to a
+/// segment (the `hunk` reset boundary), so each block stands alone — a hunk
+/// body, a revealed gap edge, or a synthetic file's whole content.
+pub struct HlSegment {
+    /// Indices into the view's rows of the `Row::Line` rows this segment's
+    /// highlighted lines fill, aligned 1:1 with `texts`.
+    pub row_indices: Vec<usize>,
+    /// The raw line texts to highlight (without `+`/`-`/space markers).
+    pub texts: Vec<String>,
+}
+
+/// A whole-file highlight job handed to the background worker: the path (and a
+/// first line for shebang resolution) to pick the language, the segments to
+/// colour, and the `generation` that requested it so a stale result can be
+/// dropped once a newer structure supersedes it.
+pub struct HighlightRequest {
+    pub path: String,
+    pub first_line: Option<String>,
+    pub generation: u64,
+    pub segments: Vec<HlSegment>,
+}
+
+/// The worker's output: the per-row colour fills to write into the base view,
+/// tagged with the `generation` of the request that produced them.
+pub struct HighlightResult {
+    pub generation: u64,
+    /// `(base row index, highlighted line)` pairs.
+    pub fills: Vec<(usize, HlLine)>,
+}
+
+/// Highlight every segment of `req`, resolving the language once from its path.
+/// Pure compute (no runtime), so it runs on a `spawn_blocking` worker and is
+/// directly unit-testable. Returns empty `fills` when the language is unknown
+/// (rows then stay in their plain per-kind colour). Between segments it checks
+/// `cancel` — the latest wanted generation — and bails early when this job has
+/// been superseded by a file switch or expansion.
+pub fn run_request(req: &HighlightRequest, cancel: &AtomicU64) -> HighlightResult {
+    let mut fills = Vec::new();
+    let Some(hl) = Highlighter::for_path(&req.path, req.first_line.as_deref()) else {
+        return HighlightResult {
+            generation: req.generation,
+            fills,
+        };
+    };
+    for seg in &req.segments {
+        if cancel.load(Ordering::Relaxed) != req.generation {
+            break;
+        }
+        let texts: Vec<&str> = seg.texts.iter().map(String::as_str).collect();
+        for (idx, line) in seg.row_indices.iter().zip(hl.hunk(&texts)) {
+            fills.push((*idx, line));
+        }
+    }
+    HighlightResult {
+        generation: req.generation,
+        fills,
+    }
+}
 
 /// The loaded syntect assets: the syntax definitions and the one theme we colour
 /// with. Built once and shared.
@@ -166,6 +227,65 @@ mod tests {
             line.iter().all(|(c, _)| matches!(c, Color::Rgb(..))),
             "every run should carry a concrete truecolor"
         );
+    }
+
+    #[test]
+    fn run_request_fills_rust_segments_with_truecolor() {
+        // A two-line Rust segment mapped onto base rows 3 and 4. The worker
+        // resolves the language from the path and returns one fill per line.
+        let req = HighlightRequest {
+            path: "src/lib.rs".to_string(),
+            first_line: None,
+            generation: 7,
+            segments: vec![HlSegment {
+                row_indices: vec![3, 4],
+                texts: vec!["fn main() {".to_string(), "    let x = 1;".to_string()],
+            }],
+        };
+        let cancel = AtomicU64::new(7);
+        let result = run_request(&req, &cancel);
+        assert_eq!(result.generation, 7);
+        // One fill per input line, mapped to the requested base rows.
+        let idxs: Vec<usize> = result.fills.iter().map(|(i, _)| *i).collect();
+        assert_eq!(idxs, vec![3, 4]);
+        // Every run carries a concrete truecolor (syntect output, not a fallback).
+        assert!(result
+            .fills
+            .iter()
+            .flat_map(|(_, line)| line)
+            .all(|(c, _)| matches!(c, Color::Rgb(..))));
+    }
+
+    #[test]
+    fn run_request_bails_when_superseded() {
+        // A request whose generation no longer matches `cancel` yields nothing.
+        let req = HighlightRequest {
+            path: "src/lib.rs".to_string(),
+            first_line: None,
+            generation: 1,
+            segments: vec![HlSegment {
+                row_indices: vec![0],
+                texts: vec!["let x = 1;".to_string()],
+            }],
+        };
+        let cancel = AtomicU64::new(2);
+        let result = run_request(&req, &cancel);
+        assert!(result.fills.is_empty());
+    }
+
+    #[test]
+    fn run_request_unknown_language_yields_no_fills() {
+        let req = HighlightRequest {
+            path: "notes.unknownext".to_string(),
+            first_line: None,
+            generation: 0,
+            segments: vec![HlSegment {
+                row_indices: vec![0],
+                texts: vec!["plain text".to_string()],
+            }],
+        };
+        let cancel = AtomicU64::new(0);
+        assert!(run_request(&req, &cancel).fills.is_empty());
     }
 
     #[test]

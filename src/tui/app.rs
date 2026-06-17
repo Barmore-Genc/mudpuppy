@@ -25,7 +25,7 @@ use crate::diff::{DiffLine, FileDiff, GapPos, LineKind};
 use crate::domain::{
     AnchorScope, Annotation, Author, Severity, Side, StateFile, Status, Target, Turn,
 };
-use crate::highlight::{Highlighter, HlLine};
+use crate::highlight::{HighlightRequest, HighlightResult, HlLine, HlSegment};
 use crate::lua::keys::KeyChord;
 use crate::picker::Picker;
 use crate::tui::composer::Composer;
@@ -123,6 +123,10 @@ pub(crate) enum Sidebar {
 }
 
 /// A single rendered row of the diff pane.
+///
+/// `Clone` so the annotation-free structure cache (`App::base_view`) can be
+/// cloned into the display view on each interleave pass.
+#[derive(Clone)]
 pub(crate) enum Row {
     /// A `@@ … @@` hunk header.
     Hunk(String),
@@ -155,6 +159,7 @@ pub(crate) enum Row {
 /// One wrapped visual line of an inline comment thread row ([`Row::Comment`]).
 /// The first visual line of a comment carries the header (mark + author + tag +
 /// status); continuation lines carry only wrapped body text.
+#[derive(Clone)]
 pub(crate) struct CommentLine {
     /// Owning annotation id (so a click can reply to / edit the right comment).
     pub(crate) id: String,
@@ -172,6 +177,7 @@ pub(crate) struct CommentLine {
 }
 
 /// The header fields shown on a comment's first visual line.
+#[derive(Clone)]
 pub(crate) struct CommentMeta {
     pub(crate) author: Author,
     pub(crate) severity: Severity,
@@ -180,7 +186,7 @@ pub(crate) struct CommentMeta {
 }
 
 /// How far one gap of hidden context has been revealed from each edge.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct GapExpansion {
     pub(crate) from_top: usize,
     pub(crate) from_bottom: usize,
@@ -188,9 +194,21 @@ pub(crate) struct GapExpansion {
 
 /// The reveal state of every gap in a file's diff, indexed in the order
 /// [`crate::diff::gaps`] returns them. Empty until the user expands anything.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub(crate) struct ViewPlan {
     pub(crate) expanded: Vec<GapExpansion>,
+}
+
+/// The cache key for [`App::base_view`]: the structure depends only on which
+/// file is selected and how far its gaps are expanded. The Head blob is
+/// deliberately *not* part of the key — it is deterministic per selected file
+/// within a session (the working tree isn't watched), so a given `(selected,
+/// plan)` always yields the same structure, and re-highlighting is skipped on a
+/// cache hit (the lag fix: `reload`/composer/resize only re-interleave).
+#[derive(PartialEq, Eq)]
+struct BuildKey {
+    selected: usize,
+    plan: ViewPlan,
 }
 
 /// The rows for one opened file, plus the row indices where hunks begin (for
@@ -239,19 +257,36 @@ impl FileView {
 }
 
 impl FileView {
-    /// Build the row list for a file, parsing its hunks on demand.
+    /// Build a view, discarding the highlight segments. The structure is
+    /// identical to [`FileView::structure`] but every line stays in its plain
+    /// per-kind colour. Used by tests that assert row layout, not colour.
+    #[cfg(test)]
+    pub(crate) fn build(file: &FileDiff, blob: Option<&[String]>, plan: &ViewPlan) -> FileView {
+        FileView::structure(file, blob, plan).0
+    }
+
+    /// Build the annotation-free row layout for a file, parsing its hunks on
+    /// demand, **without** highlighting any line. Every [`Row::Line`] carries
+    /// `None` for its colour; the returned [`HlSegment`]s point at those rows so
+    /// a background pass can fill them in later (so the structure shows instantly
+    /// and re-highlighting is keyed on `(file, blob, plan)`, off the UI thread).
     ///
     /// `blob` is the file's full new-side (Head) contents, used to reveal hidden
     /// context lines between/around hunks; `None` (a miss, or no expansion yet)
     /// means gaps still render a "show more" `Row::Expander` but no context.
     /// `plan` records how far each gap has been revealed.
-    pub(crate) fn build(file: &FileDiff, blob: Option<&[String]>, plan: &ViewPlan) -> FileView {
+    pub(crate) fn structure(
+        file: &FileDiff,
+        blob: Option<&[String]>,
+        plan: &ViewPlan,
+    ) -> (FileView, Vec<HlSegment>) {
         let mut rows = Vec::new();
         let mut hunk_starts = Vec::new();
+        let mut segments: Vec<HlSegment> = Vec::new();
 
         if file.is_binary {
             rows.push(Row::Notice("Binary file — no textual diff to show".into()));
-            return FileView::new(rows, hunk_starts);
+            return (FileView::new(rows, hunk_starts), segments);
         }
 
         // Synthetic files have no diff: render their full current content as
@@ -261,37 +296,32 @@ impl FileView {
                 rows.push(Row::Notice(
                     "current content unavailable (deleted, binary, or too large)".into(),
                 ));
-                return FileView::new(rows, hunk_starts);
+                return (FileView::new(rows, hunk_starts), segments);
             };
-            let highlighter =
-                Highlighter::for_path(file.display_path(), blob.first().map(String::as_str));
-            let texts: Vec<&str> = blob.iter().map(String::as_str).collect();
-            let highlights = highlighter.as_ref().map(|hl| hl.hunk(&texts));
-            for (idx, text) in texts.iter().enumerate() {
+            let mut seg = HlSegment {
+                row_indices: Vec::with_capacity(blob.len()),
+                texts: Vec::with_capacity(blob.len()),
+            };
+            for (idx, text) in blob.iter().enumerate() {
                 let lineno = idx as u32 + 1;
-                let hl = highlights.as_ref().map(|h| h[idx].clone());
+                seg.row_indices.push(rows.len());
+                seg.texts.push(text.clone());
                 rows.push(Row::Line(
                     DiffLine {
                         kind: LineKind::Context,
-                        content: (*text).to_string(),
+                        content: text.clone(),
                         old_lineno: Some(lineno),
                         new_lineno: Some(lineno),
                         no_newline: false,
                     },
-                    hl,
+                    None,
                 ));
             }
-            return FileView::new(rows, hunk_starts);
+            if !seg.row_indices.is_empty() {
+                segments.push(seg);
+            }
+            return (FileView::new(rows, hunk_starts), segments);
         }
-
-        // Resolve the language once for the whole file; `None` (unknown
-        // extension) means every line falls back to plain per-kind colouring.
-        // Highlighting happens here, when a file is *opened*, so the cost tracks
-        // the opened file rather than the whole 1000-file diff.
-        let highlighter = Highlighter::for_path(
-            file.display_path(),
-            blob.and_then(|b| b.first()).map(String::as_str),
-        );
 
         let hunks = file.hunks();
         let new_total = blob.map(|b| b.len() as u32);
@@ -299,7 +329,10 @@ impl FileView {
 
         // Emit one gap's revealed context (top edge, then the expander for what
         // stays hidden, then the bottom edge), pulling text from `blob`.
-        let emit_gap = |rows: &mut Vec<Row>, gap: &crate::diff::Gap, gap_index: usize| {
+        let emit_gap = |rows: &mut Vec<Row>,
+                        segments: &mut Vec<HlSegment>,
+                        gap: &crate::diff::Gap,
+                        gap_index: usize| {
             let total_hidden = (gap.new.end - gap.new.start) as usize;
             if total_hidden == 0 {
                 return;
@@ -312,33 +345,44 @@ impl FileView {
             // Within an all-context gap, old and new advance in lockstep, so the
             // old↔new offset is constant.
             let delta = gap.new.start as i64 - gap.old.start as i64;
-            let reveal = |rows: &mut Vec<Row>, new_from: u32, new_to: u32| {
-                let Some(b) = blob else { return };
-                if new_from >= new_to {
-                    return;
-                }
-                let texts: Vec<&str> = (new_from..new_to)
-                    .map(|n| b.get(n as usize - 1).map(String::as_str).unwrap_or(""))
-                    .collect();
-                let highlights = highlighter.as_ref().map(|hl| hl.hunk(&texts));
-                for (i, text) in texts.iter().enumerate() {
-                    let new_lineno = new_from + i as u32;
-                    let old_lineno = (new_lineno as i64 - delta) as u32;
-                    let hl = highlights.as_ref().map(|h| h[i].clone());
-                    rows.push(Row::Line(
-                        DiffLine {
-                            kind: LineKind::Context,
-                            content: (*text).to_string(),
-                            old_lineno: Some(old_lineno),
-                            new_lineno: Some(new_lineno),
-                            no_newline: false,
-                        },
-                        hl,
-                    ));
-                }
-            };
+            let reveal =
+                |rows: &mut Vec<Row>, segments: &mut Vec<HlSegment>, new_from: u32, new_to: u32| {
+                    let Some(b) = blob else { return };
+                    if new_from >= new_to {
+                        return;
+                    }
+                    let mut seg = HlSegment {
+                        row_indices: Vec::new(),
+                        texts: Vec::new(),
+                    };
+                    for n in new_from..new_to {
+                        let text = b.get(n as usize - 1).map(String::as_str).unwrap_or("");
+                        let new_lineno = n;
+                        let old_lineno = (new_lineno as i64 - delta) as u32;
+                        seg.row_indices.push(rows.len());
+                        seg.texts.push(text.to_string());
+                        rows.push(Row::Line(
+                            DiffLine {
+                                kind: LineKind::Context,
+                                content: text.to_string(),
+                                old_lineno: Some(old_lineno),
+                                new_lineno: Some(new_lineno),
+                                no_newline: false,
+                            },
+                            None,
+                        ));
+                    }
+                    if !seg.row_indices.is_empty() {
+                        segments.push(seg);
+                    }
+                };
 
-            reveal(rows, gap.new.start, gap.new.start + from_top as u32);
+            reveal(
+                rows,
+                segments,
+                gap.new.start,
+                gap.new.start + from_top as u32,
+            );
             let hidden = total_hidden - from_top - from_bottom;
             if hidden > 0 {
                 rows.push(Row::Expander {
@@ -348,7 +392,12 @@ impl FileView {
                     can_down: matches!(gap.position, GapPos::Between | GapPos::AfterLast),
                 });
             }
-            reveal(rows, gap.new.end - from_bottom as u32, gap.new.end);
+            reveal(
+                rows,
+                segments,
+                gap.new.end - from_bottom as u32,
+                gap.new.end,
+            );
         };
 
         // Walk gaps and hunks in line order: a BeforeFirst/Between gap renders
@@ -362,7 +411,7 @@ impl FileView {
                     GapPos::BeforeFirst | GapPos::Between => gap.new.end == hunk.new_start,
                 };
                 if renders_before {
-                    emit_gap(&mut rows, gap, gi);
+                    emit_gap(&mut rows, &mut segments, gap, gi);
                     gaps_iter.next();
                 } else {
                     break;
@@ -382,20 +431,24 @@ impl FileView {
                     format!(" {}", hunk.section)
                 }
             )));
-            // Highlight the hunk's bodies in one pass (parse state is per-hunk;
-            // see the `highlight` module), then pair each line with its runs.
-            let highlights = highlighter.as_ref().map(|hl| {
-                let texts: Vec<&str> = hunk.lines.iter().map(|l| l.content.as_str()).collect();
-                hl.hunk(&texts)
-            });
-            for (i, line) in hunk.lines.iter().enumerate() {
-                let hl = highlights.as_ref().map(|h| h[i].clone());
-                rows.push(Row::Line(line.clone(), hl));
+            // One segment per hunk body: parse state resets per hunk (see the
+            // `highlight` module), so each is an independent highlight unit.
+            let mut seg = HlSegment {
+                row_indices: Vec::with_capacity(hunk.lines.len()),
+                texts: Vec::with_capacity(hunk.lines.len()),
+            };
+            for line in &hunk.lines {
+                seg.row_indices.push(rows.len());
+                seg.texts.push(line.content.clone());
+                rows.push(Row::Line(line.clone(), None));
+            }
+            if !seg.row_indices.is_empty() {
+                segments.push(seg);
             }
         }
         // Whatever gap remains is the trailing (after-last) one.
         for (gi, gap) in gaps_iter {
-            emit_gap(&mut rows, gap, gi);
+            emit_gap(&mut rows, &mut segments, gap, gi);
         }
 
         if rows.is_empty() {
@@ -403,7 +456,7 @@ impl FileView {
             rows.push(Row::Notice("No line changes (metadata-only change)".into()));
         }
 
-        FileView::new(rows, hunk_starts)
+        (FileView::new(rows, hunk_starts), segments)
     }
 }
 
@@ -414,8 +467,26 @@ pub(crate) struct App {
     /// Index into `files` of the file currently shown in the diff pane.
     pub(crate) selected: usize,
     pub(crate) focus: Focus,
-    /// Cached rows for the selected file.
+    /// Cached rows for the selected file (the display view: `base_view` with
+    /// inline comment threads and the open composer spliced in).
     pub(crate) view: FileView,
+    /// The annotation-free structure cache the display `view` is interleaved
+    /// from. Keyed by `view_key`; rebuilt only when that key changes, so the
+    /// laggy interactions (reload, resize, composer open/close) reuse it and
+    /// just re-interleave. Background highlight fills are written here.
+    pub(super) base_view: FileView,
+    /// The `(selected, plan)` `base_view` was last built for; `None` forces the
+    /// next [`App::ensure_structure`] to rebuild (used to invalidate after the
+    /// repo root — and thus blobs — becomes available).
+    view_key: Option<BuildKey>,
+    /// Monotonic counter bumped each time `base_view` is rebuilt. A highlight
+    /// job is tagged with the generation it was spawned for; a result whose
+    /// generation no longer matches is stale and dropped.
+    highlight_gen: u64,
+    /// A highlight job produced by the last structure rebuild, waiting to be
+    /// handed to the background worker by the event loop (drained via
+    /// [`App::take_highlight_request`]). `None` on a cache hit.
+    pending_highlight: Option<HighlightRequest>,
     /// Top visible row of the diff pane.
     pub(crate) scroll: usize,
     /// Leftmost visible display column of the diff pane: how far the code is
@@ -550,20 +621,23 @@ pub(crate) struct App {
 
 impl App {
     pub(crate) fn new(files: Vec<FileDiff>, target: Target) -> App {
-        // The opening view has no blob yet (none fetched until expansion); gaps
-        // still render their "show more" affordance.
-        let view = FileView::build(&files[0], None, &ViewPlan::default());
         let plans = vec![ViewPlan::default(); files.len()];
         // `files`/`plans` are the visible projection; `all_files`/`all_plans` are
         // the canonical source. With no filter registered yet the two match.
         let all_files = files.clone();
         let all_plans = plans.clone();
-        App {
+        let mut app = App {
             files,
             target,
             selected: 0,
             focus: Focus::Tree,
-            view,
+            // Built below by the first `rebuild_view`; start empty so the struct
+            // is well-formed before the cache is populated.
+            view: FileView::new(Vec::new(), Vec::new()),
+            base_view: FileView::new(Vec::new(), Vec::new()),
+            view_key: None,
+            highlight_gen: 0,
+            pending_highlight: None,
             scroll: 0,
             h_scroll: 0,
             cursor: 0,
@@ -609,7 +683,11 @@ impl App {
             last_click: None,
             pending_command: None,
             comment_width: 0,
-        }
+        };
+        // Build the opening view. No blob yet (no repo root until the store is
+        // attached), so gaps still render their "show more" affordance.
+        app.rebuild_view();
+        app
     }
 
     /// Consume a palette command name set by a mouse click, if any. The
@@ -1319,6 +1397,10 @@ impl App {
     /// Record the repository root; needed before any blob lookup.
     pub(crate) fn set_repo_root(&mut self, root: PathBuf) {
         self.repo_root = Some(root);
+        // The opening view was built before a repo root existed, so its blob was
+        // a forced miss (no trailing-gap bound, no synthetic content). Invalidate
+        // the structure cache so the next rebuild re-derives it with blobs.
+        self.view_key = None;
     }
 
     /// Open the "add any file" picker, loading (and caching) the working-tree
@@ -1474,20 +1556,89 @@ impl App {
         )
     }
 
-    /// Rebuild the current file's view from its plan, supplying the Head blob so
-    /// revealed context lines can be drawn, then splice in any inline comment
-    /// threads and the open composer.
+    /// Refresh the current file's display view: ensure the structure cache is
+    /// current, splice in inline comment threads and the open composer, and clamp
+    /// the cursor. Cheap when only annotations / the composer / the wrap width
+    /// changed — `ensure_structure` is a no-op on a cache hit, so the laggy
+    /// interactions (reload, resize, composer open/close) only re-interleave.
     pub(crate) fn rebuild_view(&mut self) {
+        self.ensure_structure();
+        self.interleave_annotations();
+        self.clamp_cursor();
+    }
+
+    /// Rebuild `base_view` (the annotation-free structure) only when the
+    /// `(selected, plan)` key changed. On a rebuild it bumps `highlight_gen` and
+    /// queues a `pending_highlight` job for the background worker; on a cache hit
+    /// it leaves the (possibly already-highlighted) `base_view` untouched.
+    fn ensure_structure(&mut self) {
+        let plan = self.plans.get(self.selected).cloned().unwrap_or_default();
+        let key = BuildKey {
+            selected: self.selected,
+            plan: plan.clone(),
+        };
+        if self.view_key.as_ref() == Some(&key) {
+            return;
+        }
         let blob = match self.current_path() {
             Some(path) => self.blob_for(&path, BlobSide::Head),
             None => None,
         };
-        let plan = self.plans.get(self.selected).cloned().unwrap_or_default();
-        if let Some(file) = self.files.get(self.selected) {
-            self.view = FileView::build(file, blob.as_deref(), &plan);
+        let segments = if let Some(file) = self.files.get(self.selected) {
+            let (base_view, segments) = FileView::structure(file, blob.as_deref(), &plan);
+            self.base_view = base_view;
+            segments
+        } else {
+            self.base_view = FileView::new(Vec::new(), Vec::new());
+            Vec::new()
+        };
+        self.view_key = Some(key);
+        self.highlight_gen += 1;
+        // Queue the highlight job for the worker (nothing to do when there are no
+        // line rows, or no path to resolve a language from).
+        self.pending_highlight = if segments.is_empty() {
+            None
+        } else {
+            self.current_path().map(|path| HighlightRequest {
+                path,
+                first_line: blob.as_ref().and_then(|b| b.first().cloned()),
+                generation: self.highlight_gen,
+                segments,
+            })
+        };
+    }
+
+    /// Take the queued highlight job, if any, for the event loop to hand to the
+    /// background worker.
+    pub(crate) fn take_highlight_request(&mut self) -> Option<HighlightRequest> {
+        self.pending_highlight.take()
+    }
+
+    /// Apply a finished highlight job: write each colour fill into `base_view`'s
+    /// matching `Row::Line`, then re-interleave so the colours show. A result
+    /// whose generation no longer matches `highlight_gen` is stale (a file switch
+    /// or expansion superseded it) and dropped.
+    pub(crate) fn apply_highlights(&mut self, result: HighlightResult) {
+        if result.generation != self.highlight_gen {
+            return;
+        }
+        for (idx, line) in result.fills {
+            if let Some(Row::Line(_, hl)) = self.base_view.rows.get_mut(idx) {
+                *hl = Some(line);
+            }
         }
         self.interleave_annotations();
-        self.clamp_cursor();
+    }
+
+    /// Run the queued highlight job on the current thread and apply it. Tests
+    /// have no event-loop worker, so this gives them the colours synchronously.
+    #[cfg(test)]
+    pub(crate) fn highlight_sync(&mut self) {
+        if let Some(req) = self.take_highlight_request() {
+            let cancel = std::sync::atomic::AtomicU64::new(req.generation);
+            let result = crate::highlight::run_request(&req, &cancel);
+            self.apply_highlights(result);
+        }
     }
 
     /// Set the inline-comment wrap width from the renderer's measured diff inner
@@ -1521,15 +1672,6 @@ impl App {
         self.rebuild_view();
     }
 
-    /// Splice inline comment threads (and the open composer) into the freshly
-    /// built code rows. Runs after `FileView::build`, which stays annotation-free.
-    ///
-    /// Each thread (a line-scoped parent plus its replies) is wrapped to the
-    /// current diff inner width and emitted as single-line [`Row::Comment`] rows
-    /// just after the diff line it anchors to. The open composer reserves
-    /// placeholder [`Row::Composer`] rows at its target so following content is
-    /// pushed down. Hunk start indices are recomputed because the splice shifts
-    /// them.
     /// New-side total line count for the current file, if its Head blob is
     /// cached (drives the trailing-gap calculation).
     fn current_new_total(&self) -> Option<u32> {

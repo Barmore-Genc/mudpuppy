@@ -175,8 +175,11 @@ fn emit_scenario_svgs() {
         }
         // The marker can land a paint or two before keys typed after it (e.g.
         // the composer body) have finished rendering, which truncates the
-        // capture. Wait for the grid to stop changing before recording.
-        if !session.wait_for_stable_screen(3, Duration::from_secs(10)) {
+        // capture. Syntax highlighting is also asynchronous now — the worker
+        // fills colour a frame or two after the plain structure renders — so we
+        // settle on the *SVG* (which encodes RGB), not just the character grid,
+        // to wait for the colours to land before recording.
+        if !session.wait_for_stable_svg(3, Duration::from_secs(10)) {
             eprintln!(
                 "[{}] screen never quiesced after {:?}; capturing anyway. screen was:\n{}",
                 scenario.name,
