@@ -24,12 +24,12 @@ mod views;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use anyhow::{anyhow, Result};
-use mlua::{Function, Lua, StdLib, Table, Variadic};
+use mlua::{Function, Lua, StdLib, Table, Value, Variadic};
 
 use crate::domain::Annotation;
 use crate::tui::{App, Focus};
@@ -51,6 +51,12 @@ type Events = Rc<RefCell<HashMap<EventKind, Vec<Function>>>>;
 /// The command-name → callback registry, registered via `mudpuppy.command` and
 /// driven by the `:command` palette.
 type Commands = Rc<RefCell<HashMap<String, Function>>>;
+
+/// The file-filter predicates, registered via `mudpuppy.filter_files`. Each runs
+/// over every file in the tree; a file is hidden when *any* predicate returns
+/// true. `Rc<RefCell<…>>` so the `'static` registration closure can push to it,
+/// and cleared on a config reload like the other registries.
+type FileFilters = Rc<RefCell<Vec<Function>>>;
 
 /// The configurable leader chord (default `space`), shared so `mudpuppy.leader`
 /// can update it and `map` can expand `<leader>` at registration time.
@@ -147,6 +153,8 @@ pub struct LuaEngine {
     events: Events,
     commands: Commands,
     leader: Leader,
+    /// Predicates that hide files from the tree (reset on reload).
+    file_filters: FileFilters,
     /// Callbacks for the currently-open prompt, indexed by option.
     prompts: Prompts,
     /// Whether automatic update checks are on (default true, reset on reload).
@@ -178,6 +186,7 @@ impl LuaEngine {
         let bindings: Bindings = Rc::new(RefCell::new(HashMap::new()));
         let events: Events = Rc::new(RefCell::new(HashMap::new()));
         let commands: Commands = Rc::new(RefCell::new(HashMap::new()));
+        let file_filters: FileFilters = Rc::new(RefCell::new(Vec::new()));
         // Default leader is `space`; a config can change it with `mudpuppy.leader`.
         let leader: Leader = Rc::new(RefCell::new(KeyChord::plain(Key::Char(' '))));
         let prompts: Prompts = Rc::new(RefCell::new(Vec::new()));
@@ -207,6 +216,7 @@ impl LuaEngine {
             events.clone(),
             commands.clone(),
             leader.clone(),
+            file_filters.clone(),
             update_checks.clone(),
             anchor_windows.clone(),
         )
@@ -234,6 +244,7 @@ impl LuaEngine {
             events,
             commands,
             leader,
+            file_filters,
             prompts,
             update_checks,
             anchor_windows,
@@ -285,6 +296,7 @@ impl LuaEngine {
         self.bindings.borrow_mut().clear();
         self.events.borrow_mut().clear();
         self.commands.borrow_mut().clear();
+        self.file_filters.borrow_mut().clear();
         // The leader is config-set too, so reset it before re-exec so a removed
         // `mudpuppy.leader` call reverts to the default.
         *self.leader.borrow_mut() = KeyChord::plain(Key::Char(' '));
@@ -306,6 +318,44 @@ impl LuaEngine {
             *self.anchor_windows.advanced.borrow(),
             *self.anchor_windows.fallback.borrow(),
         )
+    }
+
+    /// Run the registered `filter_files` predicates over `app`'s file tree and
+    /// hide every file at least one predicate rejects. Each predicate receives a
+    /// `{ path, status, additions, deletions, binary }` table (the same shape as
+    /// `mudpuppy.files()`) and returns true to hide that file. A no-op when no
+    /// filter is registered; a faulty predicate is surfaced in the status bar and
+    /// skipped, never propagated — a bad filter must not crash the viewer. The
+    /// actual removal (and never emptying the list) is [`App::hide_files`].
+    pub(crate) fn apply_file_filters(&self, app: &mut App) {
+        let filters = self.file_filters.borrow();
+        if filters.is_empty() {
+            return;
+        }
+
+        let mut hidden: HashSet<String> = HashSet::new();
+        for file in &app.files {
+            let table = match views::file_summary(&self.lua, file) {
+                Ok(t) => t,
+                Err(e) => {
+                    self.set_status(format!("file filter error: {e}"));
+                    continue;
+                }
+            };
+            for filter in filters.iter() {
+                match filter.call::<Value>(table.clone()) {
+                    // Lua truthiness: anything but nil/false hides the file.
+                    Ok(v) if !matches!(v, Value::Nil | Value::Boolean(false)) => {
+                        hidden.insert(file.display_path().to_string());
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(e) => self.set_status(format!("file filter error: {e}")),
+                }
+            }
+        }
+        drop(filters);
+        app.hide_files(&hidden);
     }
 
     /// The latest script/config message to show in the status bar, if any.
@@ -704,6 +754,8 @@ Registration (call at load time, i.e. at the top level of your config):
   mudpuppy.unmap(mode, keys)     remove a binding
   mudpuppy.on(event, fn)         run `fn` when `event` fires
   mudpuppy.command(name, fn)     register a `:name` command for the palette
+  mudpuppy.filter_files(fn)      hide files from the tree for which `fn` returns
+                                 true (see Filtering files)
   mudpuppy.leader(key)           set the leader chord (default "space"); call it
                                  before any map that uses <leader>
 
@@ -854,6 +906,22 @@ scriptable:
                                 version
   mudpuppy.skills.skip(n)    record that you skipped version n, so the prompt
                                 stays quiet until a newer one ships
+
+Filtering files
+---------------
+`mudpuppy.filter_files(fn)` hides files from the tree (and the diff). `fn` is
+called once per file with a `{ path, status, additions, deletions, binary }`
+table (the same shape `mudpuppy.files()` returns) and returns true to hide that
+file. Call it more than once to layer rules — a file is hidden when any
+predicate returns true. Hide generated lockfiles, say:
+  mudpuppy.filter_files(function(f)
+    return f.path:match("%.lock$") ~= nil or f.path == "package-lock.json"
+  end)
+Files you pull in by hand with the picker are never hidden, and the list is
+never emptied — if every file matches, nothing is hidden so there's always
+something to review. Filters are evaluated at launch and re-applied when the
+store reloads; adding a filter to your config takes effect on save, but removing
+one only restores the hidden files on the next restart.
 
 Anchors
 -------
@@ -1247,6 +1315,45 @@ index 333..444 100644
             .dispatch(&mut a, KeyChord::parse("q").unwrap())
             .unwrap();
         assert!(a.should_quit);
+    }
+
+    #[test]
+    fn filter_files_hides_matching_files() {
+        // A predicate that hides `b.rs` removes it from the tree, keeping `a.rs`.
+        let (_dir, path) =
+            config(r#"mudpuppy.filter_files(function(f) return f.path == "b.rs" end)"#);
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        assert_eq!(a.files.len(), 2);
+        engine.apply_file_filters(&mut a);
+        assert_eq!(a.files.len(), 1);
+        assert_eq!(a.current().display_path(), "a.rs");
+    }
+
+    #[test]
+    fn filter_files_layers_predicates_and_keeps_non_matches() {
+        // Two predicates compose: a file is hidden when either returns true. A
+        // predicate returning false (or nil) leaves the file visible.
+        let (_dir, path) = config(
+            "mudpuppy.filter_files(function(f) return f.path == \"a.rs\" end)\n\
+             mudpuppy.filter_files(function(f) return false end)\n",
+        );
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        engine.apply_file_filters(&mut a);
+        assert_eq!(a.files.len(), 1);
+        assert_eq!(a.current().display_path(), "b.rs");
+    }
+
+    #[test]
+    fn filter_files_never_empties_the_list() {
+        // A filter that matches every file is ignored — the viewer must always
+        // have something to show.
+        let (_dir, path) = config(r#"mudpuppy.filter_files(function(f) return true end)"#);
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        engine.apply_file_filters(&mut a);
+        assert_eq!(a.files.len(), 2, "hiding everything is a no-op");
     }
 
     #[test]

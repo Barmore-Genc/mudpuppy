@@ -717,6 +717,59 @@ impl App {
         }
     }
 
+    /// Drop every file whose display path is in `hidden` from the tree, keeping
+    /// the parallel view plans aligned and the selection on a still-visible file.
+    /// Driven by the Lua `filter_files` predicates (see
+    /// [`crate::lua::LuaEngine::apply_file_filters`]) and re-run after each reload,
+    /// since a reload re-derives the file list.
+    ///
+    /// Two safety rails: picker-added files are exempt (the user pulled them in
+    /// deliberately, the same exemption [`App::merge_synthetic_files`] makes), and
+    /// the list is never emptied — if every file would be hidden, nothing is
+    /// removed, so the viewer always has something to show. A no-op when `hidden`
+    /// is empty.
+    pub(crate) fn hide_files(&mut self, hidden: &HashSet<String>) {
+        if hidden.is_empty() {
+            return;
+        }
+        let keep: Vec<bool> = self
+            .files
+            .iter()
+            .map(|f| {
+                let path = f.display_path();
+                !hidden.contains(path) || self.picker_added.contains(path)
+            })
+            .collect();
+        // Nothing to drop, or everything would vanish: leave the list intact.
+        if keep.iter().all(|&k| k) || keep.iter().all(|&k| !k) {
+            return;
+        }
+
+        let selected_path = self.current().display_path().to_string();
+        // Rebuild files and plans together so the parallel indexing survives the
+        // removal (plans may be shorter than files after a synthetic append, so a
+        // missing entry defaults).
+        let old_plans = std::mem::take(&mut self.plans);
+        let mut new_files = Vec::new();
+        let mut new_plans = Vec::new();
+        for (i, file) in std::mem::take(&mut self.files).into_iter().enumerate() {
+            if keep[i] {
+                new_plans.push(old_plans.get(i).cloned().unwrap_or_default());
+                new_files.push(file);
+            }
+        }
+        self.files = new_files;
+        self.plans = new_plans;
+
+        // Keep the selection on the same file when it survived; otherwise clamp.
+        self.selected = self
+            .files
+            .iter()
+            .position(|f| f.display_path() == selected_path)
+            .unwrap_or_else(|| self.selected.min(self.files.len() - 1));
+        self.rebuild_view();
+    }
+
     /// Reload annotations and turn state from the store, picking up another
     /// process's writes (the agent's comments, or our own turn release). Silent on
     /// errors so a transient read race never disturbs browsing; a no-op without a

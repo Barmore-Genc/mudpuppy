@@ -209,8 +209,8 @@ pub fn turn_table(lua: &Lua, turn: &Turn) -> Result<Table> {
 }
 
 /// The `{path, status, additions, deletions, binary}` summary common to the file
-/// list and the open file.
-fn file_summary(lua: &Lua, file: &FileDiff) -> Result<Table> {
+/// list, the open file, and the `filter_files` predicate.
+pub fn file_summary(lua: &Lua, file: &FileDiff) -> Result<Table> {
     let t = lua.create_table()?;
     t.set("path", file.display_path())?;
     t.set("status", file_status_name(file.status.clone()))?;
