@@ -21,8 +21,9 @@ use super::app::App;
 /// which one is highlighted.
 pub(crate) struct Prompt {
     pub(crate) message: String,
-    /// Optional body shown between the question and the options (markdown text,
-    /// rendered verbatim and wrapped). Scrolled with up/down when it overflows.
+    /// Optional body shown between the question and the options (Markdown text,
+    /// styled and wrapped by `super::markdown`). Scrolled with up/down when it
+    /// overflows.
     pub(crate) details: Option<String>,
     /// Scroll offset (in wrapped display lines) into `details`. The renderer
     /// clamps the effective offset to the real content height each frame.

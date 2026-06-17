@@ -38,6 +38,7 @@ mod app;
 mod composer;
 pub mod debug;
 mod interleave;
+mod markdown;
 mod palette;
 mod prompt;
 mod render;
