@@ -320,21 +320,21 @@ impl LuaEngine {
         )
     }
 
-    /// Run the registered `filter_files` predicates over `app`'s file tree and
-    /// hide every file at least one predicate rejects. Each predicate receives a
-    /// `{ path, status, additions, deletions, binary }` table (the same shape as
-    /// `mudpuppy.files()`) and returns true to hide that file. A no-op when no
-    /// filter is registered; a faulty predicate is surfaced in the status bar and
-    /// skipped, never propagated — a bad filter must not crash the viewer. The
-    /// actual removal (and never emptying the list) is [`App::hide_files`].
+    /// Run the registered `filter_files` predicates over `app`'s canonical file
+    /// list and record every file at least one predicate rejects as hidden. Each
+    /// predicate receives a `{ path, status, additions, deletions, binary }` table
+    /// (the same shape as `mudpuppy.files()`) and returns true to hide that file.
+    /// A faulty predicate is surfaced in the status bar and skipped, never
+    /// propagated — a bad filter must not crash the viewer. With no filter
+    /// registered the hidden set is cleared (so removing a filter from the config
+    /// restores its files). The projection (and never emptying the list) is
+    /// [`App::set_hidden_files`].
     pub(crate) fn apply_file_filters(&self, app: &mut App) {
         let filters = self.file_filters.borrow();
-        if filters.is_empty() {
-            return;
-        }
-
+        // Run over the full list, not just the visible files, so a file already
+        // hidden stays evaluated rather than silently reappearing.
         let mut hidden: HashSet<String> = HashSet::new();
-        for file in &app.files {
+        for file in app.all_files() {
             let table = match views::file_summary(&self.lua, file) {
                 Ok(t) => t,
                 Err(e) => {
@@ -355,7 +355,7 @@ impl LuaEngine {
             }
         }
         drop(filters);
-        app.hide_files(&hidden);
+        app.set_hidden_files(hidden);
     }
 
     /// The latest script/config message to show in the status bar, if any.
@@ -765,6 +765,7 @@ Actions (call these from inside a binding or hook):
   mudpuppy.set_focus("tree" | "diff")
   mudpuppy.toggle_help()
   mudpuppy.toggle_annotations()  flip the sidebar to the all-annotations tab
+  mudpuppy.toggle_file_filters() show all files / re-apply the file filters
   mudpuppy.release_turn()        hand the turn back to the agent
   mudpuppy.open_picker()         the fuzzy "add any file" picker
   mudpuppy.open_palette()        the `:command` palette
@@ -920,8 +921,13 @@ predicate returns true. Hide generated lockfiles, say:
 Files you pull in by hand with the picker are never hidden, and the list is
 never emptied — if every file matches, nothing is hidden so there's always
 something to review. Filters are evaluated at launch and re-applied when the
-store reloads; adding a filter to your config takes effect on save, but removing
-one only restores the hidden files on the next restart.
+store reloads or the config is saved; the full file list is retained, so
+removing a filter (or editing it) restores the affected files live.
+
+Hidden files aren't dropped, just folded away: the built-in `:unhide-files`
+command (and `mudpuppy.toggle_file_filters()`) toggles every filter off to reveal
+them, then on again to re-hide. Rebind it if you like:
+  mudpuppy.map("global", "<leader> u", function() mudpuppy.toggle_file_filters() end)
 
 Anchors
 -------
@@ -1343,6 +1349,41 @@ index 333..444 100644
         engine.apply_file_filters(&mut a);
         assert_eq!(a.files.len(), 1);
         assert_eq!(a.current().display_path(), "b.rs");
+    }
+
+    #[test]
+    fn unhide_restores_filtered_files_then_re_hides() {
+        // The filtered file is retained, so `toggle_file_filters` (the
+        // `unhide-files` command) reveals it again and toggling back re-hides it.
+        let (_dir, path) =
+            config(r#"mudpuppy.filter_files(function(f) return f.path == "b.rs" end)"#);
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        engine.apply_file_filters(&mut a);
+        assert_eq!(a.files.len(), 1);
+        a.toggle_file_filters();
+        assert_eq!(a.files.len(), 2, "unhide shows the filtered file again");
+        assert!(a.files.iter().any(|f| f.display_path() == "b.rs"));
+        a.toggle_file_filters();
+        assert_eq!(a.files.len(), 1, "toggling back re-hides it");
+    }
+
+    #[test]
+    fn removing_the_filter_restores_files() {
+        // A config with no filter clears the hidden set, restoring the file — the
+        // hot-reload path (clear registries, re-exec, re-apply).
+        let (_dir, path) =
+            config(r#"mudpuppy.filter_files(function(f) return f.path == "b.rs" end)"#);
+        let engine = LuaEngine::new(Some(path.clone())).unwrap();
+        let mut a = app();
+        engine.apply_file_filters(&mut a);
+        assert_eq!(a.files.len(), 1);
+
+        std::fs::write(&path, "").unwrap();
+        engine.reload_config().unwrap();
+        engine.apply_file_filters(&mut a);
+        assert_eq!(a.files.len(), 2, "a removed filter restores the file");
+        assert!(a.files.iter().any(|f| f.display_path() == "b.rs"));
     }
 
     #[test]

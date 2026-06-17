@@ -372,6 +372,13 @@ pub fn install_scoped<'scope>(
         })?,
     )?;
     table.set(
+        "toggle_file_filters",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().toggle_file_filters();
+            Ok(())
+        })?,
+    )?;
+    table.set(
         "sidebar_move",
         scope.create_function(move |_, delta: i64| {
             cell.borrow_mut().sidebar_move(delta);
