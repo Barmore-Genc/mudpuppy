@@ -13,8 +13,11 @@
 
 mod common;
 
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
 use std::time::Duration;
 
 use common::{repo_with_changes, Session};
@@ -36,15 +39,40 @@ struct Scenario {
     /// Agent comments to seed via a shared store; when non-empty the scenario
     /// gets its own `MUDPUPPY_DATA_DIR` so the TUI opens onto them.
     seed: &'static [Seed],
+    /// When set, serve a mock release manifest carrying this Markdown changelog
+    /// over a loopback HTTP server and point the binary's manifest URL at it, so
+    /// `:check-updates` opens the self-update prompt deterministically (no real
+    /// network). Mutually exclusive with `seed` in practice.
+    update_changelog: Option<&'static str>,
     keys: &'static [u8],
     settle_marker: &'static str,
 }
+
+/// The changelog rendered in the self-update prompt scenario. Exercises every
+/// Markdown feature the prompt styles (see `src/tui/markdown.rs`): both heading
+/// levels, bullet list, `**bold**`/`*italic*`/`` `code` `` inline spans, a
+/// blockquote, and a `[text](url)` link.
+const UPDATE_CHANGELOG: &str = "\
+# mudpuppy v9.9.9
+
+## Highlights
+
+- **Markdown changelogs**: this prompt now styles release notes — \
+headings, lists, and inline `code` all render.
+- Fixed a crash when opening an *empty* diff.
+
+## Notes
+
+> Run `mudpuppy update` to upgrade, or pick Install below.
+
+See the [full release notes](https://example.com/releases/v9.9.9).";
 
 const SCENARIOS: &[Scenario] = &[
     // Cold launch: the first paint of a local diff.
     Scenario {
         name: "cold_launch",
         seed: &[],
+        update_changelog: None,
         keys: b"",
         settle_marker: "file 1/2",
     },
@@ -52,6 +80,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "scrolled_bottom",
         seed: &[],
+        update_changelog: None,
         keys: b"lG",
         settle_marker: "BOT",
     },
@@ -59,6 +88,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "help_overlay",
         seed: &[],
+        update_changelog: None,
         keys: b"?",
         settle_marker: "mudpuppy — default keymap",
     },
@@ -69,6 +99,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "annotation_composer",
         seed: &[],
+        update_changelog: None,
         keys: b"lj cclooks reasonable",
         settle_marker: "-- INSERT --",
     },
@@ -77,6 +108,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "command_palette",
         seed: &[],
+        update_changelog: None,
         keys: b":comment",
         settle_marker: "comment-file",
     },
@@ -84,6 +116,7 @@ const SCENARIOS: &[Scenario] = &[
     Scenario {
         name: "file_picker",
         seed: &[],
+        update_changelog: None,
         keys: b" fnot",
         settle_marker: "Add file",
     },
@@ -101,10 +134,53 @@ const SCENARIOS: &[Scenario] = &[
                 body: "extract this into a helper",
             },
         ],
+        update_changelog: None,
         keys: b" a",
         settle_marker: "Annotations",
     },
+    // The self-update prompt overlay showing a Markdown changelog: a mock
+    // manifest server announces a far-future version, `:check-updates` fetches it
+    // and opens the prompt, whose details body styles the changelog.
+    Scenario {
+        name: "update_prompt_changelog",
+        seed: &[],
+        update_changelog: Some(UPDATE_CHANGELOG),
+        keys: b":check-updates\r",
+        settle_marker: "Update now?",
+    },
 ];
+
+/// Serve a canned `dist-manifest.json` — announcing `v9.9.9` (far newer than the
+/// running build, so the update check reports it) with `changelog` as the release
+/// notes — over a loopback HTTP server. Returns the URL for
+/// `MUDPUPPY_UPDATE_MANIFEST_URL`. The listener runs on a detached thread for the
+/// rest of the (short-lived) test process; `:check-updates` makes one request.
+fn start_mock_manifest_server(changelog: &str) -> String {
+    let manifest = serde_json::json!({
+        "announcement_tag": "v9.9.9",
+        "announcement_changelog": changelog,
+    })
+    .to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock manifest server");
+    let addr = listener.local_addr().expect("mock server addr");
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            // Drain the request so the client's write half completes before we
+            // reply; the body is irrelevant (we always serve the same manifest).
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                manifest.len(),
+                manifest,
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    });
+    format!("http://{addr}/dist-manifest.json")
+}
 
 /// Seed one agent comment into the store under `data` by shelling out to the
 /// real `agent comment add` surface — the same path the AI agent uses.
@@ -144,7 +220,10 @@ fn emit_scenario_svgs() {
         // Scenarios with seeds share a store with a headless `agent` that writes
         // the comments first; the temp dir must outlive the session.
         let data = (!scenario.seed.is_empty()).then(|| tempfile::tempdir().unwrap());
-        let mut session = if let Some(data) = &data {
+        let mut session = if let Some(changelog) = scenario.update_changelog {
+            let url = start_mock_manifest_server(changelog);
+            Session::launch_with_str_env(repo.path(), &[("MUDPUPPY_UPDATE_MANIFEST_URL", &url)])
+        } else if let Some(data) = &data {
             for seed in scenario.seed {
                 seed_comment(repo.path(), data.path(), seed);
             }

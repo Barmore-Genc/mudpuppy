@@ -200,24 +200,20 @@ fn render_detailed_prompt(frame: &mut Frame, area: Rect, prompt: &super::prompt:
         chunks[0],
     );
 
-    // Pre-wrap the body to the body width so the scroll offset is in real display
-    // lines; clamp the offset to the content so over-scrolling shows no blank gap.
+    // Markdown-style and pre-wrap the body to the body width so the scroll offset
+    // is in real display lines; clamp the offset to the content so over-scrolling
+    // shows no blank gap. The changelog comes in as GitHub release-note Markdown,
+    // so headings, lists, and inline spans get styled (see `super::markdown`).
     let body = chunks[1];
     let details = prompt.details.as_deref().unwrap_or_default();
-    let wrapped = super::interleave::wrap_text(details, body.width.max(1) as usize);
+    let wrapped = super::markdown::render(details, body.width.max(1) as usize);
     let view_h = body.height as usize;
     let max_scroll = wrapped.len().saturating_sub(view_h) as u16;
     let offset = prompt.scroll.min(max_scroll);
     let lines: Vec<Line> = wrapped
-        .iter()
+        .into_iter()
         .skip(offset as usize)
         .take(view_h)
-        .map(|l| {
-            Line::from(Span::styled(
-                l.clone(),
-                Style::default().fg(palette::FG_DIM),
-            ))
-        })
         .collect();
     frame.render_widget(Paragraph::new(lines), body);
 

@@ -7,6 +7,7 @@
 // different subset, so some items look unused per-crate.
 #![allow(dead_code)]
 
+use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -48,10 +49,25 @@ impl Session {
         Session::launch_args(repo, &[], extra_env)
     }
 
+    /// Launch with string-valued environment variables, for vars that aren't
+    /// filesystem paths — e.g. `MUDPUPPY_UPDATE_MANIFEST_URL` (a URL) so a
+    /// scenario can point the updater at a mock manifest server.
+    pub fn launch_with_str_env(repo: &Path, extra_env: &[(&str, &str)]) -> Session {
+        let env: Vec<(&str, &OsStr)> = extra_env.iter().map(|(k, v)| (*k, OsStr::new(v))).collect();
+        Session::launch_args_os(repo, &[], &env)
+    }
+
     /// Launch with explicit CLI `args` (e.g. `["install", "claude"]`) under a
     /// real PTY, so commands that gate on `stdin().is_terminal()` — like the
     /// interactive `install` prompts — take their terminal path.
     pub fn launch_args(repo: &Path, args: &[&str], extra_env: &[(&str, &Path)]) -> Session {
+        let env: Vec<(&str, &OsStr)> = extra_env.iter().map(|(k, v)| (*k, v.as_os_str())).collect();
+        Session::launch_args_os(repo, args, &env)
+    }
+
+    /// The launch core, generic over the environment value type so both `&Path`
+    /// and `&str` env tables funnel through one place.
+    fn launch_args_os(repo: &Path, args: &[&str], extra_env: &[(&str, &OsStr)]) -> Session {
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
