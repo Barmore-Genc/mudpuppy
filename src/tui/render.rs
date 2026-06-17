@@ -14,7 +14,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use super::app::{App, CommentLine, Focus, Hits, Row, Sidebar};
+use super::app::{App, CommentLine, CommentMeta, Focus, Hits, Row, Sidebar};
 use super::composer::{Composer, ComposerTarget, Mode};
 use super::interleave::wrap_text;
 use super::palette;
@@ -1199,19 +1199,7 @@ fn comment_line(c: &CommentLine, pad: &str) -> Line<'static> {
             } else {
                 Style::default().fg(Color::Gray)
             };
-            let tag = meta
-                .tag
-                .map(|t| format!("{} ", tag_symbol(t)))
-                .unwrap_or_default();
-            spans.push(Span::styled(
-                format!(
-                    "{} {}[{}] ",
-                    author_word(meta.author),
-                    tag,
-                    ann_status(meta.status)
-                ),
-                label_style,
-            ));
+            spans.push(Span::styled(comment_label(meta), label_style));
         }
         None => {
             // Continuation lines align the body under the header text.
@@ -1433,6 +1421,23 @@ fn severity_word(severity: Severity) -> &'static str {
 }
 
 /// Single-word author label for the annotations panel.
+/// The inline comment header label after the severity mark — `agent [open] ` or
+/// `user ? [wontfix] `. Shared by the renderer (which displays it) and the
+/// inline-wrap budget in `interleave` (which measures it to size the header
+/// line), so the two never disagree on how much room the body has.
+pub(super) fn comment_label(meta: &CommentMeta) -> String {
+    let tag = meta
+        .tag
+        .map(|t| format!("{} ", tag_symbol(t)))
+        .unwrap_or_default();
+    format!(
+        "{} {}[{}] ",
+        author_word(meta.author),
+        tag,
+        ann_status(meta.status)
+    )
+}
+
 fn author_word(author: Author) -> &'static str {
     match author {
         Author::Agent => "agent",

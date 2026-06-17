@@ -185,11 +185,22 @@ fn emit_comment(rows: &mut Vec<Row>, a: &Annotation, depth: usize, inner_width: 
         tag: a.tag,
         status: a.status,
     };
-    // The indent and the "▏ " thread bar eat into the body width; budget the
-    // rest so wrapped lines don't overrun the pane.
+    // Budget the body width against the *full* rendered prefix so wrapped lines
+    // never spill past the pane edge and get clipped. Every inline comment row
+    // carries the gutter pad (1) + the depth indent + the "▏ " thread bar (2);
+    // see `comment_line` in `render`. The header line additionally shares its
+    // row with the "● " mark (2) and the author/status label, while continuation
+    // lines just align two spaces under the bar.
     let indent = depth * 2;
-    let body_width = (inner_width as usize).saturating_sub(indent + 2).max(8);
-    for (i, line) in wrap_text(&a.body, body_width).into_iter().enumerate() {
+    let base = 1 + indent + 2;
+    let cont_width = (inner_width as usize).saturating_sub(base + 2).max(4);
+    let head_width = (inner_width as usize)
+        .saturating_sub(base + 2 + super::render::comment_label(&meta()).chars().count())
+        .max(4);
+    for (i, line) in wrap_text_widths(&a.body, head_width, cont_width)
+        .into_iter()
+        .enumerate()
+    {
         let header = i == 0;
         rows.push(Row::Comment(CommentLine {
             id: a.id.clone(),
@@ -208,21 +219,41 @@ fn emit_comment(rows: &mut Vec<Row>, a: &Annotation, depth: usize, inner_width: 
 /// with the prompt overlay's scrollable details body and the all-annotations
 /// sidebar list, which pre-wraps to keep its scroll math in rendered-row units.
 pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(1);
+    wrap_text_widths(text, width, width)
+}
+
+/// Like [`wrap_text`] but the first emitted visual line wraps to `first_width`
+/// and every later line to `rest_width`. Inline comments use this because the
+/// header line shares its row with the author/status label and so has less room
+/// than the indented continuation lines beneath it.
+fn wrap_text_widths(text: &str, first_width: usize, rest_width: usize) -> Vec<String> {
+    let first_width = first_width.max(1);
+    let rest_width = rest_width.max(1);
+    // The first output line is the header; once any line is emitted the rest use
+    // the (wider) continuation budget.
+    let width_for = |out: &[String]| {
+        if out.is_empty() {
+            first_width
+        } else {
+            rest_width
+        }
+    };
     let mut out: Vec<String> = Vec::new();
     for raw in text.split('\n') {
         let mut line = String::new();
         let mut line_len = 0usize;
         for word in raw.split_whitespace() {
+            let width = width_for(&out);
             let wlen = word.chars().count();
             if wlen > width {
-                // Flush the current line, then hard-split the long word.
+                // Flush the current line, then hard-split the long word, picking
+                // up the (possibly wider) continuation width once it spills over.
                 if line_len > 0 {
                     out.push(std::mem::take(&mut line));
                 }
                 let mut chunk = String::new();
                 for ch in word.chars() {
-                    if chunk.chars().count() == width {
+                    if chunk.chars().count() == width_for(&out) {
                         out.push(std::mem::take(&mut chunk));
                     }
                     chunk.push(ch);
