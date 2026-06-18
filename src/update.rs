@@ -1,9 +1,11 @@
 //! Self-update support: ask whether a newer release exists, and install it.
 //!
-//! The version check reads the release `dist-manifest.json` that the project
-//! publishes to GitHub Pages (`pages.yml`), over a single plain HTTPS GET — so it
-//! needs no `gh` (the GitHub CLI is *not* a hard dependency of mudpuppy). The
-//! fetch is a blocking [`ureq`] call; callers in the TUI run it on a
+//! The version check reads the release `dist-manifest.json` straight from the
+//! GitHub Release that ships it, via the stable
+//! `releases/latest/download/dist-manifest.json` URL (which always redirects to
+//! the latest release's asset), over a single plain HTTPS GET — so it needs no
+//! `gh` (the GitHub CLI is *not* a hard dependency of mudpuppy). The fetch is a
+//! blocking [`ureq`] call; callers in the TUI run it on a
 //! `tokio::task::spawn_blocking` thread so the event loop never stalls.
 //! [`check`] is split from a private `check_with` helper precisely so tests can
 //! drive the parse + comparison with a mocked fetcher instead of touching the
@@ -32,7 +34,7 @@ use serde::Deserialize;
 
 /// Environment variable overriding the manifest URL (used by tests and anyone
 /// hosting the manifest elsewhere). When unset the URL is derived from the crate's
-/// repository as the GitHub Pages `dist-manifest.json`.
+/// repository as the latest release's `dist-manifest.json`.
 pub const MANIFEST_URL_ENV: &str = "MUDPUPPY_UPDATE_MANIFEST_URL";
 
 /// How long the launch-time manifest GET may take before giving up. Bounded so a
@@ -68,18 +70,17 @@ pub fn repo_slug() -> Option<String> {
 }
 
 /// The URL of the published release manifest: `$MUDPUPPY_UPDATE_MANIFEST_URL` if
-/// set, else the GitHub Pages `dist-manifest.json` for this repo
-/// (`https://<owner>.github.io/<repo>/dist-manifest.json`). `None` only when no
+/// set, else the latest GitHub Release's `dist-manifest.json` for this repo
+/// (`https://github.com/<owner>/<repo>/releases/latest/download/dist-manifest.json`,
+/// which GitHub redirects to the newest release's asset). `None` only when no
 /// repository slug can be derived and no override is set.
 pub fn manifest_url() -> Option<String> {
     if let Some(url) = std::env::var_os(MANIFEST_URL_ENV).filter(|v| !v.is_empty()) {
         return Some(url.to_string_lossy().into_owned());
     }
     let slug = repo_slug()?;
-    let (owner, repo) = slug.split_once('/')?;
     Some(format!(
-        "https://{}.github.io/{repo}/dist-manifest.json",
-        owner.to_lowercase()
+        "https://github.com/{slug}/releases/latest/download/dist-manifest.json"
     ))
 }
 
@@ -307,15 +308,16 @@ struct ResolvedArtifact {
 }
 
 /// Locate, in `json`, the prebuilt archive for `triple` belonging to release
-/// `version`. Errors if the manifest has moved past `version` (we only host the
-/// latest manifest on Pages), names no release, or has no build for this platform.
+/// `version`. Errors if the manifest has moved past `version` (the
+/// `releases/latest` URL only ever resolves the latest release), names no
+/// release, or has no build for this platform.
 fn resolve_artifact(json: &str, version: &str, triple: &str) -> Result<ResolvedArtifact> {
     let manifest: DistManifest =
         serde_json::from_str(json).context("parsing dist-manifest.json")?;
 
-    // The Pages site only ever carries the latest release's manifest, so install
-    // can only deliver that version. If a newer release landed between the check
-    // and now, say so rather than silently installing something else.
+    // The `releases/latest` URL only ever resolves the latest release's manifest,
+    // so install can only deliver that version. If a newer release landed between
+    // the check and now, say so rather than silently installing something else.
     if let Some(tag) = manifest
         .announcement_tag
         .as_deref()
@@ -726,13 +728,13 @@ mod tests {
     }
 
     #[test]
-    fn manifest_url_defaults_to_github_pages() {
-        // No override → the lowercased-owner github.io URL for this repo.
+    fn manifest_url_defaults_to_the_latest_release_asset() {
+        // No override → the stable releases/latest asset URL for this repo.
         std::env::remove_var(MANIFEST_URL_ENV);
         let url = manifest_url().expect("a manifest url");
-        assert!(url.starts_with("https://"), "{url}");
+        assert!(url.starts_with("https://github.com/"), "{url}");
         assert!(
-            url.ends_with(".github.io/mudpuppy/dist-manifest.json"),
+            url.ends_with("/releases/latest/download/dist-manifest.json"),
             "{url}"
         );
     }

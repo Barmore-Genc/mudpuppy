@@ -46,7 +46,7 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 - `highlight.rs`: syntect syntax highlighting for the diff pane.
 - `store.rs`: load / merge-by-id / atomic+locked save of the annotation store.
 - `session.rs`: repo + target resolution and store-path derivation (resume).
-- `update.rs`: self-update — release check by HTTPS GET of the GitHub Pages `dist-manifest.json` (no `gh` needed), semver comparison, and install by downloading the prebuilt release archive for this build's target (`build.rs` captures the triple), verifying its SHA-256, and swapping the running binary in place (`self_replace`) — no Rust toolchain needed; surfaced to Lua as `mudpuppy.updates` and driven by `core.luau`'s update prompt.
+- `update.rs`: self-update — release check by HTTPS GET of the latest GitHub Release's `dist-manifest.json` (stable `releases/latest/download` URL, no `gh` needed), semver comparison, and install by downloading the prebuilt release archive for this build's target (`build.rs` captures the triple), verifying its SHA-256, and swapping the running binary in place (`self_replace`) — no Rust toolchain needed; surfaced to Lua as `mudpuppy.updates` and driven by `core.luau`'s update prompt.
 - `tui/`: the ratatui app — file tree, diff pane, gutter marks, panels, turn release; key presses route through the Lua engine.
 - `picker.rs`: fuzzy-find file picker state + subsequence matcher for the "add any file" overlay.
 - `command.rs`: the `:command` palette state — fuzzy filtering over registered command names (reuses the picker's matcher).
