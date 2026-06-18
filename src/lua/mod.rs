@@ -792,6 +792,7 @@ Actions (call these from inside a binding or hook):
   mudpuppy.edit_comment()        edit your annotation on the cursor line
   mudpuppy.delete_comment()      delete your annotation (confirm with y)
   mudpuppy.cycle_status()        open → resolved → wontfix for the cursor line
+  mudpuppy.reset_annotations()   delete every annotation (clean-slate reset)
   mudpuppy.prompt(msg, options[, details])  open a modal question (see Prompts)
 
 The count-aware verbs multiply/repeat by the pending count (see Counts below);

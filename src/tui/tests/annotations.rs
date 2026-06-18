@@ -73,7 +73,7 @@ fn annotations_tab_lists_every_file() {
     );
     assert_eq!(a.sidebar, Sidebar::Annotations);
     let text = screen(&term);
-    assert!(text.contains("Annotations (3)"));
+    assert!(text.contains("Annotations 3"));
     // Grouped under bold file headers, both files' annotations are present.
     assert!(text.contains("src/alpha.rs"));
     assert!(text.contains("README.md"));

@@ -1,8 +1,9 @@
 ---
 source: src/tui/tests/rendering.rs
+assertion_line: 43
 expression: screen(&term)
 ---
-"┌ Files (7) │ Annotations ─┐┌ src/long.rs [modified] 2/7 ──────────────────────────────────────────┐"
+"┌ Files 7 │ Annotations 0 ─┐┌ src/long.rs [modified] 2/7 ──────────────────────────────────────────┐"
 "│M src/alpha.rs  +3 -2     ││@@ -1,19 +1,20 @@ impl Long {                                         │"
 "│M src/long.rs  +4 -2      ││    1     1   line 01                                                 │"
 "│M README.md  +1 -1        ││    2     2   line 02                                                 │"

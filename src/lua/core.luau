@@ -36,6 +36,22 @@ local function hstep()
   return math.max(1, math.floor(m.state().viewport.width / 3))
 end
 
+-- Wipe every annotation after a confirmation. This is a clean-slate action (e.g.
+-- before starting a fresh review), so it drops the agent's annotations too, not
+-- just the user's — hence the guard prompt. A no-op (with a hint) when empty.
+local function reset_annotations()
+  local n = #m.annotations()
+  if n == 0 then
+    print("No annotations to reset.")
+    return
+  end
+  local noun = n == 1 and "annotation" or "annotations"
+  m.prompt("Reset all " .. n .. " " .. noun .. "? This cannot be undone.", {
+    { "Reset", function() m.reset_annotations() end },
+    { "Cancel", function() end },
+  })
+end
+
 -- ---- Commands: the `:`-palette verbs (also reusable from bindings) ----------
 
 m.command("quit", function() m.quit() end)
@@ -53,6 +69,7 @@ m.command("reply", function() m.reply() end)
 m.command("edit-comment", function() m.edit_comment() end)
 m.command("delete-comment", function() m.delete_comment() end)
 m.command("cycle-status", function() m.cycle_status() end)
+m.command("reset-annotations", function() reset_annotations() end)
 m.command("expand-down", function() m.expand_down() end)
 m.command("expand-up", function() m.expand_up() end)
 m.command("expand-all", function() m.expand_all() end)
@@ -82,6 +99,9 @@ m.map("global", "pageup", function() m.scroll(-page()) end)
 m.map("global", "<leader> t r", function() m.release_turn() end)
 m.map("global", "<leader> a", function() m.toggle_annotations() end)
 m.map("global", "<leader> f", function() m.open_picker() end)
+
+-- Clear every annotation (confirmation-gated), to start a review from scratch.
+m.map("global", "<leader> R", function() reset_annotations() end)
 
 -- Panel focus under `<leader> p` (`h`/`l` map to the left/right pane, vim-window
 -- style). The diff pane now uses bare `h`/`l` for horizontal scrolling, so pane

@@ -257,6 +257,62 @@ fn s_cycles_the_status_of_the_cursor_annotation() {
 }
 
 #[test]
+fn reset_annotations_clears_the_whole_store() {
+    // Reset is a clean-slate action: it drops the agent's annotations too, not
+    // just the user's, and reports the count it removed.
+    let (mut a, _dir) = stored_app_with(vec![
+        note(
+            "agent001",
+            Author::Agent,
+            "src/alpha.rs",
+            Side::Right,
+            1,
+            Severity::Blocker,
+        ),
+        note(
+            "user0002",
+            Author::User,
+            "src/alpha.rs",
+            Side::Right,
+            2,
+            Severity::Info,
+        ),
+    ]);
+    a.reset_annotations();
+    assert!(a.annotations.is_empty(), "every annotation is gone");
+    assert_eq!(a.notice.as_deref(), Some("reset 2 annotations"));
+}
+
+#[test]
+fn reset_with_an_empty_store_is_a_no_op_with_a_hint() {
+    let (mut a, _dir) = stored_app();
+    a.reset_annotations();
+    assert_eq!(a.notice.as_deref(), Some("no annotations to reset"));
+}
+
+#[test]
+fn leader_r_confirms_before_clearing() {
+    // The `<leader> R` binding opens a guard prompt rather than clearing
+    // outright; the annotations survive until the user confirms.
+    let (mut a, _dir) = stored_app_with(vec![note(
+        "user0001",
+        Author::User,
+        "src/alpha.rs",
+        Side::Right,
+        1,
+        Severity::Info,
+    )]);
+    leader(&mut a, "R");
+    let prompt = a.prompt.as_ref().expect("the reset prompt is open");
+    assert!(prompt.message.contains('1'), "the count is in the question");
+    assert_eq!(
+        a.annotations.len(),
+        1,
+        "nothing cleared before confirmation"
+    );
+}
+
+#[test]
 fn comment_on_a_non_line_row_is_a_no_op_with_a_hint() {
     let (mut a, _dir) = stored_app();
     a.cursor = 0; // the hunk header row

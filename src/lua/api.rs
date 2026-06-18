@@ -629,6 +629,13 @@ pub fn install_scoped<'scope>(
             Ok(())
         })?,
     )?;
+    table.set(
+        "reset_annotations",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().reset_annotations();
+            Ok(())
+        })?,
+    )?;
 
     // --- read-only views ----------------------------------------------------
 
