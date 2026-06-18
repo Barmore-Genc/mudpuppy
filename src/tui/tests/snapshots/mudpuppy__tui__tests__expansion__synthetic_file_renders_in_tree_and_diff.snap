@@ -3,7 +3,7 @@ source: src/tui/tests/expansion.rs
 assertion_line: 272
 expression: text
 ---
-"┌ Files (8) │ Annotat┐┌ docs/notes.md [unchanged] 8/8  ●1 ─────────────────────┐"
+"┌ Files 8 │ Annotatio┐┌ docs/notes.md [unchanged] 8/8  ●1 ─────────────────────┐"
 "│M src/alpha.rs  +3 -││     1     1   # Notes                                  │"
 "│M src/long.rs  +4 -2││●    2     2   first line                               │"
 "│M README.md  +1 -1  ││ ▏ ● user [open] body for a1                            │"

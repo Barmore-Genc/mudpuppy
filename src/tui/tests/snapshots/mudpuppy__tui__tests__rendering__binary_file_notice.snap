@@ -1,8 +1,9 @@
 ---
 source: src/tui/tests/rendering.rs
+assertion_line: 206
 expression: screen(&term)
 ---
-"┌ Files (7) │ Annotations ─┐┌ assets/logo.png [added] 6/7 ─────────────────────────────────────────┐"
+"┌ Files 7 │ Annotations 0 ─┐┌ assets/logo.png [added] 6/7 ─────────────────────────────────────────┐"
 "│M src/alpha.rs  +3 -2     ││Binary file — no textual diff to show                                 │"
 "│M src/long.rs  +4 -2      ││                                                                      │"
 "│M README.md  +1 -1        ││                                                                      │"

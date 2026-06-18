@@ -1,8 +1,9 @@
 ---
 source: src/tui/tests/rendering.rs
+assertion_line: 216
 expression: screen(&term)
 ---
-"┌ Files (7) │ Annotations ─┐┌ src/relocated.rs [renamed] 7/7 ──────────────────────────────────────┐"
+"┌ Files 7 │ Annotations 0 ─┐┌ src/relocated.rs [renamed] 7/7 ──────────────────────────────────────┐"
 "│M src/alpha.rs  +3 -2     ││No line changes (metadata-only change)                                │"
 "│M src/long.rs  +4 -2      ││                                                                      │"
 "│M README.md  +1 -1        ││                                                                      │"

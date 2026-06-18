@@ -1028,6 +1028,7 @@ fn render_help(frame: &mut Frame, area: Rect, app: &mut App) -> Rect {
         Line::raw("  v / V  Esc    whole-line selection (diff) · clear"),
         Line::raw("  Space c c/f/r comment line/selection · file · reply"),
         Line::raw("  Space c e/d/s edit · delete (confirm y) · cycle status"),
+        Line::raw("  Space R       reset (clear) all annotations (confirm)"),
         Line::raw(""),
         section("More"),
         Line::raw("  Space t r     release the turn; first release approves"),
@@ -1290,12 +1291,11 @@ fn diff_line(
     }
 }
 
-/// Build the sidebar's bordered block with a two-tab title strip — `Files (N)`
-/// and `Annotations (M)` separated by `│`, the active tab styled as a chip and
-/// the inactive one dimmed. Records each chip's hit span on `app.hits` so a
-/// mouse click on either tab switches to it directly (issue #29). Only the
-/// active tab carries its count, keeping the strip narrow enough to fit inside
-/// the 28-column sidebar of the Files mode.
+/// Build the sidebar's bordered block with a two-tab title strip — `Files N`
+/// and `Annotations M` separated by `│`, the active tab styled as a chip and
+/// the inactive one dimmed. Both tabs carry their count so the file and
+/// annotation totals read at a glance. Records each chip's hit span on
+/// `app.hits` so a mouse click on either tab switches to it directly (issue #29).
 fn sidebar_tabs_block(area: Rect, app: &mut App, focused: bool) -> Block<'static> {
     let border_style = if focused {
         Style::default().fg(Color::Cyan)
@@ -1310,14 +1310,11 @@ fn sidebar_tabs_block(area: Rect, app: &mut App, focused: bool) -> Block<'static
     let inactive = Style::default().fg(palette::FG_DIM);
     let sep = Style::default().fg(palette::FG_DIM);
 
-    let files_text = match app.sidebar {
-        Sidebar::Files => format!(" Files ({}) ", app.files.len()),
-        Sidebar::Annotations => " Files ".to_string(),
-    };
-    let annot_text = match app.sidebar {
-        Sidebar::Files => " Annotations ".to_string(),
-        Sidebar::Annotations => format!(" Annotations ({}) ", app.annotations.len()),
-    };
+    // Both tabs carry their count so the file and annotation totals are visible
+    // at a glance regardless of which tab is active. The count is a bare badge
+    // (no parens) so the whole strip still fits the narrow Files-mode sidebar.
+    let files_text = format!(" Files {} ", app.files.len());
+    let annot_text = format!(" Annotations {} ", app.annotations.len());
 
     let (files_style, annot_style) = match app.sidebar {
         Sidebar::Files => (active, inactive),

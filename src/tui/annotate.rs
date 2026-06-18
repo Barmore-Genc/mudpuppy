@@ -321,6 +321,20 @@ impl App {
         });
     }
 
+    /// Clear every annotation in the store — the clean-slate "reset" before
+    /// starting a fresh review. Drops the agent's annotations too (not just the
+    /// user's), so the keymap gates it behind a confirmation prompt. Reports how
+    /// many were removed in the status notice.
+    pub(crate) fn reset_annotations(&mut self) {
+        if let Some(n) = self.mutate_store(|s| Ok(s.clear())) {
+            self.notice = Some(match n {
+                0 => "no annotations to reset".to_string(),
+                1 => "reset 1 annotation".to_string(),
+                n => format!("reset {n} annotations"),
+            });
+        }
+    }
+
     // --- cursor-targeted verbs the keymap drives ---------------------------
 
     /// Arm a delete confirmation for the annotation on the cursor line (resolved

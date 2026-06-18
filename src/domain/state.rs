@@ -118,6 +118,16 @@ impl StateFile {
         Some(self.annotations.remove(idx))
     }
 
+    /// Drop every annotation, returning how many were removed. Unlike
+    /// [`StateFile::remove`], this deliberately discards the whole list — the
+    /// clean-slate "reset" action — so it is the one place that does not honour
+    /// the merge-by-id contract; callers gate it behind a confirmation.
+    pub fn clear(&mut self) -> usize {
+        let n = self.annotations.len();
+        self.annotations.clear();
+        n
+    }
+
     /// Whether any annotation threads as a reply under `id`.
     pub fn has_replies(&self, id: &str) -> bool {
         self.annotations
@@ -232,6 +242,19 @@ mod tests {
         assert_eq!(s.remove("child").unwrap().id, "child");
         assert!(!s.has_replies("parent"));
         assert!(s.remove("missing").is_none());
+    }
+
+    #[test]
+    fn clear_drops_everything_and_returns_the_count() {
+        let mut s = StateFile::new(Target::Local {
+            base: "main".to_string(),
+            head_sha: "abc".to_string(),
+        });
+        s.upsert(ann("a", None));
+        s.upsert(ann("b", None));
+        assert_eq!(s.clear(), 2, "reports how many it removed");
+        assert!(s.annotations.is_empty());
+        assert_eq!(s.clear(), 0, "clearing an empty store removes nothing");
     }
 
     #[test]
