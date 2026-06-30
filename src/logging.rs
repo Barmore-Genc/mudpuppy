@@ -10,7 +10,7 @@
 //! Logs must never record review content. Privacy-sensitive strings (branch
 //! names, file paths) go through [`hash`] — a salted, non-reversible short
 //! digest — so occurrences can be correlated without the value ever hitting
-//! disk. The salt is the per-session [`SEED`], rotated by `agent reset`.
+//! disk. The salt is the per-session `SEED`, rotated by `agent reset`.
 //!
 //! Sink resolution has two layers so tests stay isolated under `cargo test`'s
 //! thread-parallel execution: a process-global sink installed once by the
@@ -68,7 +68,7 @@ pub fn set_seed(seed: &str) {
 /// A short, stable, non-reversible label for a privacy-sensitive string (a
 /// branch name, a file path) so logs can correlate occurrences without ever
 /// recording the value itself. The digest is salted with the per-session
-/// [`SEED`], so the same input logs differently across sessions and after a
+/// `SEED`, so the same input logs differently across sessions and after a
 /// reset. Returns a 12-hex-char prefix of `sha256(seed ‖ 0x1f ‖ value)`.
 pub fn hash(value: &str) -> String {
     let mut hasher = Sha256::new();
