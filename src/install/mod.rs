@@ -35,10 +35,10 @@ pub const SKILL_VERSION: u32 = 3;
 /// Human-readable "what changed" line for the refresh prompt. Rewrite this each
 /// time you bump [`SKILL_VERSION`] to describe the new skill content.
 pub const SKILL_UPDATE_MESSAGE: &str =
-    "the agent now records what it's reviewing in the session: `agent reset --pr \
-     <ref>` points the whole review (diff, anchoring, the user's UI) at a pull \
-     request, and `--base <ref>` at a specific local base. The PR-review skill now \
-     opens plain `mudpuppy` and declares the PR with `reset --pr` first.";
+    "the review target is now recorded in one store shared by the agent and the \
+     TUI: `agent reset --pr <ref>` points the whole review (diff, anchoring, the \
+     user's UI) at a pull request, and `--base <ref>` at a local base. The \
+     PR-review skill now declares the PR with `reset --pr` first.";
 
 /// The frontmatter key the installed version is stamped under.
 const VERSION_KEY: &str = "mudpuppy-skill-version";

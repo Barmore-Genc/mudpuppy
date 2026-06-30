@@ -22,26 +22,6 @@ use anyhow::{bail, Context, Result};
 use crate::domain::Target;
 use crate::{log_debug, log_warn, logging};
 
-/// A resolved diff plus the target that identifies it.
-#[derive(Debug, Clone)]
-pub struct LoadedDiff {
-    /// What is being reviewed (records the head SHA for staleness checks).
-    pub target: Target,
-    /// The raw unified diff text, ready for [`crate::diff::parse_diff`].
-    pub raw: String,
-}
-
-/// Load the diff under review along with its [`Target`].
-///
-/// `pr` selects a pull-request target (anything `gh pr diff` accepts: a number,
-/// `owner/repo#123`, or a URL); otherwise the review targets local changes,
-/// with `base` overriding the inferred base ref.
-pub fn load(pr: Option<&str>, base: Option<&str>) -> Result<LoadedDiff> {
-    let target = resolve_target(pr, base)?;
-    let raw = raw_diff(&target)?;
-    Ok(LoadedDiff { target, raw })
-}
-
 /// Re-fetch the raw diff for an already-resolved [`Target`] — used by the TUI
 /// when a reload finds the store's target changed (e.g. `agent reset --base`
 /// switched the review base) and the on-screen diff has to be rebuilt.
@@ -50,9 +30,9 @@ pub fn diff_for_target(target: &Target) -> Result<String> {
 }
 
 /// Resolve just the [`Target`] (base ref + head SHA) without fetching the diff
-/// body. The agent's write commands need the target — to stamp a fresh store and
-/// to key its path — but not the (potentially huge) diff text, so they take this
-/// cheaper path. [`load`] produces an identical target.
+/// body. Callers that need the target — to stamp a store or decide what's under
+/// review — but not the (potentially huge) diff text take this cheaper path;
+/// [`diff_for_target`] then fetches the diff when one is actually needed.
 pub fn resolve_target(pr: Option<&str>, base: Option<&str>) -> Result<Target> {
     match pr {
         Some(pr) => resolve_pr_target(pr),
