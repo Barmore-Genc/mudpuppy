@@ -30,7 +30,12 @@ below. Read it first, and trust it over this file if anything here has drifted.
 2. The user opens the review UI with `mudpuppy` (no arguments → local changes).
    You attach through the `agent` commands against the same local target.
 3. **Check what's under review** with `mudpuppy agent diff` so your line anchors
-   match the current diff.
+   match the current diff. It diffs against the repo's default branch; if your
+   work branches off something else (so the diff carries unrelated commits, or
+   misses some), point the review at the right base with `mudpuppy agent reset
+   --base <ref>`. That re-resolves the diff and reloads the user's open UI onto
+   it. `reset` also clears the round's annotations, so switch the base **before**
+   you start commenting.
 4. **Annotate the lines** you want looked at with `mudpuppy agent comment add`
    (`--file` / `--line` / `--side`, `--severity`, `--tag`). Use `>` for a
    direction or decision, `?` for a genuine question, `!` for a concern. Say

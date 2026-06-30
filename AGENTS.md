@@ -37,7 +37,7 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 - `main.rs`: binary entry point; parses the CLI and dispatches into the library.
 - `lib.rs`: crate root and module map.
 - `cli.rs`: the clap command tree and top-level dispatch (`run`); opens this process's role-split debug log (`init_debug_log`) when the config enabled it.
-- `agent.rs`: the `mudpuppy agent` subcommands (add/comment/wait/reset…) over the store; `reset [--base REF]` clears the round and can switch the review base.
+- `agent.rs`: the `mudpuppy agent` subcommands (add/comment/wait/reset…) over the store; commands resolve the review target from the session store (set by `reset`), so `reset --base REF`/`--pr REF` records what's under review (local base or a PR) and the rest follow it.
 - `install/`: `mudpuppy install claude` — writes the two Claude Code skills (PR review, implementation review) at a chosen scope (project/local/user).
 - `source.rs`: diff-source providers — shells out to `git` (local) and `gh` (PR); `diff_for_target` re-fetches a diff for an existing target (TUI base switch); emits privacy-safe base/merge-base/shallow diagnostics.
 - `blob.rs`: full file-content provider (working tree / `git show` / `gh api`) for context expansion and added/comment-only files; also captures relocation signatures (`capture_signature`).

@@ -30,12 +30,20 @@ below. Read it first, and trust it over this file if anything here has drifted.
 1. **Identify the PR.** Get its reference as `owner/repo#123` or a URL. Read
    context read-only with `gh pr view <ref>` (title, description) and, if useful,
    `gh pr diff <ref>`.
-2. **Point mudpuppy at the PR.** The user opens the review UI with `mudpuppy
-   <owner/repo#123>` (or the URL). You attach to the same review through the
-   `agent` commands — they share the store keyed to that PR.
-3. **Read the diff under review** with `mudpuppy agent diff` (`--file <path>` to
+2. **The user opens the review UI** with plain `mudpuppy` (no argument). You and
+   the UI share the repo's review store.
+3. **Tell mudpuppy you're reviewing the PR** with `mudpuppy agent reset --pr
+   <ref>`. This records the PR as what's under review, so your later commands and
+   the user's open UI both resolve the PR's diff (via `gh pr diff`) instead of the
+   local changes. Do this **first**: `reset` also clears the round, so anything
+   you'd add before it is wiped.
+
+   This is required. Don't skip it and rely on `mudpuppy <ref>` — the agent
+   commands resolve the review from the store, and without the `reset` they'd diff
+   the local working tree against the default branch, not the PR.
+4. **Read the diff under review** with `mudpuppy agent diff` (`--file <path>` to
    focus on one file). Review it as you normally would.
-4. **Leave annotations** on the lines that matter with `mudpuppy agent comment
+5. **Leave annotations** on the lines that matter with `mudpuppy agent comment
    add`: anchor with `--file` / `--line` / `--side`, set `--severity`
    (`info` < `suggestion` < `warning` < `blocker`) and an optional `--tag`
    (`?` question, `!` concern, `>` direction). One concrete point per comment.

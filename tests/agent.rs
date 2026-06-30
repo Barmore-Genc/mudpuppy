@@ -497,6 +497,54 @@ fn reset_base_switches_the_review_target() {
     );
 }
 
+#[test]
+fn reset_pr_records_a_pull_request_target() {
+    let repo = repo_with_changes();
+    let data = tempfile::tempdir().unwrap();
+    let (repo, data) = (repo.path(), data.path());
+
+    // Seed a comment so a store exists on the inferred local target.
+    run(
+        repo,
+        data,
+        &[
+            "agent", "comment", "add", "--file", "a_app.rs", "--line", "1", "--body", "x",
+        ],
+    );
+    let store = find_store(data).unwrap();
+    assert_eq!(read_store(&store).unwrap()["target"]["kind"], "local");
+
+    // Point the review at a PR. The head SHA is best-effort (no live PR here), but
+    // the recorded target flips to the PR so the agent and TUI both resolve its
+    // diff. The store path is unchanged, so the TUI keeps watching the same file.
+    let (stdout, stderr, ok) = run(repo, data, &["agent", "reset", "--pr", "o/r#123"]);
+    assert!(ok, "reset --pr failed: {stderr}");
+    assert!(
+        stdout.contains("switched the review to the PR"),
+        "stdout: {stdout}"
+    );
+
+    let after = read_store(&store).unwrap();
+    assert_eq!(after["target"]["kind"], "pr", "target switched to a PR");
+    assert_eq!(after["target"]["pr"], "o/r#123", "records the PR reference");
+}
+
+#[test]
+fn reset_rejects_base_and_pr_together() {
+    let repo = repo_with_changes();
+    let data = tempfile::tempdir().unwrap();
+    let (stdout, stderr, ok) = run(
+        repo.path(),
+        data.path(),
+        &["agent", "reset", "--base", "HEAD", "--pr", "o/r#123"],
+    );
+    assert!(!ok, "should reject combining --base and --pr: {stdout}");
+    assert!(
+        stderr.contains("cannot be used with") || stderr.contains("conflicts"),
+        "stderr should explain the conflict: {stderr}"
+    );
+}
+
 /// Spawn `mudpuppy <args>` detached, capturing stdout/stderr, so the test can
 /// manipulate the store while the child blocks. (`run` blocks on `.output()`,
 /// which can't interleave with `agent wait`.)

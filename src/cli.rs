@@ -122,12 +122,19 @@ pub enum AgentCommand {
     },
 
     /// Clear the current session's annotations and start a fresh round.
+    ///
+    /// `--base` / `--pr` also record what's under review into the session store,
+    /// so the agent's later commands and the user's open TUI both resolve the
+    /// same diff. Omit both to keep the current target and only clear.
     Reset {
-        /// Switch the review to this base ref before clearing, so the TUI reloads
-        /// onto the new diff (e.g. the PR's actual base branch). Omit to keep the
-        /// current base. Local reviews only.
-        #[arg(long, value_name = "REF")]
+        /// Review the local changes against this base ref (e.g. the branch this
+        /// work forks off). Mutually exclusive with `--pr`.
+        #[arg(long, value_name = "REF", conflicts_with = "pr")]
         base: Option<String>,
+        /// Review this pull request instead of the local changes; the diff comes
+        /// from `gh pr diff`. Takes `owner/repo#123`, a number, or a URL.
+        #[arg(long, value_name = "PR")]
+        pr: Option<String>,
     },
 }
 
