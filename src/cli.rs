@@ -274,12 +274,15 @@ fn wants_config_help(args: &[String]) -> bool {
 }
 
 /// Open this process's debug log if the user config enabled it with
-/// `mudpuppy.debug_log("<dir>")`. The file is `<dir>/mudpuppy-<role>.log`, with
-/// `role` distinguishing the TUI from the headless agent so the two never
-/// interleave. Best-effort throughout: no config, no setting, or any failure
-/// (building the engine, creating the dir, opening the file) just leaves logging
-/// off. `MUDPUPPY_LOG` (opened in `main`) still wins as an explicit override
-/// since the global sink is install-once.
+/// `mudpuppy.debug_log = true`. The location is fixed (`<data-dir>/logs/`, see
+/// `crate::session::log_dir`) rather than config-supplied, so a hostile config
+/// can't aim log writes at an arbitrary path; the file is
+/// `<data-dir>/logs/mudpuppy-<role>.log`, with `role` distinguishing the TUI from
+/// the headless agent so the two never interleave. Best-effort throughout: no
+/// config, no setting, or any failure (building the engine, resolving the data
+/// dir, creating the dir, opening the file) just leaves logging off.
+/// `MUDPUPPY_LOG` (opened in `main`) still wins as an explicit override since the
+/// global sink is install-once.
 fn init_debug_log(role: &str) {
     let Some(config) = crate::lua::config_path() else {
         return;
@@ -290,12 +293,15 @@ fn init_debug_log(role: &str) {
     let Ok(engine) = crate::lua::LuaEngine::new(Some(config)) else {
         return;
     };
-    let Some(dir) = engine.debug_log() else {
+    if !engine.debug_log() {
+        return;
+    }
+    // The config only flips logging on; we pick the (fixed) location so a config
+    // can never aim log writes at an arbitrary path. Best-effort: give up quietly
+    // if the data dir can't be resolved or the logs dir can't be made.
+    let Ok(dir) = crate::session::log_dir() else {
         return;
     };
-    let dir = std::path::PathBuf::from(dir);
-    // A missing dir is a likely config slip; create it rather than silently drop
-    // the log. Still best-effort — give up quietly if it can't be made.
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }

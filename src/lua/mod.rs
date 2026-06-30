@@ -78,11 +78,12 @@ type UpdateChecks = Rc<RefCell<bool>>;
 /// reload (like [`Leader`]).
 type AnchorWindow = Rc<RefCell<i64>>;
 
-/// The debug-log directory set by `mudpuppy.debug_log(dir)`, shared so the
-/// registration closure can write it and [`LuaEngine::debug_log`] can read it
-/// back. `None` (the default) means debug logging is off. The binary reads this
-/// once at startup to open its role-split log file (see [`crate::cli`]).
-type DebugLog = Rc<RefCell<Option<String>>>;
+/// Whether debug logging is on, toggled by `mudpuppy.debug_log = true`, shared so
+/// the metatable closure can write it and [`LuaEngine::debug_log`] can read it
+/// back. `false` (the default) means logging is off. The config only flips this
+/// flag; the binary picks the (fixed, confined) log location itself at startup
+/// (see [`crate::cli`]) so a hostile config can't aim writes at an arbitrary path.
+type DebugLog = Rc<RefCell<bool>>;
 
 /// The pair of relocation scan windows (see [`crate::anchor::Params`]), bundled
 /// so they pass as one argument and reset together on reload.
@@ -167,7 +168,7 @@ pub struct LuaEngine {
     update_checks: UpdateChecks,
     /// The configured relocation scan windows (reset on reload).
     anchor_windows: AnchorWindows,
-    /// The debug-log directory from `mudpuppy.debug_log` (reset on reload).
+    /// Whether `mudpuppy.debug_log` turned logging on (reset on reload).
     debug_log: DebugLog,
     /// Where the user config lives (if anywhere). `None` disables user config —
     /// used by tests so the default keymap is exercised in isolation.
@@ -204,7 +205,7 @@ impl LuaEngine {
         // override them with `mudpuppy.anchor.set_{advanced,fallback}_match_window`.
         let anchor_windows = AnchorWindows::defaults();
         // Debug logging is off unless the user config turns it on.
-        let debug_log: DebugLog = Rc::new(RefCell::new(None));
+        let debug_log: DebugLog = Rc::new(RefCell::new(false));
         let status: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
         // Redirect `print` to the status buffer — the TUI owns the screen, so a
@@ -318,19 +319,20 @@ impl LuaEngine {
         // And the relocation windows: back to the engine defaults, then let the
         // config set them again.
         self.anchor_windows.reset();
-        // Clear the debug-log dir so a removed `mudpuppy.debug_log` reverts. (The
-        // process's already-open log file is unaffected; this only governs a
+        // Turn debug logging back off so a removed `mudpuppy.debug_log` reverts.
+        // (The process's already-open log file is unaffected; this only governs a
         // fresh read of the setting.)
-        *self.debug_log.borrow_mut() = None;
+        *self.debug_log.borrow_mut() = false;
         self.prompts.borrow_mut().clear();
         *self.status.borrow_mut() = None;
         self.load_scripts(false)
     }
 
-    /// The debug-log directory the config requested via `mudpuppy.debug_log`, if
-    /// any. The binary reads this once at startup to open its role-split log file.
-    pub fn debug_log(&self) -> Option<String> {
-        self.debug_log.borrow().clone()
+    /// Whether the config turned debug logging on via `mudpuppy.debug_log = true`.
+    /// The binary reads this once at startup; when on it opens its role-split log
+    /// file at a fixed location it chooses (the config never names the path).
+    pub fn debug_log(&self) -> bool {
+        *self.debug_log.borrow()
     }
 
     /// The currently-configured relocation scan windows as `(advanced, fallback)`,
@@ -967,16 +969,18 @@ original position; 0 = scan the whole file; negative = disable that scan.
 
 Debug logging
 -------------
-`mudpuppy.debug_log(dir)` turns on a debug log, writing under `dir`. The TUI and
-the headless `agent` get separate files so they don't interleave:
-  <dir>/mudpuppy-tui.log     and     <dir>/mudpuppy-agent.log
+`mudpuppy.debug_log = true` turns on a debug log. mudpuppy picks the location (a
+`logs/` dir under its own data directory); the config can't name a path, so a
+config can't aim log writes at an arbitrary place on disk. The TUI and the
+headless `agent` get separate files so they don't interleave:
+  <data-dir>/logs/mudpuppy-tui.log   and   <data-dir>/logs/mudpuppy-agent.log
 The log is for diagnosing mudpuppy itself (diff/base resolution, store reloads).
 It never records review content: file paths and branch names are written only as
 salted, non-reversible hashes; commit SHAs and counts are written plain. The salt
 lives in the store and rotates on `agent reset`. (`MUDPUPPY_LOG=<file>` in the
-environment still works as an explicit single-file override.) Pass an absolute
-path — `~` is not expanded. The directory is created if missing.
-  mudpuppy.debug_log("/Users/me/.cache/mudpuppy/logs")
+environment still works as an explicit single-file override, and it does take a
+path since the environment is outside the config sandbox.)
+  mudpuppy.debug_log = true
 
 Events
 ------
@@ -1568,15 +1572,26 @@ index 333..444 100644
     }
 
     #[test]
-    fn debug_log_defaults_off_and_a_config_line_sets_the_dir() {
+    fn debug_log_defaults_off_and_a_config_line_turns_it_on() {
         // No config line: debug logging stays off.
         let engine = LuaEngine::new(None).unwrap();
-        assert_eq!(engine.debug_log(), None);
+        assert!(!engine.debug_log());
 
-        // A config line records the directory the binary opens its log under.
-        let (_dir, path) = config("mudpuppy.debug_log(\"/tmp/mudpuppy-logs\")");
+        // `= true` flips the flag the binary reads at startup.
+        let (_dir, path) = config("mudpuppy.debug_log = true");
         let engine = LuaEngine::new(Some(path)).unwrap();
-        assert_eq!(engine.debug_log().as_deref(), Some("/tmp/mudpuppy-logs"));
+        assert!(engine.debug_log());
+    }
+
+    #[test]
+    fn debug_log_rejects_a_non_boolean() {
+        // A path (the old API) is now a hard config error, not a silent string.
+        let (_dir, path) = config("mudpuppy.debug_log = \"/tmp/logs\"");
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        assert!(!engine.debug_log());
+        assert!(engine
+            .status_message()
+            .is_some_and(|m| m.contains("debug_log")));
     }
 
     #[test]

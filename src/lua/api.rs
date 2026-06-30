@@ -122,21 +122,35 @@ pub fn build_table(
         })?,
     )?;
 
-    let dbg = debug_log;
-    table.set(
-        "debug_log",
-        lua.create_function(move |_, dir: String| {
-            // Enable debug logging into `dir`. The binary reads this once at
-            // startup (see `crate::cli`) and opens a per-role log file there; logs
-            // never record review content, only salted hashes and SHAs.
-            *dbg.borrow_mut() = Some(dir);
-            Ok(())
-        })?,
-    )?;
-
     table.set("updates", build_updates_table(lua, update_checks)?)?;
     table.set("skills", build_skills_table(lua)?)?;
     table.set("anchor", build_anchor_table(lua, anchor_windows)?)?;
+
+    // `mudpuppy.debug_log` is a settable field, not a function: `= true` turns the
+    // debug log on, `= false` off. It's deliberately a boolean and not a path — the
+    // binary picks the (fixed, confined) log location itself, so a hostile config
+    // can't aim log writes at an arbitrary place on disk. Implemented through the
+    // table's `__newindex` so the assignment syntax works; `debug_log` is left out
+    // of the table above so the metamethod actually fires on the first write.
+    let dbg = debug_log;
+    let meta = lua.create_table()?;
+    meta.set(
+        "__newindex",
+        lua.create_function(move |_, (t, key, value): (Table, String, Value)| {
+            if key == "debug_log" {
+                let on = value.as_boolean().ok_or_else(|| {
+                    mlua::Error::runtime(
+                        "mudpuppy.debug_log takes a boolean (true/false), not a path",
+                    )
+                })?;
+                *dbg.borrow_mut() = on;
+                return Ok(());
+            }
+            // Anything else keeps ordinary table-assignment behaviour.
+            t.raw_set(key, value)
+        })?,
+    )?;
+    table.set_metatable(Some(meta));
 
     Ok(table)
 }

@@ -3,7 +3,8 @@
 //! A TUI owns stdout/stderr (the terminal), so debug output goes to a file
 //! instead, off by default. Two switches open a sink (see [`crate::cli`]): the
 //! `MUDPUPPY_LOG` env var (an explicit single file) and the `mudpuppy.debug_log`
-//! config setting (a directory, split per role). Logging is a cheap no-op until
+//! config setting (a boolean toggle; the binary picks a fixed per-role directory
+//! so the config can't name an arbitrary path). Logging is a cheap no-op until
 //! a sink is installed, and a failed write is swallowed rather than allowed to
 //! break the app.
 //!

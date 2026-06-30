@@ -85,6 +85,14 @@ fn data_dir() -> Result<PathBuf> {
     Ok(dirs.data_dir().to_path_buf())
 }
 
+/// The fixed directory for debug logs: a `logs/` subdir of `data_dir`. The
+/// config only toggles logging on/off (`mudpuppy.debug_log = true`); the location
+/// is chosen here, not by the config, so a hostile config can't redirect log
+/// writes to an arbitrary path on disk.
+pub fn log_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("logs"))
+}
+
 /// Derive the on-disk slug for a repo: the remote's `owner/repo` when one is
 /// present, else the sanitized canonical repo path so repos without a remote
 /// still get a stable, collision-free directory.
