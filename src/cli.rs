@@ -122,7 +122,13 @@ pub enum AgentCommand {
     },
 
     /// Clear the current session's annotations and start a fresh round.
-    Reset,
+    Reset {
+        /// Switch the review to this base ref before clearing, so the TUI reloads
+        /// onto the new diff (e.g. the PR's actual base branch). Omit to keep the
+        /// current base. Local reviews only.
+        #[arg(long, value_name = "REF")]
+        base: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -267,12 +273,50 @@ fn wants_config_help(args: &[String]) -> bool {
     args.len() == 3 && args[1] == "help" && args[2] == "config"
 }
 
+/// Open this process's debug log if the user config enabled it with
+/// `mudpuppy.debug_log("<dir>")`. The file is `<dir>/mudpuppy-<role>.log`, with
+/// `role` distinguishing the TUI from the headless agent so the two never
+/// interleave. Best-effort throughout: no config, no setting, or any failure
+/// (building the engine, creating the dir, opening the file) just leaves logging
+/// off. `MUDPUPPY_LOG` (opened in `main`) still wins as an explicit override
+/// since the global sink is install-once.
+fn init_debug_log(role: &str) {
+    let Some(config) = crate::lua::config_path() else {
+        return;
+    };
+    if !config.exists() {
+        return;
+    }
+    let Ok(engine) = crate::lua::LuaEngine::new(Some(config)) else {
+        return;
+    };
+    let Some(dir) = engine.debug_log() else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    // A missing dir is a likely config slip; create it rather than silently drop
+    // the log. Still best-effort — give up quietly if it can't be made.
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join(format!("mudpuppy-{role}.log"));
+    let _ = crate::logging::init_file(&path);
+}
+
 fn dispatch(cli: Cli) -> Result<()> {
     // `-C <DIR>`: change the working directory up front so every downstream
     // `git`/`gh` invocation (and store-path resolution) runs against that repo.
     if let Some(dir) = &cli.dir {
         std::env::set_current_dir(dir)
             .with_context(|| format!("changing directory to {}", dir.display()))?;
+    }
+    // Open this process's debug log before any work, so the diff/base resolution
+    // is captured. The TUI and the headless `agent` get separate files so their
+    // logs don't interleave; the switch is the user config, not a flag.
+    match &cli.command {
+        Some(Command::Agent { .. }) => init_debug_log("agent"),
+        None => init_debug_log("tui"),
+        _ => {}
     }
     match cli.command {
         Some(Command::Agent { command }) => crate::agent::dispatch(command),

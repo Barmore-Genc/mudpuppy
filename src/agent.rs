@@ -34,7 +34,7 @@ pub fn dispatch(command: AgentCommand) -> Result<()> {
         AgentCommand::Diff { file } => diff(file.as_deref()),
         AgentCommand::Comment { command } => comment(command),
         AgentCommand::Wait { timeout, context } => wait(timeout, context),
-        AgentCommand::Reset => reset(),
+        AgentCommand::Reset { base } => reset(base),
     }
 }
 
@@ -350,14 +350,36 @@ fn set_status(id: String, status: Status) -> Result<()> {
 }
 
 /// `agent reset` — clear the current session's annotations for a fresh round.
-fn reset() -> Result<()> {
-    let session = session()?;
+/// `agent reset [--base REF]` — clear the session's annotations and start a fresh
+/// round. With `--base`, also switch the review onto `REF`'s diff: resolve a new
+/// local target and write it into the store so an open TUI reloads onto the new
+/// base (the store path is the same — local reviews key on "local", not the base
+/// — so the TUI keeps watching the same file). This is the agent's fix for a diff
+/// resolved against the wrong base (e.g. when the PR's base isn't the default
+/// branch). `clear` also rotates the store's `log_seed`, so debug-log hashes from
+/// the previous round don't correlate with the new one.
+fn reset(base: Option<String>) -> Result<()> {
+    // A new base means a new target; resolve it now so the store records the
+    // ref, head SHA, and the TUI re-fetches the right diff on reload.
+    let session = match &base {
+        Some(b) => {
+            crate::log_debug!("agent reset: switching base to {}", crate::logging::hash(b));
+            Session::resolve(source::resolve_target(None, Some(b))?)?
+        }
+        None => session()?,
+    };
+    let new_target = base.is_some().then(|| session.target.clone());
     let cleared = store::update(&session.store_path, &session.target, |s| {
-        let n = s.annotations.len();
-        s.annotations.clear();
+        let n = s.clear();
+        if let Some(target) = &new_target {
+            s.target = target.clone();
+        }
         n
     })?;
-    println!("reset: cleared {cleared} annotation(s)");
+    match base {
+        Some(_) => println!("reset: cleared {cleared} annotation(s) and switched the review base"),
+        None => println!("reset: cleared {cleared} annotation(s)"),
+    }
     Ok(())
 }
 

@@ -84,6 +84,11 @@ pub const NO_UPDATE_CHECK_ENV: &str = "MUDPUPPY_NO_UPDATE_CHECK";
 pub fn launch(pr: Option<String>, base: Option<String>) -> Result<()> {
     let loaded = source::load(pr.as_deref(), base.as_deref())?;
     let files = parse_diff(&loaded.raw);
+    crate::log_debug!(
+        "tui launch: head={} files={}",
+        loaded.target.head_sha(),
+        files.len()
+    );
 
     if files.is_empty() {
         // Nothing to render — say so on the normal terminal rather than flashing

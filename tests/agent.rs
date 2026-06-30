@@ -452,6 +452,51 @@ fn reset_clears_the_session() {
     assert!(stdout.contains("no annotations") || stdout.contains("no matching"));
 }
 
+#[test]
+fn reset_base_switches_the_review_target() {
+    let repo = repo_with_changes();
+    let data = tempfile::tempdir().unwrap();
+    let (repo, data) = (repo.path(), data.path());
+
+    // Seed a comment so a store exists with the inferred default base.
+    run(
+        repo,
+        data,
+        &[
+            "agent", "comment", "add", "--file", "a_app.rs", "--line", "1", "--body", "x",
+        ],
+    );
+    let store = find_store(data).unwrap();
+    let before = read_store(&store).unwrap();
+    assert_eq!(
+        before["target"]["base"], "main",
+        "starts on the default base"
+    );
+    let seed_before = before["log_seed"].as_str().unwrap().to_string();
+
+    // Reset onto an explicit base: annotations clear, the target switches, and
+    // the debug-log seed rotates. The store path is unchanged (local reviews key
+    // on "local", not the base), so the TUI keeps watching the same file.
+    let (stdout, stderr, ok) = run(repo, data, &["agent", "reset", "--base", "HEAD"]);
+    assert!(ok, "reset --base failed: {stderr}");
+    assert!(
+        stdout.contains("switched the review base"),
+        "stdout: {stdout}"
+    );
+
+    let after = read_store(&store).unwrap();
+    assert_eq!(after["target"]["base"], "HEAD", "target base switched");
+    assert!(
+        after["annotations"].as_array().unwrap().is_empty(),
+        "annotations cleared"
+    );
+    assert_ne!(
+        after["log_seed"].as_str().unwrap(),
+        seed_before,
+        "reset rotated the log seed"
+    );
+}
+
 /// Spawn `mudpuppy <args>` detached, capturing stdout/stderr, so the test can
 /// manipulate the store while the child blocks. (`run` blocks on `.output()`,
 /// which can't interleave with `agent wait`.)

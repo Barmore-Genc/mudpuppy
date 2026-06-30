@@ -78,6 +78,12 @@ type UpdateChecks = Rc<RefCell<bool>>;
 /// reload (like [`Leader`]).
 type AnchorWindow = Rc<RefCell<i64>>;
 
+/// The debug-log directory set by `mudpuppy.debug_log(dir)`, shared so the
+/// registration closure can write it and [`LuaEngine::debug_log`] can read it
+/// back. `None` (the default) means debug logging is off. The binary reads this
+/// once at startup to open its role-split log file (see [`crate::cli`]).
+type DebugLog = Rc<RefCell<Option<String>>>;
+
 /// The pair of relocation scan windows (see [`crate::anchor::Params`]), bundled
 /// so they pass as one argument and reset together on reload.
 #[derive(Clone)]
@@ -161,6 +167,8 @@ pub struct LuaEngine {
     update_checks: UpdateChecks,
     /// The configured relocation scan windows (reset on reload).
     anchor_windows: AnchorWindows,
+    /// The debug-log directory from `mudpuppy.debug_log` (reset on reload).
+    debug_log: DebugLog,
     /// Where the user config lives (if anywhere). `None` disables user config —
     /// used by tests so the default keymap is exercised in isolation.
     config_path: Option<PathBuf>,
@@ -195,6 +203,8 @@ impl LuaEngine {
         // The relocation windows default to the engine defaults; a config can
         // override them with `mudpuppy.anchor.set_{advanced,fallback}_match_window`.
         let anchor_windows = AnchorWindows::defaults();
+        // Debug logging is off unless the user config turns it on.
+        let debug_log: DebugLog = Rc::new(RefCell::new(None));
         let status: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
         // Redirect `print` to the status buffer — the TUI owns the screen, so a
@@ -219,6 +229,7 @@ impl LuaEngine {
             file_filters.clone(),
             update_checks.clone(),
             anchor_windows.clone(),
+            debug_log.clone(),
         )
         .map_err(|e| anyhow!("building the mudpuppy table: {e}"))?;
         lua.globals()
@@ -248,6 +259,7 @@ impl LuaEngine {
             prompts,
             update_checks,
             anchor_windows,
+            debug_log,
             config_path,
             status,
         };
@@ -306,9 +318,19 @@ impl LuaEngine {
         // And the relocation windows: back to the engine defaults, then let the
         // config set them again.
         self.anchor_windows.reset();
+        // Clear the debug-log dir so a removed `mudpuppy.debug_log` reverts. (The
+        // process's already-open log file is unaffected; this only governs a
+        // fresh read of the setting.)
+        *self.debug_log.borrow_mut() = None;
         self.prompts.borrow_mut().clear();
         *self.status.borrow_mut() = None;
         self.load_scripts(false)
+    }
+
+    /// The debug-log directory the config requested via `mudpuppy.debug_log`, if
+    /// any. The binary reads this once at startup to open its role-split log file.
+    pub fn debug_log(&self) -> Option<String> {
+        self.debug_log.borrow().clone()
     }
 
     /// The currently-configured relocation scan windows as `(advanced, fallback)`,
@@ -943,6 +965,19 @@ original position; 0 = scan the whole file; negative = disable that scan.
   mudpuppy.anchor.fallback_match_window()       -> the fallback (exact) window
   mudpuppy.anchor.set_fallback_match_window(n)  set it (default 1000)
 
+Debug logging
+-------------
+`mudpuppy.debug_log(dir)` turns on a debug log, writing under `dir`. The TUI and
+the headless `agent` get separate files so they don't interleave:
+  <dir>/mudpuppy-tui.log     and     <dir>/mudpuppy-agent.log
+The log is for diagnosing mudpuppy itself (diff/base resolution, store reloads).
+It never records review content: file paths and branch names are written only as
+salted, non-reversible hashes; commit SHAs and counts are written plain. The salt
+lives in the store and rotates on `agent reset`. (`MUDPUPPY_LOG=<file>` in the
+environment still works as an explicit single-file override.) Pass an absolute
+path — `~` is not expanded. The directory is created if missing.
+  mudpuppy.debug_log("/Users/me/.cache/mudpuppy/logs")
+
 Events
 ------
   startup           once, after the config first loads
@@ -1530,6 +1565,18 @@ index 333..444 100644
         let mut a = app();
         engine.run_command(&mut a, "flag").unwrap();
         assert_eq!(engine.status_message().as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn debug_log_defaults_off_and_a_config_line_sets_the_dir() {
+        // No config line: debug logging stays off.
+        let engine = LuaEngine::new(None).unwrap();
+        assert_eq!(engine.debug_log(), None);
+
+        // A config line records the directory the binary opens its log under.
+        let (_dir, path) = config("mudpuppy.debug_log(\"/tmp/mudpuppy-logs\")");
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        assert_eq!(engine.debug_log().as_deref(), Some("/tmp/mudpuppy-logs"));
     }
 
     #[test]

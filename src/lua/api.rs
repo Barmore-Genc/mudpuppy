@@ -29,7 +29,7 @@ use mlua::{Function, Lua, Result, Scope, Table, Value};
 use super::keys::{KeyChord, KeySeq, Mode};
 use super::views;
 use super::{
-    AnchorWindows, Bindings, Commands, EventKind, Events, FileFilters, Leader, Prompts,
+    AnchorWindows, Bindings, Commands, DebugLog, EventKind, Events, FileFilters, Leader, Prompts,
     UpdateChecks,
 };
 use crate::tui::App;
@@ -48,6 +48,7 @@ pub fn build_table(
     file_filters: FileFilters,
     update_checks: UpdateChecks,
     anchor_windows: AnchorWindows,
+    debug_log: DebugLog,
 ) -> Result<Table> {
     let table = lua.create_table()?;
 
@@ -117,6 +118,18 @@ pub fn build_table(
             let chord = KeyChord::parse(&key)
                 .ok_or_else(|| mlua::Error::runtime(format!("unparseable leader key {key:?}")))?;
             *lead.borrow_mut() = chord;
+            Ok(())
+        })?,
+    )?;
+
+    let dbg = debug_log;
+    table.set(
+        "debug_log",
+        lua.create_function(move |_, dir: String| {
+            // Enable debug logging into `dir`. The binary reads this once at
+            // startup (see `crate::cli`) and opens a per-role log file there; logs
+            // never record review content, only salted hashes and SHAs.
+            *dbg.borrow_mut() = Some(dir);
             Ok(())
         })?,
     )?;
