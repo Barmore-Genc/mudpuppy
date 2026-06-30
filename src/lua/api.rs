@@ -126,12 +126,8 @@ pub fn build_table(
     table.set("skills", build_skills_table(lua)?)?;
     table.set("anchor", build_anchor_table(lua, anchor_windows)?)?;
 
-    // `mudpuppy.debug_log` is a settable field, not a function: `= true` turns the
-    // debug log on, `= false` off. It's deliberately a boolean and not a path — the
-    // binary picks the (fixed, confined) log location itself, so a hostile config
-    // can't aim log writes at an arbitrary place on disk. Implemented through the
-    // table's `__newindex` so the assignment syntax works; `debug_log` is left out
-    // of the table above so the metamethod actually fires on the first write.
+    // Flag for debug logs. We don't let config choose the path to make sure it
+    // can't mess with arbitrary disk files.
     let dbg = debug_log;
     let meta = lua.create_table()?;
     meta.set(
@@ -139,9 +135,7 @@ pub fn build_table(
         lua.create_function(move |_, (t, key, value): (Table, String, Value)| {
             if key == "debug_log" {
                 let on = value.as_boolean().ok_or_else(|| {
-                    mlua::Error::runtime(
-                        "mudpuppy.debug_log takes a boolean (true/false), not a path",
-                    )
+                    mlua::Error::runtime("mudpuppy.debug_log must be set to true or false")
                 })?;
                 *dbg.borrow_mut() = on;
                 return Ok(());

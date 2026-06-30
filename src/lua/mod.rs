@@ -78,11 +78,10 @@ type UpdateChecks = Rc<RefCell<bool>>;
 /// reload (like [`Leader`]).
 type AnchorWindow = Rc<RefCell<i64>>;
 
-/// Whether debug logging is on, toggled by `mudpuppy.debug_log = true`, shared so
-/// the metatable closure can write it and [`LuaEngine::debug_log`] can read it
-/// back. `false` (the default) means logging is off. The config only flips this
-/// flag; the binary picks the (fixed, confined) log location itself at startup
-/// (see [`crate::cli`]) so a hostile config can't aim writes at an arbitrary path.
+/// Whether debug logging is on, toggled by `mudpuppy.debug_log = true` (default
+/// off). Shared so the setter can write it and [`LuaEngine::debug_log`] can read
+/// it back. The config can't choose the path; the binary picks a fixed location
+/// so config can't mess with arbitrary disk files (see [`crate::cli`]).
 type DebugLog = Rc<RefCell<bool>>;
 
 /// The pair of relocation scan windows (see [`crate::anchor::Params`]), bundled
@@ -320,8 +319,6 @@ impl LuaEngine {
         // config set them again.
         self.anchor_windows.reset();
         // Turn debug logging back off so a removed `mudpuppy.debug_log` reverts.
-        // (The process's already-open log file is unaffected; this only governs a
-        // fresh read of the setting.)
         *self.debug_log.borrow_mut() = false;
         self.prompts.borrow_mut().clear();
         *self.status.borrow_mut() = None;
@@ -329,8 +326,8 @@ impl LuaEngine {
     }
 
     /// Whether the config turned debug logging on via `mudpuppy.debug_log = true`.
-    /// The binary reads this once at startup; when on it opens its role-split log
-    /// file at a fixed location it chooses (the config never names the path).
+    /// The binary reads this once at startup and, when on, opens its log file at a
+    /// fixed location it chooses.
     pub fn debug_log(&self) -> bool {
         *self.debug_log.borrow()
     }
