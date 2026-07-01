@@ -8,6 +8,31 @@ The release pipeline (cargo-dist) extracts the section matching the tagged
 version and uses it as the GitHub Release notes, so every release needs a
 matching heading here.
 
+## 0.5.0 - 2026-06-30
+
+### Added
+
+- `mudpuppy.reset_annotations()` clears the whole annotation store in one step,
+  for starting a review from a clean slate. Bound to `:reset-annotations` and
+  `<leader> R` (Space R), both behind a confirmation prompt that names the count
+  (`Reset all 3 annotations? This cannot be undone.`) (#70).
+- `mudpuppy agent reset --base <ref>` re-points a local review at a different
+  base without restarting the TUI: it clears the round and switches an open TUI
+  onto the new diff live (#71).
+- A `mudpuppy.debug_log("<dir>")` config setting writes debug logs, split per
+  role so the TUI (`mudpuppy-tui.log`) and the headless agent
+  (`mudpuppy-agent.log`) don't interleave. Logs never record review content;
+  file paths and branch names appear only as salted, non-reversible short
+  hashes (#71).
+
+### Changed
+
+- Both sidebar tab chips now show their total — `Files 7 │ Annotations 3` —
+  instead of only the active tab (#70).
+- The changelog in the self-update prompt renders as styled Markdown (headings,
+  lists, blockquotes, code, inline emphasis and links) instead of uniformly dim
+  text, so GitHub release notes read as intended (#68).
+
 ## 0.4.0 - 2026-06-17
 
 ### Added
