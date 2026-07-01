@@ -34,22 +34,34 @@ pub fn dispatch(command: AgentCommand) -> Result<()> {
         AgentCommand::Diff { file } => diff(file.as_deref()),
         AgentCommand::Comment { command } => comment(command),
         AgentCommand::Wait { timeout, context } => wait(timeout, context),
-        AgentCommand::Reset => reset(),
+        AgentCommand::Reset { base, pr } => reset(base, pr),
     }
 }
 
-/// Resolve the session (and thus the store path) for the local-changes target.
+/// Resolve the agent's session: the store path (always the repo's local store, so
+/// the agent and the user's `mudpuppy` TUI share one file) plus what's under
+/// review. The target is whatever a prior `reset` recorded in that store — a base
+/// ref or a PR — falling back to the local changes when nothing's been recorded.
+/// Reading it back here is what makes every agent command (diff, anchoring, …)
+/// follow the same diff the user sees instead of re-resolving the local default.
 fn session() -> Result<Session> {
-    let target = source::resolve_target(None, None)?;
-    Session::resolve(target)
+    let local = source::resolve_target(None, None)?;
+    let mut session = Session::resolve(local)?;
+    if let Some(state) = store::load(&session.store_path)? {
+        session.target = state.target;
+    }
+    Ok(session)
 }
 
-/// `agent diff [--file F]` — print the unified diff under review.
+/// `agent diff [--file F]` — print the unified diff under review. Resolves the
+/// target from the session store so it shows whatever `reset` pointed the review
+/// at (a base ref or a PR), matching what the user sees.
 fn diff(file: Option<&str>) -> Result<()> {
-    let loaded = source::load(None, None)?;
+    let session = session()?;
+    let raw = source::diff_for_target(&session.target)?;
     match file {
-        None => print!("{}", loaded.raw),
-        Some(f) => match file_section(&loaded.raw, f) {
+        None => print!("{raw}"),
+        Some(f) => match file_section(&raw, f) {
             Some(section) => print!("{section}"),
             None => bail!("no file matching `{f}` in the diff under review"),
         },
@@ -349,15 +361,50 @@ fn set_status(id: String, status: Status) -> Result<()> {
     Ok(())
 }
 
-/// `agent reset` — clear the current session's annotations for a fresh round.
-fn reset() -> Result<()> {
+/// `agent reset [--base REF | --pr REF]` — clear the session's annotations and
+/// start a fresh round, optionally recording what's under review.
+///
+/// This is how the agent tells mudpuppy what it's reviewing: with `--base` the
+/// review is the local changes against `REF`; with `--pr` it's that pull request
+/// (diff from `gh pr diff`). The chosen target is written into the session store,
+/// which `session` reads back, so the agent's later commands and an open TUI both
+/// resolve the same diff. The store path is unchanged (always the repo's local
+/// store) — only the recorded target changes — so the TUI keeps watching the same
+/// file and reloads onto the new diff. Without either flag, the current target is
+/// kept and only the round is cleared. `clear` also rotates the store's
+/// `log_seed`, so debug-log hashes from the previous round don't correlate.
+fn reset(base: Option<String>, pr: Option<String>) -> Result<()> {
+    // The store path stays the local one (shared with the TUI and the agent's
+    // other commands); only the recorded target changes. So resolve the session
+    // for the path and seed, then resolve the new target — if any — separately.
     let session = session()?;
+    let new_target = match (&base, &pr) {
+        (Some(b), _) => {
+            crate::log_debug!("agent reset: switching base to {}", crate::logging::hash(b));
+            Some(source::resolve_target(None, Some(b))?)
+        }
+        (_, Some(p)) => {
+            crate::log_debug!("agent reset: switching to PR {}", crate::logging::hash(p));
+            Some(source::resolve_target(Some(p), None)?)
+        }
+        (None, None) => None,
+    };
     let cleared = store::update(&session.store_path, &session.target, |s| {
-        let n = s.annotations.len();
-        s.annotations.clear();
+        let n = s.clear();
+        if let Some(target) = &new_target {
+            s.target = target.clone();
+        }
         n
     })?;
-    println!("reset: cleared {cleared} annotation(s)");
+    match (base, pr) {
+        (Some(_), _) => {
+            println!("reset: cleared {cleared} annotation(s) and switched the review base")
+        }
+        (_, Some(_)) => {
+            println!("reset: cleared {cleared} annotation(s) and switched the review to the PR")
+        }
+        (None, None) => println!("reset: cleared {cleared} annotation(s)"),
+    }
     Ok(())
 }
 

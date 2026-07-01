@@ -20,31 +20,19 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::domain::Target;
+use crate::{log_debug, log_warn, logging};
 
-/// A resolved diff plus the target that identifies it.
-#[derive(Debug, Clone)]
-pub struct LoadedDiff {
-    /// What is being reviewed (records the head SHA for staleness checks).
-    pub target: Target,
-    /// The raw unified diff text, ready for [`crate::diff::parse_diff`].
-    pub raw: String,
-}
-
-/// Load the diff under review along with its [`Target`].
-///
-/// `pr` selects a pull-request target (anything `gh pr diff` accepts: a number,
-/// `owner/repo#123`, or a URL); otherwise the review targets local changes,
-/// with `base` overriding the inferred base ref.
-pub fn load(pr: Option<&str>, base: Option<&str>) -> Result<LoadedDiff> {
-    let target = resolve_target(pr, base)?;
-    let raw = raw_diff(&target)?;
-    Ok(LoadedDiff { target, raw })
+/// Re-fetch the raw diff for an already-resolved [`Target`] — used by the TUI
+/// when a reload finds the store's target changed (e.g. `agent reset --base`
+/// switched the review base) and the on-screen diff has to be rebuilt.
+pub fn diff_for_target(target: &Target) -> Result<String> {
+    raw_diff(target)
 }
 
 /// Resolve just the [`Target`] (base ref + head SHA) without fetching the diff
-/// body. The agent's write commands need the target — to stamp a fresh store and
-/// to key its path — but not the (potentially huge) diff text, so they take this
-/// cheaper path. [`load`] produces an identical target.
+/// body. Callers that need the target — to stamp a store or decide what's under
+/// review — but not the (potentially huge) diff text take this cheaper path;
+/// [`diff_for_target`] then fetches the diff when one is actually needed.
 pub fn resolve_target(pr: Option<&str>, base: Option<&str>) -> Result<Target> {
     match pr {
         Some(pr) => resolve_pr_target(pr),
@@ -60,6 +48,7 @@ fn resolve_local_target(base: Option<&str>) -> Result<Target> {
     git(&["rev-parse", "--show-toplevel"])
         .context("not inside a git repository (mudpuppy reviews a repo's changes)")?;
 
+    let base_was_explicit = base.is_some();
     let resolved_base = match base {
         Some(b) => Some(b.to_string()),
         None => default_branch()?,
@@ -69,10 +58,16 @@ fn resolve_local_target(base: Option<&str>) -> Result<Target> {
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
 
-    Ok(Target::Local {
-        base: resolved_base.unwrap_or_else(|| "HEAD".to_string()),
-        head_sha,
-    })
+    let base = resolved_base.unwrap_or_else(|| "HEAD".to_string());
+    // The base ref is the input that decides which commits the diff includes;
+    // log its hash (not the name) plus the head SHA so a "false commits" report
+    // can be traced without leaking branch names.
+    log_debug!(
+        "resolved local target: base={} explicit={} head={head_sha}",
+        logging::hash(&base),
+        base_was_explicit
+    );
+    Ok(Target::Local { base, head_sha })
 }
 
 /// Resolve a pull-request target via `gh pr view` (read-only). The head SHA is
@@ -103,8 +98,11 @@ fn raw_diff(target: &Target) -> Result<String> {
             // Compare the working tree against the merge-base of <base> and HEAD,
             // so the diff is exactly this branch's work including uncommitted
             // edits.
-            git(&["diff", "--merge-base", base])
-                .with_context(|| format!("computing diff against base `{base}`"))
+            log_local_diff_inputs(base);
+            let raw = git(&["diff", "--merge-base", base])
+                .with_context(|| format!("computing diff against base `{base}`"))?;
+            log_debug!("local diff produced {} bytes", raw.len());
+            Ok(raw)
         }
         Target::Pr { pr, .. } => {
             // `gh pr diff` accepts a number or URL directly, but not the
@@ -112,9 +110,33 @@ fn raw_diff(target: &Target) -> Result<String> {
             let selector = gh_pr_selector(pr);
             let mut diff_args = vec!["pr", "diff"];
             diff_args.extend(selector.iter().map(String::as_str));
-            gh(&diff_args).with_context(|| format!("fetching diff for PR `{pr}`"))
+            let raw = gh(&diff_args).with_context(|| format!("fetching diff for PR `{pr}`"))?;
+            log_debug!("pr={} diff produced {} bytes", logging::hash(pr), raw.len());
+            Ok(raw)
         }
     }
+}
+
+/// Record the commit inputs of a local diff for debugging "false commits"
+/// reports: the base tip, `HEAD`, the merge-base they're diffed from, and
+/// whether history is shallow (a shallow clone can't find the true merge-base
+/// and balloons the diff). SHAs are content hashes, so they're logged plain; the
+/// base ref *name* never is. Best-effort and silent on failure — diagnostics
+/// must never break the diff.
+fn log_local_diff_inputs(base: &str) {
+    let trim = |s: String| s.trim().to_string();
+    let base_tip = git(&["rev-parse", base]).map(trim).unwrap_or_default();
+    let head = git(&["rev-parse", "HEAD"]).map(trim).unwrap_or_default();
+    let merge_base = git(&["merge-base", base, "HEAD"])
+        .map(trim)
+        .unwrap_or_default();
+    let shallow = git(&["rev-parse", "--is-shallow-repository"])
+        .map(|s| s.trim() == "true")
+        .unwrap_or(false);
+    log_debug!(
+        "local diff inputs: base_ref={} base_tip={base_tip} head={head} merge_base={merge_base} shallow={shallow}",
+        logging::hash(base)
+    );
 }
 
 /// Build the `gh` PR selector arguments for a user-supplied PR reference.
@@ -160,16 +182,31 @@ fn default_branch() -> Result<Option<String>> {
     // `origin/HEAD` -> "refs/remotes/origin/main"; trim to "origin/main".
     if let Ok(symref) = git(&["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]) {
         if let Some(name) = symref.trim().strip_prefix("refs/remotes/") {
+            // `origin/HEAD` is set at clone time and *not* updated by `git fetch`,
+            // so log that this path was taken — a stale symref is a known way to
+            // diff against the wrong base.
+            log_debug!(
+                "default branch via origin/HEAD symref: {}",
+                logging::hash(name)
+            );
             return Ok(Some(name.to_string()));
         }
     }
 
-    for candidate in ["origin/main", "origin/master", "main", "master"] {
+    for (i, candidate) in ["origin/main", "origin/master", "main", "master"]
+        .into_iter()
+        .enumerate()
+    {
         if git(&["rev-parse", "--verify", "--quiet", candidate]).is_ok() {
+            log_debug!(
+                "default branch via fallback[{i}]: {}",
+                logging::hash(candidate)
+            );
             return Ok(Some(candidate.to_string()));
         }
     }
 
+    log_warn!("no default branch resolved; diffing against HEAD");
     Ok(None)
 }
 

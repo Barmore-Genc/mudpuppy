@@ -1,5 +1,6 @@
 //! The top-level [`StateFile`] — the versioned on-disk root of the store.
 
+use nanoid::nanoid;
 use serde::{Deserialize, Serialize};
 
 use super::{Annotation, Author};
@@ -56,6 +57,13 @@ impl Default for Turn {
     }
 }
 
+/// A fresh random salt for the debug-log hash (see [`crate::logging::hash`]).
+/// Length 16 over the same alphabet as annotation ids; only needs to be stable
+/// within a session and unguessable, not cryptographically strong.
+fn fresh_log_seed() -> String {
+    nanoid!(16)
+}
+
 /// The versioned root of the annotation store: one JSON file per
 /// `(repo, target)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +75,11 @@ pub struct StateFile {
     /// Turn-protocol coordination block.
     #[serde(default)]
     pub turn: Turn,
+    /// Per-session salt for hashed debug-log labels, rotated on [`StateFile::clear`]
+    /// so a reset's logs don't correlate with the previous round's. Defaulted for
+    /// stores written before the field existed.
+    #[serde(default = "fresh_log_seed")]
+    pub log_seed: String,
     /// All annotations, both authors, every status.
     #[serde(default)]
     pub annotations: Vec<Annotation>,
@@ -79,6 +92,7 @@ impl StateFile {
             schema_version: SCHEMA_VERSION,
             target,
             turn: Turn::default(),
+            log_seed: fresh_log_seed(),
             annotations: Vec::new(),
         }
     }
@@ -121,10 +135,13 @@ impl StateFile {
     /// Drop every annotation, returning how many were removed. Unlike
     /// [`StateFile::remove`], this deliberately discards the whole list — the
     /// clean-slate "reset" action — so it is the one place that does not honour
-    /// the merge-by-id contract; callers gate it behind a confirmation.
+    /// the merge-by-id contract; callers gate it behind a confirmation. Also
+    /// rotates [`StateFile::log_seed`] so a new round's hashed logs don't
+    /// correlate with the previous one's.
     pub fn clear(&mut self) -> usize {
         let n = self.annotations.len();
         self.annotations.clear();
+        self.log_seed = fresh_log_seed();
         n
     }
 
@@ -255,6 +272,29 @@ mod tests {
         assert_eq!(s.clear(), 2, "reports how many it removed");
         assert!(s.annotations.is_empty());
         assert_eq!(s.clear(), 0, "clearing an empty store removes nothing");
+    }
+
+    #[test]
+    fn clear_rotates_the_log_seed() {
+        let mut s = StateFile::new(Target::Local {
+            base: "main".to_string(),
+            head_sha: "abc".to_string(),
+        });
+        let before = s.log_seed.clone();
+        s.clear();
+        assert_ne!(s.log_seed, before, "reset rotates the debug-log salt");
+    }
+
+    #[test]
+    fn log_seed_defaults_when_absent_on_load() {
+        // A store written before the seed field existed still loads, getting a
+        // fresh non-empty seed.
+        let json = r#"{
+            "schema_version": 1,
+            "target": { "kind": "local", "base": "main", "head_sha": "abc" }
+        }"#;
+        let s: StateFile = serde_json::from_str(json).unwrap();
+        assert!(!s.log_seed.is_empty());
     }
 
     #[test]

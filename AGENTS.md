@@ -36,21 +36,21 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 
 - `main.rs`: binary entry point; parses the CLI and dispatches into the library.
 - `lib.rs`: crate root and module map.
-- `cli.rs`: the clap command tree and top-level dispatch (`run`).
-- `agent.rs`: the `mudpuppy agent` subcommands (add/comment/wait/…) over the store.
+- `cli.rs`: the clap command tree and top-level dispatch (`run`); opens this process's role-split debug log (`init_debug_log`) when the config enabled it.
+- `agent.rs`: the `mudpuppy agent` subcommands (add/comment/wait/reset…) over the store; commands resolve the review target from the session store (set by `reset`), so `reset --base REF`/`--pr REF` records what's under review (local base or a PR) and the rest follow it.
 - `install/`: `mudpuppy install claude` — writes the two Claude Code skills (PR review, implementation review) at a chosen scope (project/local/user).
-- `source.rs`: diff-source providers — shells out to `git` (local) and `gh` (PR).
+- `source.rs`: diff-source providers — `resolve_target` (local/base/PR) and `diff_for_target` (the diff for a resolved target, used by both the TUI and the agent); shells out to `git` (local) and `gh` (PR); emits privacy-safe base/merge-base/shallow diagnostics.
 - `blob.rs`: full file-content provider (working tree / `git show` / `gh api`) for context expansion and added/comment-only files; also captures relocation signatures (`capture_signature`).
 - `diff.rs`: hand-rolled unified-diff parser, lazy hunks, line ↔ side anchoring.
 - `anchor.rs`: change-resilient location anchors — capture a line+context signature and relocate it in an edited file (exact-then-fuzzy edit-distance cascade), else orphan.
 - `highlight.rs`: syntect syntax highlighting for the diff pane.
 - `store.rs`: load / merge-by-id / atomic+locked save of the annotation store.
-- `session.rs`: repo + target resolution and store-path derivation (resume).
+- `session.rs`: repo + target resolution, store-path derivation (one store per repo; the target lives inside it, so the TUI and agent share one file), and the fixed `log_dir` for debug logs.
 - `update.rs`: self-update — release check by HTTPS GET of the latest GitHub Release's `dist-manifest.json` (stable `releases/latest/download` URL, no `gh` needed), semver comparison, and install by downloading the prebuilt release archive for this build's target (`build.rs` captures the triple), verifying its SHA-256, and swapping the running binary in place (`self_replace`) — no Rust toolchain needed; surfaced to Lua as `mudpuppy.updates` and driven by `core.luau`'s update prompt.
 - `tui/`: the ratatui app — file tree, diff pane, gutter marks, panels, turn release; key presses route through the Lua engine.
 - `picker.rs`: fuzzy-find file picker state + subsequence matcher for the "add any file" overlay.
 - `command.rs`: the `:command` palette state — fuzzy filtering over registered command names (reuses the picker's matcher).
-- `logging.rs`: env-gated (`MUDPUPPY_LOG`) file logging with a thread-local capture sink for tests; `log_debug!`/`info`/`warn`/`error` macros.
+- `logging.rs`: file logging gated by `MUDPUPPY_LOG` (single file) or the `mudpuppy.debug_log` config toggle (boolean; binary opens a fixed role-split dir under the data dir); thread-local capture sink for tests; `log_debug!`/`info`/`warn`/`error` macros; `hash()` salted non-reversible labels (salt = store `log_seed`) so logs never record names/paths.
 - `lua/`: embedded Luau sandbox — the configurable keymap and event hooks. Bindings are keyed on key *sequences* (multi-key chords, a `<leader>`, and count prefixes), resolved by a sequence state machine. All default bindings live in `lua/core.luau`; the user config is `$MUDPUPPY_CONFIG`, else `$XDG_CONFIG_HOME`/`~/.config/mudpuppy/mudpuppy.luau` (`%APPDATA%` on Windows). Rust keeps only a hardwired Ctrl-C quit.
 - `domain/`: pure on-disk schema types (`Annotation`, `StateFile`, enums).
 

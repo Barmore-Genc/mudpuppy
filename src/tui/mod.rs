@@ -82,21 +82,56 @@ pub const NO_UPDATE_CHECK_ENV: &str = "MUDPUPPY_NO_UPDATE_CHECK";
 /// otherwise the review targets local changes. `base` overrides the inferred
 /// base ref for local reviews.
 pub fn launch(pr: Option<String>, base: Option<String>) -> Result<()> {
-    let loaded = source::load(pr.as_deref(), base.as_deref())?;
-    let files = parse_diff(&loaded.raw);
+    let explicit = pr.is_some() || base.is_some();
+
+    // One store per repo, shared with the agent. Resolving it needs a git repo;
+    // degrade to a store-less view if we're not in one (e.g. a PR browsed outside
+    // a checkout). Load what's there so a plain launch can adopt whatever the
+    // agent last recorded as under review.
+    let session = source::resolve_target(None, None)
+        .ok()
+        .and_then(|local| Session::resolve(local).ok());
+    let stored = session
+        .as_ref()
+        .and_then(|s| store::load(&s.store_path).ok().flatten());
+
+    // What to review: a target named on the command line wins; otherwise the one
+    // the store last recorded; otherwise the local changes.
+    let target = if explicit {
+        source::resolve_target(pr.as_deref(), base.as_deref())?
+    } else if let Some(state) = &stored {
+        state.target.clone()
+    } else {
+        source::resolve_target(None, None)?
+    };
+
+    // An explicitly named target becomes the review's truth: record it so the
+    // agent's commands (which read the target back from the store) resolve the
+    // same diff. A plain launch leaves the stored target untouched.
+    if explicit {
+        if let Some(session) = &session {
+            let recorded = target.clone();
+            let _ = store::update(&session.store_path, &target, move |s| s.target = recorded);
+        }
+    }
+
+    let raw = source::diff_for_target(&target)?;
+    let files = parse_diff(&raw);
+    crate::log_debug!(
+        "tui launch: head={} files={}",
+        target.head_sha(),
+        files.len()
+    );
 
     if files.is_empty() {
         // Nothing to render — say so on the normal terminal rather than flashing
         // an empty alternate screen.
-        println!("No changes to review ({}).", target_desc(&loaded.target));
+        println!("No changes to review ({}).", target_desc(&target));
         return Ok(());
     }
 
-    // Resolve where this review's annotations live and load any that exist.
-    // Resolution failure shouldn't block browsing the diff, so degrade to an
-    // empty, store-less view rather than aborting.
-    let mut app = App::new(files, loaded.target.clone());
-    if let Ok(session) = Session::resolve(loaded.target) {
+    let mut app = App::new(files, target);
+    if let Some(session) = session {
         let state = store::load(&session.store_path)?;
         app.set_repo_root(session.repo_root);
         app.attach_store(session.store_path, state);

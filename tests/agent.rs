@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use common::{repo_with_changes, Session};
+use common::{repo_clean, repo_with_changes, Session};
 
 /// Run `mudpuppy <args>` inside `repo`, with the store redirected to `data`.
 /// Returns `(stdout, stderr, success)`.
@@ -450,6 +450,123 @@ fn reset_clears_the_session() {
 
     let (stdout, _, _) = run(repo, data, &["agent", "comment", "list"]);
     assert!(stdout.contains("no annotations") || stdout.contains("no matching"));
+}
+
+#[test]
+fn reset_base_switches_the_review_target() {
+    let repo = repo_with_changes();
+    let data = tempfile::tempdir().unwrap();
+    let (repo, data) = (repo.path(), data.path());
+
+    // Seed a comment so a store exists with the inferred default base.
+    run(
+        repo,
+        data,
+        &[
+            "agent", "comment", "add", "--file", "a_app.rs", "--line", "1", "--body", "x",
+        ],
+    );
+    let store = find_store(data).unwrap();
+    let before = read_store(&store).unwrap();
+    assert_eq!(
+        before["target"]["base"], "main",
+        "starts on the default base"
+    );
+    let seed_before = before["log_seed"].as_str().unwrap().to_string();
+
+    // Reset onto an explicit base: annotations clear, the target switches, and
+    // the debug-log seed rotates. The store path is unchanged (local reviews key
+    // on "local", not the base), so the TUI keeps watching the same file.
+    let (stdout, stderr, ok) = run(repo, data, &["agent", "reset", "--base", "HEAD"]);
+    assert!(ok, "reset --base failed: {stderr}");
+    assert!(
+        stdout.contains("switched the review base"),
+        "stdout: {stdout}"
+    );
+
+    let after = read_store(&store).unwrap();
+    assert_eq!(after["target"]["base"], "HEAD", "target base switched");
+    assert!(
+        after["annotations"].as_array().unwrap().is_empty(),
+        "annotations cleared"
+    );
+    assert_ne!(
+        after["log_seed"].as_str().unwrap(),
+        seed_before,
+        "reset rotated the log seed"
+    );
+}
+
+#[test]
+fn reset_pr_records_a_pull_request_target() {
+    let repo = repo_with_changes();
+    let data = tempfile::tempdir().unwrap();
+    let (repo, data) = (repo.path(), data.path());
+
+    // Seed a comment so a store exists on the inferred local target.
+    run(
+        repo,
+        data,
+        &[
+            "agent", "comment", "add", "--file", "a_app.rs", "--line", "1", "--body", "x",
+        ],
+    );
+    let store = find_store(data).unwrap();
+    assert_eq!(read_store(&store).unwrap()["target"]["kind"], "local");
+
+    // Point the review at a PR. The head SHA is best-effort (no live PR here), but
+    // the recorded target flips to the PR so the agent and TUI both resolve its
+    // diff. The store path is unchanged, so the TUI keeps watching the same file.
+    let (stdout, stderr, ok) = run(repo, data, &["agent", "reset", "--pr", "o/r#123"]);
+    assert!(ok, "reset --pr failed: {stderr}");
+    assert!(
+        stdout.contains("switched the review to the PR"),
+        "stdout: {stdout}"
+    );
+
+    let after = read_store(&store).unwrap();
+    assert_eq!(after["target"]["kind"], "pr", "target switched to a PR");
+    assert_eq!(after["target"]["pr"], "o/r#123", "records the PR reference");
+}
+
+#[test]
+fn tui_launch_records_an_explicit_target_into_the_shared_store() {
+    // The TUI and the agent share one store per repo. Opening `mudpuppy --base
+    // <ref>` records that target, so a later agent command resolves the same diff.
+    // A clean repo makes `--base HEAD` an empty diff, so the TUI prints the
+    // no-changes notice and exits without entering the alternate screen — but the
+    // target is still written first, which is what we assert.
+    let repo = repo_clean();
+    let data = tempfile::tempdir().unwrap();
+    let (repo, data) = (repo.path(), data.path());
+
+    let (stdout, stderr, ok) = run(repo, data, &["--base", "HEAD"]);
+    assert!(ok, "tui launch failed: {stderr}");
+    assert!(
+        stdout.contains("No changes to review"),
+        "expected the no-changes notice: {stdout}"
+    );
+
+    let store = find_store(data).expect("launch recorded a store");
+    let v = read_store(&store).unwrap();
+    assert_eq!(v["target"]["kind"], "local");
+    assert_eq!(v["target"]["base"], "HEAD", "recorded the explicit base");
+}
+
+#[test]
+fn reset_rejects_base_and_pr_together() {
+    let repo = repo_with_changes();
+    let data = tempfile::tempdir().unwrap();
+    let (stdout, stderr, ok) = run(
+        repo.path(),
+        data.path(),
+        &["agent", "reset", "--base", "HEAD", "--pr", "o/r#123"],
+    );
+    assert!(!ok, "should reject combining --base and --pr: {stdout}");
+    assert!(
+        stderr.contains("cannot be used with") || stderr.contains("conflicts"),
+        "stderr should explain the conflict: {stderr}"
+    );
 }
 
 /// Spawn `mudpuppy <args>` detached, capturing stdout/stderr, so the test can

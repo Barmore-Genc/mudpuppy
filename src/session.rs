@@ -49,7 +49,7 @@ impl Session {
         let repo_root = repo_root().context("resolving the git repository root")?;
         let remote = remote_url();
         let slug = repo_slug(&repo_root, remote.as_deref());
-        let store_path = store_path(&data_dir()?, &slug, &target);
+        let store_path = store_path(&data_dir()?, &slug);
         Ok(Session {
             repo_root,
             target,
@@ -83,6 +83,14 @@ fn data_dir() -> Result<PathBuf> {
     let dirs = ProjectDirs::from("", "", "mudpuppy")
         .context("could not determine a platform data directory for the annotation store")?;
     Ok(dirs.data_dir().to_path_buf())
+}
+
+/// The fixed directory for debug logs: a `logs/` subdir of `data_dir`. The
+/// config only toggles logging on/off (`mudpuppy.debug_log = true`); the location
+/// is chosen here, not by the config, so a hostile config can't redirect log
+/// writes to an arbitrary path on disk.
+pub fn log_dir() -> Result<PathBuf> {
+    Ok(data_dir()?.join("logs"))
 }
 
 /// Derive the on-disk slug for a repo: the remote's `owner/repo` when one is
@@ -149,36 +157,14 @@ fn sanitize_path(path: &Path) -> String {
     }
 }
 
-/// The directory-name component for a target: `local`, or `pr/<sanitized>` so a
-/// PR's review lives in its own subtree distinct from local changes.
-fn target_dir(target: &Target) -> PathBuf {
-    match target {
-        Target::Local { .. } => PathBuf::from("local"),
-        Target::Pr { pr, .. } => Path::new("pr").join(sanitize_segment(pr)),
-    }
-}
-
-/// Sanitize an arbitrary string into one filesystem-safe path segment.
-fn sanitize_segment(s: &str) -> String {
-    let cleaned: String = s
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-    let trimmed = cleaned.trim_matches('-');
-    if trimmed.is_empty() {
-        "pr".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-/// Assemble the full store path from the data dir, repo slug, and target.
-fn store_path(data_dir: &Path, slug: &str, target: &Target) -> PathBuf {
-    data_dir
-        .join("mudpuppy")
-        .join(slug)
-        .join(target_dir(target))
-        .join(STORE_FILE)
+/// Assemble the full store path from the data dir and repo slug. One store per
+/// repo, independent of what's under review: the local changes, a base ref, or a
+/// PR all share it, with the active target recorded inside the store. That's what
+/// lets the agent and the user's TUI converge on the same review — whoever sets
+/// the target (the agent via `reset`, or `mudpuppy <pr>`) writes it where the
+/// other reads it.
+fn store_path(data_dir: &Path, slug: &str) -> PathBuf {
+    data_dir.join("mudpuppy").join(slug).join(STORE_FILE)
 }
 
 #[cfg(test)]
@@ -230,24 +216,13 @@ mod tests {
     }
 
     #[test]
-    fn store_path_encodes_repo_and_target() {
+    fn store_path_is_one_file_per_repo() {
         let data = Path::new("/data");
-        let local = Target::Local {
-            base: "main".to_string(),
-            head_sha: "abc".to_string(),
-        };
+        // The path keys on the repo only — the target (local/base/PR) lives inside
+        // the store, so every review of a repo shares one file.
         assert_eq!(
-            store_path(data, "o/r", &local),
-            PathBuf::from("/data/mudpuppy/o/r/local/annotations.json")
-        );
-
-        let pr = Target::Pr {
-            pr: "o/r#123".to_string(),
-            head_sha: "abc".to_string(),
-        };
-        assert_eq!(
-            store_path(data, "o/r", &pr),
-            PathBuf::from("/data/mudpuppy/o/r/pr/o-r-123/annotations.json")
+            store_path(data, "o/r"),
+            PathBuf::from("/data/mudpuppy/o/r/annotations.json")
         );
     }
 }

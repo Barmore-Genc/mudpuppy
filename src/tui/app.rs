@@ -920,8 +920,16 @@ impl App {
     /// errors so a transient read race never disturbs browsing; a no-op without a
     /// store. Triggered by a store-watch tick in `run_loop`.
     pub(crate) fn reload(&mut self) {
-        let Some(path) = &self.store_path else { return };
-        if let Ok(Some(state)) = store::load(path) {
+        let Some(path) = self.store_path.clone() else {
+            return;
+        };
+        if let Ok(Some(state)) = store::load(&path) {
+            // A changed review target (e.g. `agent reset --base` switched the base
+            // ref) means the on-screen diff is stale: re-fetch it and rebuild the
+            // file list before adopting the new annotations.
+            if state.target != self.target {
+                self.adopt_target(state.target);
+            }
             self.annotations = state.annotations;
             self.turn = state.turn;
         }
@@ -929,6 +937,55 @@ impl App {
         self.merge_synthetic_files();
         // Pick up another process's comment writes in the inline threads too.
         self.rebuild_view();
+    }
+
+    /// Switch the viewer onto a new review target found during [`App::reload`].
+    /// Re-fetches the diff, rebuilds the canonical file list, drops the per-target
+    /// blob/anchor caches, and invalidates the view cache so the new base renders.
+    ///
+    /// Best-effort and invariant-preserving: a fetch failure or an empty new diff
+    /// leaves the current view in place (the file list must stay non-empty — many
+    /// verbs index `files[selected]`), updating nothing. The target field only
+    /// moves once a usable diff is in hand, so the diff, blobs, and target never
+    /// disagree.
+    fn adopt_target(&mut self, target: Target) {
+        let raw = match crate::source::diff_for_target(&target) {
+            Ok(raw) => raw,
+            Err(_) => return,
+        };
+        let files = crate::diff::parse_diff(&raw);
+        if files.is_empty() {
+            crate::log_warn!("reload: new base has an empty diff; keeping the current view");
+            return;
+        }
+        crate::log_debug!(
+            "reload: switching base, head={} files={}",
+            target.head_sha(),
+            files.len()
+        );
+        self.target = target;
+        let plans = vec![ViewPlan::default(); files.len()];
+        self.all_files = files.clone();
+        self.all_plans = plans.clone();
+        self.files = files;
+        self.plans = plans;
+        // Blob and anchor caches are keyed by path but their contents depend on
+        // the base, so they must be dropped when the base changes.
+        self.blob_cache.clear();
+        self.anchor_cache = crate::anchor::PreparedCache::new();
+        // Picker-added paths referenced the old diff's universe; drop them so the
+        // file tree reflects the new base.
+        self.picker_added.clear();
+        self.file_universe = None;
+        // Force a fresh structure/highlight build for the new diff.
+        self.view_key = None;
+        // The cursor/scroll/selection may point past the new file set.
+        self.selected = self.selected.min(self.files.len() - 1);
+        self.cursor = 0;
+        self.scroll = 0;
+        self.h_scroll = 0;
+        self.tree_scroll = 0;
+        self.selection_anchor = None;
     }
 
     /// Release the turn back to the agent (PLAN.md §6): bump `seq`, take

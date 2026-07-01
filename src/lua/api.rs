@@ -29,7 +29,7 @@ use mlua::{Function, Lua, Result, Scope, Table, Value};
 use super::keys::{KeyChord, KeySeq, Mode};
 use super::views;
 use super::{
-    AnchorWindows, Bindings, Commands, EventKind, Events, FileFilters, Leader, Prompts,
+    AnchorWindows, Bindings, Commands, DebugLog, EventKind, Events, FileFilters, Leader, Prompts,
     UpdateChecks,
 };
 use crate::tui::App;
@@ -48,6 +48,7 @@ pub fn build_table(
     file_filters: FileFilters,
     update_checks: UpdateChecks,
     anchor_windows: AnchorWindows,
+    debug_log: DebugLog,
 ) -> Result<Table> {
     let table = lua.create_table()?;
 
@@ -124,6 +125,26 @@ pub fn build_table(
     table.set("updates", build_updates_table(lua, update_checks)?)?;
     table.set("skills", build_skills_table(lua)?)?;
     table.set("anchor", build_anchor_table(lua, anchor_windows)?)?;
+
+    // Flag for debug logs. We don't let config choose the path to make sure it
+    // can't mess with arbitrary disk files.
+    let dbg = debug_log;
+    let meta = lua.create_table()?;
+    meta.set(
+        "__newindex",
+        lua.create_function(move |_, (t, key, value): (Table, String, Value)| {
+            if key == "debug_log" {
+                let on = value.as_boolean().ok_or_else(|| {
+                    mlua::Error::runtime("mudpuppy.debug_log must be set to true or false")
+                })?;
+                *dbg.borrow_mut() = on;
+                return Ok(());
+            }
+            // Anything else keeps ordinary table-assignment behaviour.
+            t.raw_set(key, value)
+        })?,
+    )?;
+    table.set_metatable(Some(meta));
 
     Ok(table)
 }

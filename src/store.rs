@@ -36,8 +36,12 @@ pub fn load(path: &Path) -> Result<Option<StateFile>> {
             return Err(e).with_context(|| format!("reading the store at {}", path.display()))
         }
     };
-    let state = serde_json::from_slice(&bytes)
+    let state: StateFile = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing the store at {} (corrupt JSON?)", path.display()))?;
+    // Salt the debug-log hashes with this session's seed (no-op when logging is
+    // off). Loading is the chokepoint both the TUI reload and the agent pass
+    // through, so a post-reset seed rotation is picked up here.
+    crate::logging::set_seed(&state.log_seed);
     Ok(Some(state))
 }
 
@@ -82,6 +86,9 @@ where
 
     let lock = LockGuard::acquire(&lock_path(path))?;
     let mut state = load(path)?.unwrap_or_else(|| StateFile::new(target.clone()));
+    // A freshly-created store (no file yet) didn't go through `load`'s seed set,
+    // so install its seed here too before `f` runs (it may log).
+    crate::logging::set_seed(&state.log_seed);
     let out = f(&mut state);
     save(path, &state)?;
     drop(lock);

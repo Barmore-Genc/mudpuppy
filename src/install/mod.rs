@@ -30,14 +30,15 @@ use crate::source;
 /// installed copies are detected as stale and the user is offered a refresh; set
 /// [`SKILL_UPDATE_MESSAGE`] to say what changed. The version is stamped into each
 /// installed `SKILL.md`'s frontmatter as `mudpuppy-skill-version: N`.
-pub const SKILL_VERSION: u32 = 2;
+pub const SKILL_VERSION: u32 = 3;
 
 /// Human-readable "what changed" line for the refresh prompt. Rewrite this each
 /// time you bump [`SKILL_VERSION`] to describe the new skill content.
 pub const SKILL_UPDATE_MESSAGE: &str =
-    "mudpuppy now prints an `annotated code:` excerpt of the surrounding source \
-     under each comment in `agent wait`/`comment list`, so you can find the lines \
-     a comment points at (tune with -A/-B/--context).";
+    "the review target is now recorded in one store shared by the agent and the \
+     TUI: `agent reset --pr <ref>` points the whole review (diff, anchoring, the \
+     user's UI) at a pull request, and `--base <ref>` at a local base. The \
+     PR-review skill now declares the PR with `reset --pr` first.";
 
 /// The frontmatter key the installed version is stamped under.
 const VERSION_KEY: &str = "mudpuppy-skill-version";

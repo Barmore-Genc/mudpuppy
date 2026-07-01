@@ -1,9 +1,17 @@
-//! File-logging facility for the TUI.
+//! File-logging facility for the TUI and the headless `agent` commands.
 //!
 //! A TUI owns stdout/stderr (the terminal), so debug output goes to a file
-//! instead, gated by the `MUDPUPPY_LOG` env var and off by default. Logging is
-//! a cheap no-op until a sink is installed, and a failed write is swallowed
-//! rather than allowed to break the app.
+//! instead, off by default. Two switches open a sink (see [`crate::cli`]): the
+//! `MUDPUPPY_LOG` env var (an explicit single file) and the `mudpuppy.debug_log`
+//! config setting (a boolean toggle; the binary picks a fixed per-role directory
+//! so the config can't name an arbitrary path). Logging is a cheap no-op until
+//! a sink is installed, and a failed write is swallowed rather than allowed to
+//! break the app.
+//!
+//! Logs must never record review content. Privacy-sensitive strings (branch
+//! names, file paths) go through [`hash`] — a salted, non-reversible short
+//! digest — so occurrences can be correlated without the value ever hitting
+//! disk. The salt is the per-session `SEED`, rotated by `agent reset`.
 //!
 //! Sink resolution has two layers so tests stay isolated under `cargo test`'s
 //! thread-parallel execution: a process-global sink installed once by the
@@ -14,9 +22,10 @@ use std::cell::RefCell;
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use jiff::Timestamp;
+use sha2::{Digest, Sha256};
 
 /// Log severity, rendered as the line's leading tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +49,44 @@ impl Level {
 
 /// Process-global sink, installed once by the binary via [`init_file`].
 static GLOBAL: OnceLock<Mutex<Box<dyn Write + Send>>> = OnceLock::new();
+
+/// Process-global hash seed for [`hash`]. Set from the store's `log_seed` once
+/// the session's state is loaded; rotated by `agent reset` so a new round's
+/// hashed labels don't correlate with the previous one's. Empty until set,
+/// which still obscures the input — it just doesn't rotate.
+static SEED: RwLock<String> = RwLock::new(String::new());
+
+/// Install the hash seed used by [`hash`]. Idempotent: callers set it from the
+/// store's `log_seed` after loading or creating the state.
+pub fn set_seed(seed: &str) {
+    if let Ok(mut s) = SEED.write() {
+        if *s != seed {
+            *s = seed.to_string();
+        }
+    }
+}
+
+/// A short, stable, non-reversible label for a privacy-sensitive string (a
+/// branch name, a file path) so logs can correlate occurrences without ever
+/// recording the value itself. The digest is salted with the per-session
+/// `SEED`, so the same input logs differently across sessions and after a
+/// reset. Returns a 12-hex-char prefix of `sha256(seed ‖ 0x1f ‖ value)`.
+pub fn hash(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    if let Ok(seed) = SEED.read() {
+        hasher.update(seed.as_bytes());
+    }
+    // A separator byte that can't appear in the seed/value boundary keeps
+    // `hash("a", "b")` distinct from `hash("ab", "")`.
+    hasher.update([0x1f]);
+    hasher.update(value.as_bytes());
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(12);
+    for byte in &digest[..6] {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
 
 thread_local! {
     /// Per-thread capture buffer. When `Some`, the current thread's log writes
@@ -178,6 +225,24 @@ mod tests {
         let logs = capture();
         crate::log_info!("x = {}", 5);
         assert!(logs.contents().contains("x = 5"));
+    }
+
+    #[test]
+    fn hash_is_stable_short_hex_and_salted() {
+        set_seed("seed-one");
+        let a = hash("refs/heads/feature");
+        // Stable for the same (seed, value).
+        assert_eq!(a, hash("refs/heads/feature"));
+        // 12 lowercase hex chars, and never the cleartext.
+        assert_eq!(a.len(), 12);
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert!(!a.contains("feature"));
+        // Different inputs differ; a new seed re-salts the same input.
+        assert_ne!(a, hash("refs/heads/other"));
+        set_seed("seed-two");
+        assert_ne!(a, hash("refs/heads/feature"));
     }
 
     #[test]

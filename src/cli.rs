@@ -122,7 +122,20 @@ pub enum AgentCommand {
     },
 
     /// Clear the current session's annotations and start a fresh round.
-    Reset,
+    ///
+    /// `--base` / `--pr` also record what's under review into the session store,
+    /// so the agent's later commands and the user's open TUI both resolve the
+    /// same diff. Omit both to keep the current target and only clear.
+    Reset {
+        /// Review the local changes against this base ref (e.g. the branch this
+        /// work forks off). Mutually exclusive with `--pr`.
+        #[arg(long, value_name = "REF", conflicts_with = "pr")]
+        base: Option<String>,
+        /// Review this pull request instead of the local changes; the diff comes
+        /// from `gh pr diff`. Takes `owner/repo#123`, a number, or a URL.
+        #[arg(long, value_name = "PR")]
+        pr: Option<String>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -267,12 +280,56 @@ fn wants_config_help(args: &[String]) -> bool {
     args.len() == 3 && args[1] == "help" && args[2] == "config"
 }
 
+/// Open this process's debug log if the user config enabled it with
+/// `mudpuppy.debug_log = true`. The location is fixed (`<data-dir>/logs/`, see
+/// `crate::session::log_dir`) rather than config-supplied, so a hostile config
+/// can't aim log writes at an arbitrary path; the file is
+/// `<data-dir>/logs/mudpuppy-<role>.log`, with `role` distinguishing the TUI from
+/// the headless agent so the two never interleave. Best-effort throughout: no
+/// config, no setting, or any failure (building the engine, resolving the data
+/// dir, creating the dir, opening the file) just leaves logging off.
+/// `MUDPUPPY_LOG` (opened in `main`) still wins as an explicit override since the
+/// global sink is install-once.
+fn init_debug_log(role: &str) {
+    let Some(config) = crate::lua::config_path() else {
+        return;
+    };
+    if !config.exists() {
+        return;
+    }
+    let Ok(engine) = crate::lua::LuaEngine::new(Some(config)) else {
+        return;
+    };
+    if !engine.debug_log() {
+        return;
+    }
+    // The config only flips logging on; we pick the (fixed) location so a config
+    // can never aim log writes at an arbitrary path. Best-effort: give up quietly
+    // if the data dir can't be resolved or the logs dir can't be made.
+    let Ok(dir) = crate::session::log_dir() else {
+        return;
+    };
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join(format!("mudpuppy-{role}.log"));
+    let _ = crate::logging::init_file(&path);
+}
+
 fn dispatch(cli: Cli) -> Result<()> {
     // `-C <DIR>`: change the working directory up front so every downstream
     // `git`/`gh` invocation (and store-path resolution) runs against that repo.
     if let Some(dir) = &cli.dir {
         std::env::set_current_dir(dir)
             .with_context(|| format!("changing directory to {}", dir.display()))?;
+    }
+    // Open this process's debug log before any work, so the diff/base resolution
+    // is captured. The TUI and the headless `agent` get separate files so their
+    // logs don't interleave; the switch is the user config, not a flag.
+    match &cli.command {
+        Some(Command::Agent { .. }) => init_debug_log("agent"),
+        None => init_debug_log("tui"),
+        _ => {}
     }
     match cli.command {
         Some(Command::Agent { command }) => crate::agent::dispatch(command),
