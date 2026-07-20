@@ -122,6 +122,33 @@ fn trailing_gap_appears_when_blob_extends_past_last_hunk() {
 }
 
 #[test]
+fn set_repo_root_drops_misses_cached_before_the_root_was_known() {
+    // `App::new` builds the opening view before a repo root exists, so its blob
+    // lookups are forced misses and get cached as `None`. If those poisoned
+    // entries survived, later expansion would keep reading the miss and reveal
+    // nothing (the PR-target "expand does nothing" bug). `set_repo_root` must
+    // clear them so the next lookup re-fetches for real.
+    let mut a = App::new(
+        parse_diff(MIDDLE_DIFF),
+        Target::Local {
+            base: "main".to_string(),
+            head_sha: "abc".to_string(),
+        },
+    );
+    let key = ("src/mid.rs".to_string(), BlobSide::Head);
+    assert_eq!(
+        a.blob_cache.get(&key),
+        Some(&None),
+        "opening build should have cached a forced miss"
+    );
+    a.set_repo_root(std::path::PathBuf::from("/nonexistent"));
+    assert!(
+        !a.blob_cache.contains_key(&key),
+        "set_repo_root must drop the pre-root miss so expansion can re-fetch"
+    );
+}
+
+#[test]
 fn expand_down_mutates_the_view_through_app() {
     let mut a = App::new(
         parse_diff(MIDDLE_DIFF),

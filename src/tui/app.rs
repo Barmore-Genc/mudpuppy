@@ -1454,9 +1454,12 @@ impl App {
     /// Record the repository root; needed before any blob lookup.
     pub(crate) fn set_repo_root(&mut self, root: PathBuf) {
         self.repo_root = Some(root);
-        // The opening view was built before a repo root existed, so its blob was
-        // a forced miss (no trailing-gap bound, no synthetic content). Invalidate
-        // the structure cache so the next rebuild re-derives it with blobs.
+        // The opening view was built before a repo root existed, so every blob
+        // lookup was a forced miss and got cached as `None`. Drop those poisoned
+        // entries (else expansion/synthetic content would keep reading the miss)
+        // and invalidate the structure cache so the next rebuild re-derives it
+        // with real blobs.
+        self.blob_cache.clear();
         self.view_key = None;
     }
 
