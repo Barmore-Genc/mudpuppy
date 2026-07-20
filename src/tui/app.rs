@@ -1079,7 +1079,22 @@ impl App {
     }
 
     pub(crate) fn max_scroll(&self) -> usize {
-        self.view.rows.len().saturating_sub(self.diff_height)
+        (self.view.rows.len() + self.composer_extra_rows()).saturating_sub(self.diff_height)
+    }
+
+    /// Extra visual rows the open inline composer's popover draws beyond the
+    /// single `Row::Composer` placeholder line it holds in the row list. Scroll
+    /// needs this slack so the box can sit fully on-screen even when its
+    /// placeholder is the last row (a comment at the very end of the file).
+    fn composer_extra_rows(&self) -> usize {
+        self.view
+            .rows
+            .iter()
+            .find_map(|r| match r {
+                Row::Composer { rows } => Some((*rows as usize).saturating_sub(1)),
+                _ => None,
+            })
+            .unwrap_or(0)
     }
 
     /// Highest valid cursor row index for the current view.
@@ -1711,17 +1726,40 @@ impl App {
         }
     }
 
-    /// Move the cursor onto the inline composer placeholder and scroll it into
-    /// view. Called when a composer opens so the inline box is visible.
+    /// Move the cursor onto the inline composer placeholder and scroll the whole
+    /// popover box into view. Called when a composer opens or its body grows, so
+    /// the reply box and what you type stay visible even when the placeholder is
+    /// near or at the bottom of the diff.
     pub(crate) fn focus_composer_row(&mut self) {
-        if let Some(idx) = self
+        let Some((idx, reserved)) = self
             .view
             .rows
             .iter()
-            .position(|r| matches!(r, Row::Composer { .. }))
-        {
-            self.set_cursor(idx as i64);
+            .enumerate()
+            .find_map(|(i, r)| match r {
+                Row::Composer { rows } => Some((i, *rows as usize)),
+                _ => None,
+            })
+        else {
+            return;
+        };
+        self.cursor = idx.min(self.last_row());
+        // The placeholder is one row in the list but the box draws `reserved`
+        // lines downward over the rows below it. Scroll so that whole span fits,
+        // preferring to keep the box top visible when it is taller than the pane.
+        // The file-level header eats into the row viewport, so discount it.
+        let height = self
+            .diff_height
+            .saturating_sub(self.hits.diff_header_rows as usize)
+            .max(1);
+        let bottom = idx + reserved.saturating_sub(1);
+        if bottom >= self.scroll + height {
+            self.scroll = bottom + 1 - height;
         }
+        if idx < self.scroll {
+            self.scroll = idx;
+        }
+        self.scroll = self.scroll.min(self.max_scroll());
     }
 
     /// Close the open composer and rebuild so its inline placeholder rows go
