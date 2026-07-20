@@ -197,6 +197,19 @@ impl App {
     /// severity/tag and `Ctrl-J` inserts a newline in either mode; otherwise the
     /// key is routed by the current [`Mode`].
     pub(crate) fn handle_composer_key(&mut self, ev: KeyEvent) -> bool {
+        let consumed = self.dispatch_composer_key(ev);
+        // An edit may have grown or shrunk the body; rebuild so the placeholder's
+        // reserved height tracks it, then scroll the box fully into view so the
+        // reply text stays visible. Skipped once the composer closed (save/cancel
+        // handle their own rebuild).
+        if consumed && self.composer.is_some() {
+            self.rebuild_view();
+            self.focus_composer_row();
+        }
+        consumed
+    }
+
+    fn dispatch_composer_key(&mut self, ev: KeyEvent) -> bool {
         let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
         let Some(mode) = self.composer.as_ref().map(|c| c.mode) else {
             return false;

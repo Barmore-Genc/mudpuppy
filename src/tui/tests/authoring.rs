@@ -704,6 +704,64 @@ fn the_reply_box_appears_below_the_thread() {
     );
 }
 
+/// The reserved-row span of the (single) open composer placeholder, if any.
+fn composer_box_span(a: &App) -> Option<(usize, usize)> {
+    a.view.rows.iter().enumerate().find_map(|(i, r)| match r {
+        Row::Composer { rows } => Some((i, i + *rows as usize - 1)),
+        _ => None,
+    })
+}
+
+#[test]
+fn opening_a_composer_at_the_file_end_scrolls_the_whole_box_into_view() {
+    let (mut a, _dir) = stored_app();
+    // A short viewport, so a box splayed off the last row would overflow it.
+    a.diff_height = 10;
+    let last_line = a
+        .view
+        .rows
+        .iter()
+        .rposition(|r| matches!(r, Row::Line(l, _) if l.new_lineno.is_some()))
+        .expect("a new-side line to comment on");
+    a.cursor = last_line;
+    leader(&mut a, "cc");
+
+    let (top, bottom) = composer_box_span(&a).expect("a composer placeholder");
+    assert!(top >= a.scroll, "the box top is on-screen");
+    assert!(
+        bottom < a.scroll + a.diff_height,
+        "the whole box (rows {top}..={bottom}) fits in the viewport [{}, {})",
+        a.scroll,
+        a.scroll + a.diff_height
+    );
+}
+
+#[test]
+fn the_composer_box_stays_in_view_as_its_body_grows() {
+    let (mut a, _dir) = stored_app();
+    a.diff_height = 14;
+    let last_line = a
+        .view
+        .rows
+        .iter()
+        .rposition(|r| matches!(r, Row::Line(l, _) if l.new_lineno.is_some()))
+        .expect("a new-side line to comment on");
+    a.cursor = last_line;
+    leader(&mut a, "cc");
+
+    // Grow the body one line at a time; the box must never spill past the bottom.
+    for _ in 0..4 {
+        a.handle_key(key(KeyCode::Enter));
+        let (top, bottom) = composer_box_span(&a).expect("the composer placeholder");
+        assert!(
+            top >= a.scroll && bottom < a.scroll + a.diff_height,
+            "the growing box (rows {top}..={bottom}) stays within [{}, {})",
+            a.scroll,
+            a.scroll + a.diff_height
+        );
+    }
+}
+
 #[test]
 fn interleave_keeps_hunk_starts_pointing_at_hunk_rows() {
     // Two annotations on the first hunk shift every later row down; `hunk_starts`
