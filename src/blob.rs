@@ -142,12 +142,16 @@ fn pr_head(pr: &str, head_sha: &str, path: &str) -> Result<Option<Vec<String>>> 
     };
 
     let endpoint = format!("repos/{owner}/{repo}/contents/{path}");
-    // Pass the ref via `-f` so it is never interpolated into the path.
+    // Pass the ref via `-f` so it is never interpolated into the path. `gh api`
+    // defaults to POST once any `-f` field is present, which the contents
+    // endpoint 404s on; `-X GET` keeps it a GET with `ref` as a query param.
     let ref_arg = format!("ref={reference}");
     match run_optional(
         "gh",
         &[
             "api",
+            "-X",
+            "GET",
             &endpoint,
             "-f",
             &ref_arg,
