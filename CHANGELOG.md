@@ -8,6 +8,17 @@ The release pipeline (cargo-dist) extracts the section matching the tagged
 version and uses it as the GitHub Release notes, so every release needs a
 matching heading here.
 
+## 0.5.1 - 2026-07-20
+
+### Fixed
+
+- Expanding context on a PR review now works: the file content at the PR head
+  is fetched correctly, so revealing surrounding lines and rendering
+  added/comment-only files no longer silently show nothing (#73).
+- The inline comment/reply composer scrolls fully into view when opened at the
+  bottom of the diff or above the annotation, and stays visible as the reply
+  grows while typing, instead of spilling off-screen (#74).
+
 ## 0.5.0 - 2026-06-30
 
 ### Added
