@@ -2,10 +2,11 @@
 //!
 //! [`Composer`] is the user's authoring surface: a small text buffer plus a
 //! severity and an optional tag, bound to a [`ComposerTarget`] captured when it
-//! was opened (a line, a region, the whole file, a reply, or an edit). Key input
-//! is captured in Rust before it reaches Lua — the same precedence the picker
-//! uses (see [`App::handle_composer_key`]). On save it calls the matching
-//! `annotate` method; on cancel it just closes.
+//! was opened (a line, a region, the whole file, a reply, or an edit). While it
+//! is open the keymap switches to the `composer-insert` / `composer-normal` modes
+//! (both falling back to `composer`), so every command key is rebindable from the
+//! config; keys no binding claims fall through to `composer_fallback_key`. On save
+//! it calls the matching `annotate` method; on cancel it just closes.
 //!
 //! Editing is vim-like and modal. The composer opens in [`Mode::Insert`] (cursor
 //! at the end of any prefilled body) so typing works immediately; `Esc` drops to
@@ -14,8 +15,9 @@
 //! `gg`/`G`, `f`/`F`/`t`/`T` and `;`/`,`, with count prefixes), operators
 //! (`d`/`c`/`y` over any motion, plus `dd`/`cc`/`yy` and `D`/`C`/`Y`/`S`),
 //! single-key edits (`x`/`X`/`s`/`r`/`~`/`J`/`p`/`P`) and undo/redo (`u`,
-//! `Ctrl-R`). The vim engine itself lives in the `vim` submodule. `Ctrl-S`
-//! (save), `Ctrl-E`/`Ctrl-T` (severity/tag) and `Ctrl-J` (newline) work in
+//! `Ctrl-R`). The vim engine itself lives in the `vim` submodule, and owns every
+//! key the keymap leaves unbound. `Ctrl-S` (save), `Ctrl-E`/`Ctrl-T`
+//! (severity/tag) and `Ctrl-J` (newline) are bound in `composer`, so they work in
 //! either mode.
 //!
 //! The composer-opening verbs (`add_comment`, `comment_file`, `reply`,
@@ -189,89 +191,107 @@ impl Composer {
 }
 
 impl App {
-    /// Feed one key event to the open composer. Returns `true` if it was consumed
-    /// (the composer was open); `false` lets the caller route the key elsewhere.
-    ///
-    /// Mirrors `handle_picker_key`: captured in Rust before Lua. Editing is modal
-    /// (see the module docs): `Ctrl-S` saves, `Ctrl-E`/`Ctrl-T` cycle
-    /// severity/tag and `Ctrl-J` inserts a newline in either mode; otherwise the
-    /// key is routed by the current [`Mode`].
-    pub(crate) fn handle_composer_key(&mut self, ev: KeyEvent) -> bool {
-        let consumed = self.dispatch_composer_key(ev);
-        // An edit may have grown or shrunk the body; rebuild so the placeholder's
-        // reserved height tracks it, then scroll the box fully into view so the
-        // reply text stays visible. Skipped once the composer closed (save/cancel
-        // handle their own rebuild).
-        if consumed && self.composer.is_some() {
+    /// An edit may have grown or shrunk the body, so after any key that reached
+    /// the composer, rebuild the view (the inline placeholder reserves height for
+    /// the box) and scroll the box fully into view. A no-op once the composer has
+    /// closed — save and cancel rebuild on their own.
+    pub(crate) fn refresh_composer_view(&mut self) {
+        if self.composer.is_some() {
             self.rebuild_view();
             self.focus_composer_row();
         }
-        consumed
     }
 
-    fn dispatch_composer_key(&mut self, ev: KeyEvent) -> bool {
+    /// The Rust fallback for a composer key no binding claimed: in insert mode a
+    /// printable character is typed into the buffer; in normal mode the key goes
+    /// to the vim engine (motions, operators, `f`/`r`/`g` arguments, counts).
+    pub(super) fn composer_fallback_key(&mut self, ev: KeyEvent) -> bool {
         let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
-        let Some(mode) = self.composer.as_ref().map(|c| c.mode) else {
+        let Some(composer) = self.composer.as_mut() else {
             return false;
         };
-
-        // Chords that work the same in either mode.
-        match ev.code {
-            KeyCode::Char('s') if ctrl => {
-                self.save_composer();
-                return true;
-            }
-            KeyCode::Char('e') if ctrl => {
-                self.composer.as_mut().unwrap().cycle_severity();
-                return true;
-            }
-            KeyCode::Char('t') if ctrl => {
-                self.composer.as_mut().unwrap().cycle_tag();
-                return true;
-            }
-            KeyCode::Char('j') if ctrl => {
-                self.composer.as_mut().unwrap().insert_newline();
-                return true;
-            }
-            KeyCode::Char('r') if ctrl && mode == Mode::Normal => {
-                self.composer.as_mut().unwrap().redo();
-                return true;
-            }
-            _ => {}
-        }
-
-        match mode {
-            Mode::Insert => {
-                let c = self.composer.as_mut().unwrap();
-                match ev.code {
-                    KeyCode::Esc => c.leave_insert(),
-                    KeyCode::Enter => c.insert_newline(),
-                    KeyCode::Backspace => c.backspace(),
-                    KeyCode::Char(ch) if !ctrl => c.insert_char(ch),
-                    _ => {}
-                }
-            }
-            // `Enter` (save) and `Esc` (cancel) need `App`; the rest is
-            // buffer-local. While a multi-key command is mid-flight (an operator,
-            // a `f`/`r`/`g` awaiting its argument, or a count), `Enter`/`Esc`
-            // belong to that command, not to save/cancel.
-            Mode::Normal => {
-                let pending = self.composer.as_ref().unwrap().has_pending();
-                match ev.code {
-                    KeyCode::Enter if !pending => self.save_composer(),
-                    KeyCode::Esc if !pending => self.close_composer(),
-                    KeyCode::Esc => self.composer.as_mut().unwrap().clear_pending(),
-                    _ => self.composer.as_mut().unwrap().normal_key(ev),
-                }
-            }
+        match composer.mode {
+            Mode::Insert => match ev.code {
+                KeyCode::Char(ch) if !ctrl => composer.insert_char(ch),
+                _ => return false,
+            },
+            Mode::Normal => composer.normal_key(ev),
         }
         true
+    }
+
+    /// The keymap mode for the open composer, or `None` when it is closed. Drives
+    /// `lua::active_mode`, so a binding can be scoped to insert or normal mode
+    /// (or to `composer`, the fallback shared by both).
+    pub(crate) fn composer_mode(&self) -> Option<crate::lua::keys::Mode> {
+        use crate::lua::keys::Mode as KeyMode;
+        Some(match self.composer.as_ref()?.mode {
+            Mode::Insert => KeyMode::ComposerInsert,
+            Mode::Normal => KeyMode::ComposerNormal,
+        })
+    }
+
+    /// Whether the composer is mid-way through a multi-key normal-mode command
+    /// (an operator, an `f`/`r`/`g` awaiting its argument, or a count). Exposed to
+    /// Lua so the `enter`/`esc` bindings can leave those keys to the in-flight
+    /// command instead of saving/cancelling.
+    pub(crate) fn composer_pending(&self) -> bool {
+        self.composer.as_ref().is_some_and(|c| c.has_pending())
+    }
+
+    /// Abandon an in-flight normal-mode command, keeping the composer open.
+    pub(crate) fn composer_clear_pending(&mut self) {
+        if let Some(c) = self.composer.as_mut() {
+            c.clear_pending();
+        }
+    }
+
+    /// Leave insert mode for normal mode.
+    pub(crate) fn composer_leave_insert(&mut self) {
+        if let Some(c) = self.composer.as_mut() {
+            c.leave_insert();
+        }
+    }
+
+    /// Insert a line break at the cursor (works in either mode).
+    pub(crate) fn composer_newline(&mut self) {
+        if let Some(c) = self.composer.as_mut() {
+            c.insert_newline();
+        }
+    }
+
+    /// Delete the character before the cursor.
+    pub(crate) fn composer_backspace(&mut self) {
+        if let Some(c) = self.composer.as_mut() {
+            c.backspace();
+        }
+    }
+
+    /// Step the composer's severity to the next value.
+    pub(crate) fn composer_cycle_severity(&mut self) {
+        if let Some(c) = self.composer.as_mut() {
+            c.cycle_severity();
+        }
+    }
+
+    /// Step the composer's tag to the next value.
+    pub(crate) fn composer_cycle_tag(&mut self) {
+        if let Some(c) = self.composer.as_mut() {
+            c.cycle_tag();
+        }
+    }
+
+    /// Redo the last undone edit.
+    pub(crate) fn composer_redo(&mut self) {
+        if let Some(c) = self.composer.as_mut() {
+            c.redo();
+        }
     }
 
     /// Persist the open composer through the matching `annotate` method, then
     /// close it. A blank body is treated as a cancel so an accidental open leaves
     /// nothing behind.
-    fn save_composer(&mut self) {
+    pub(crate) fn save_composer(&mut self) {
         let Some(composer) = self.composer.take() else {
             return;
         };

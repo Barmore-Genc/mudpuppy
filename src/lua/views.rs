@@ -12,6 +12,7 @@ use mlua::{IntoLua, Lua, Result, Table, Value};
 
 use crate::diff::{DiffLine, FileDiff, FileStatus, LineKind};
 use crate::domain::{AnchorScope, Annotation, Author, Severity, Side, Status, Tag, Turn};
+use crate::lua::keys::Mode;
 use crate::tui::{App, Focus, Row, Sidebar};
 
 /// Read one field of the `state()` proxy from the live [`App`] — the `__index`
@@ -19,9 +20,9 @@ use crate::tui::{App, Focus, Row, Sidebar};
 /// matching `select_file`), `scroll`, `h_scroll` (the diff's horizontal offset;
 /// `0` at the left edge), `cursor`, `count` (the pending count, or
 /// `nil`), `show_help`, `sidebar` (`"files"`/`"annotations"`), `selection`
-/// (`{lo, hi}` or `nil`), `turn`,
-/// and `viewport`. The nested `selection`/`turn`/`viewport` are plain read-only
-/// tables. An unknown field is `nil`.
+/// (`{lo, hi}` or `nil`), `turn`, `viewport`, and the overlay sub-tables `help`,
+/// `composer`, and `prompt` (each `nil` unless that overlay is open). The nested
+/// tables are plain read-only tables. An unknown field is `nil`.
 pub fn state_field(lua: &Lua, app: &App, key: &str) -> Result<Value> {
     match key {
         "focus" => focus_name(app.focus).into_lua(lua),
@@ -47,6 +48,44 @@ pub fn state_field(lua: &Lua, app: &App, key: &str) -> Result<Value> {
             None => Ok(Value::Nil),
         },
         "turn" => Value::Table(turn_table(lua, &app.turn)?).into_lua(lua),
+        // The overlay sub-tables are `nil` unless that overlay is open, so a
+        // binding in an overlay mode can branch on what it is looking at.
+        "help" => {
+            if !app.show_help {
+                return Ok(Value::Nil);
+            }
+            let help = lua.create_table()?;
+            help.set("scroll", app.help_scroll)?;
+            help.set("height", app.help_height)?;
+            help.set("max_scroll", app.max_help_scroll())?;
+            Value::Table(help).into_lua(lua)
+        }
+        "composer" => match app.composer_mode() {
+            Some(mode) => {
+                let c = lua.create_table()?;
+                c.set(
+                    "mode",
+                    match mode {
+                        Mode::ComposerNormal => "normal",
+                        _ => "insert",
+                    },
+                )?;
+                c.set("pending", app.composer_pending())?;
+                Value::Table(c).into_lua(lua)
+            }
+            None => Ok(Value::Nil),
+        },
+        "prompt" => match app.prompt_selected() {
+            Some(selected) => {
+                let p = lua.create_table()?;
+                // 1-based, like `selected`/`select_file` elsewhere in this API.
+                p.set("selected", selected + 1)?;
+                p.set("options", app.prompt_len())?;
+                p.set("has_details", app.prompt_has_details())?;
+                Value::Table(p).into_lua(lua)
+            }
+            None => Ok(Value::Nil),
+        },
         "viewport" => {
             let viewport = lua.create_table()?;
             viewport.set("height", app.diff_height)?;

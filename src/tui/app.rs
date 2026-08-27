@@ -613,6 +613,11 @@ pub(crate) struct App {
     /// already returns the name from `handle_palette_key`; mouse stashes here
     /// because `handle_mouse_event` returns only a bool.
     pending_command: Option<String>,
+    /// A prompt option index chosen from Lua (`mudpuppy.prompt_confirm()`), picked
+    /// up by `run_loop` to run that option's callback on the next turn. The
+    /// callback lives in the engine, which is already borrowed while the binding
+    /// runs, so it can't be invoked from inside the binding itself.
+    pending_prompt: Option<usize>,
     /// Diff inner width the inline comment threads were last wrapped to. The
     /// renderer rebuilds the view when the pane resizes so wrapped bodies stay
     /// pre-wrapped to single-line rows (the "1 row = 1 visual line" invariant).
@@ -682,6 +687,7 @@ impl App {
             last_press: None,
             last_click: None,
             pending_command: None,
+            pending_prompt: None,
             comment_width: 0,
         };
         // Build the opening view. No blob yet (no repo root until the store is
@@ -690,10 +696,64 @@ impl App {
         app
     }
 
+    /// The Rust fallback for a key press the keymap did not claim, routed to
+    /// whichever modal overlay is open. This is what keeps the overlay modes small:
+    /// they bind the *commands* (save, confirm, cancel, move), and everything else
+    /// lands here — typing into a query or the composer buffer, the composer's vim
+    /// engine, and the "any other key cancels" rule of the delete confirmation.
+    /// Returns `true` if the key was consumed.
+    pub(crate) fn overlay_fallback_key(&mut self, ev: KeyEvent) -> bool {
+        if self.show_help || self.prompt.is_some() {
+            return false;
+        }
+        if self.composer.is_some() {
+            return self.composer_fallback_key(ev);
+        }
+        if self.pending_delete.is_some() {
+            self.cancel_pending_delete();
+            return true;
+        }
+        let KeyCode::Char(c) = ev.code else {
+            return false;
+        };
+        if ev.modifiers.contains(KeyModifiers::CONTROL) || ev.modifiers.contains(KeyModifiers::ALT)
+        {
+            return false;
+        }
+        if self.picker.is_some() {
+            self.picker_type(&c.to_string());
+            true
+        } else if self.palette.is_some() {
+            self.palette_type(&c.to_string());
+            true
+        } else {
+            false
+        }
+    }
+
     /// Consume a palette command name set by a mouse click, if any. The
     /// equivalent of what `handle_palette_key` returns on Enter.
     pub(crate) fn take_pending_command(&mut self) -> Option<String> {
         self.pending_command.take()
+    }
+
+    /// Consume a prompt choice made from Lua, if any. The mirror of
+    /// `take_pending_command` for `mudpuppy.prompt_confirm()` / `prompt_choose(i)`.
+    pub(crate) fn take_pending_prompt(&mut self) -> Option<usize> {
+        self.pending_prompt.take()
+    }
+
+    /// Record a prompt choice for `run_loop` to run through the engine, and close
+    /// the prompt. Out-of-range indices are ignored.
+    pub(crate) fn choose_prompt(&mut self, index: usize) {
+        let Some(prompt) = self.prompt.as_ref() else {
+            return;
+        };
+        if index >= prompt.options.len() {
+            return;
+        }
+        self.prompt = None;
+        self.pending_prompt = Some(index);
     }
 
     /// The pending count prefix, defaulting to 1 — the multiplier count-aware
@@ -1259,40 +1319,14 @@ impl App {
         self.help_scroll = next.clamp(0, self.max_help_scroll() as isize) as usize;
     }
 
-    /// Feed one key event to the open help overlay. Returns `true` if the
-    /// overlay was open (i.e. the key has been consumed) — mirrors the modal
-    /// precedence the composer/picker/palette use. Closes on `?`/`q`/`Esc`;
-    /// `j`/`k`/`Up`/`Down`/`PageUp`/`PageDown`/`g`/`G` scroll.
-    pub(crate) fn handle_help_key(&mut self, ev: KeyEvent) -> bool {
-        if !self.show_help {
-            return false;
-        }
-        let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
-        match ev.code {
-            KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc => self.toggle_help(),
-            KeyCode::Char('j') | KeyCode::Down => self.scroll_help(1),
-            KeyCode::Char('k') | KeyCode::Up => self.scroll_help(-1),
-            KeyCode::PageDown | KeyCode::Char(' ') => {
-                let h = self.help_height as isize;
-                self.scroll_help(h);
-            }
-            KeyCode::PageUp => {
-                let h = self.help_height as isize;
-                self.scroll_help(-h);
-            }
-            KeyCode::Char('d') if ctrl => {
-                let h = (self.help_height / 2) as isize;
-                self.scroll_help(h);
-            }
-            KeyCode::Char('u') if ctrl => {
-                let h = (self.help_height / 2) as isize;
-                self.scroll_help(-h);
-            }
-            KeyCode::Char('g') => self.help_scroll = 0,
-            KeyCode::Char('G') => self.help_scroll = self.max_help_scroll(),
-            _ => {}
-        }
-        true
+    /// Scroll the help overlay to absolute row `n`, clamped to the content.
+    /// Negative asks for the bottom, so `help_set_scroll(-1)` is "end".
+    pub(crate) fn set_help_scroll(&mut self, n: i64) {
+        self.help_scroll = if n < 0 {
+            self.max_help_scroll()
+        } else {
+            (n as usize).min(self.max_help_scroll())
+        };
     }
 
     /// Flip the left sidebar between the file tree and the all-annotations list.
@@ -1492,33 +1526,40 @@ impl App {
         self.picker = Some(Picker::new(all));
     }
 
-    /// Feed one key event to the open picker. Returns `true` if it was consumed
-    /// (the picker was open); `false` lets the caller route the key elsewhere.
-    pub(crate) fn handle_picker_key(&mut self, ev: KeyEvent) -> bool {
-        let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
+    /// Close the picker without adding anything.
+    pub(crate) fn close_picker(&mut self) {
+        self.picker = None;
+    }
+
+    /// Move the picker's highlight by `delta` rows.
+    pub(crate) fn picker_move(&mut self, delta: i64) {
         let Some(picker) = self.picker.as_mut() else {
-            return false;
+            return;
         };
-        match ev.code {
-            KeyCode::Esc => self.picker = None,
-            KeyCode::Enter => self.confirm_picker(),
-            KeyCode::Backspace => {
-                picker.query.pop();
-                picker.refilter();
+        for _ in 0..delta.unsigned_abs() {
+            if delta > 0 {
+                picker.move_down();
+            } else {
+                picker.move_up();
             }
-            KeyCode::Down => picker.move_down(),
-            KeyCode::Up => picker.move_up(),
-            KeyCode::Char('n') if ctrl => picker.move_down(),
-            // Ctrl-p moves the selection while open; it only *opens* the picker
-            // when closed (via the Lua binding), so here it scrolls up.
-            KeyCode::Char('p') if ctrl => picker.move_up(),
-            KeyCode::Char(c) if !ctrl => {
-                picker.query.push(c);
-                picker.refilter();
-            }
-            _ => {}
         }
-        true
+    }
+
+    /// Drop the last character of the picker query and re-filter.
+    pub(crate) fn picker_backspace(&mut self) {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.query.pop();
+            picker.refilter();
+        }
+    }
+
+    /// Append `text` to the picker query and re-filter. The fallback for a
+    /// printable key no binding claimed.
+    pub(crate) fn picker_type(&mut self, text: &str) {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.query.push_str(text);
+            picker.refilter();
+        }
     }
 
     /// Open the `:command` palette over `names` (the registered command names,
@@ -1527,42 +1568,62 @@ impl App {
         self.palette = Some(CommandPalette::new(names));
     }
 
-    /// Feed one key event to the open palette. Returns `Some(name)` when the user
-    /// chose a command (Enter), which the caller runs through the engine; `None`
-    /// otherwise (the palette stayed open, autocompleted, or closed). A no-op
-    /// returning `None` when the palette isn't open.
-    pub(crate) fn handle_palette_key(&mut self, ev: KeyEvent) -> Option<String> {
-        let ctrl = ev.modifiers.contains(KeyModifiers::CONTROL);
-        let palette = self.palette.as_mut()?;
-        match ev.code {
-            KeyCode::Esc => self.palette = None,
-            KeyCode::Enter => {
-                let name = palette.current_name().map(str::to_owned);
-                self.palette = None;
-                return name;
+    /// Close the palette without running anything.
+    pub(crate) fn close_palette(&mut self) {
+        self.palette = None;
+    }
+
+    /// Close the palette and stage its highlighted command for `run_loop` to run
+    /// through the engine (the same route a palette mouse click takes).
+    pub(crate) fn confirm_palette(&mut self) {
+        let Some(palette) = self.palette.as_ref() else {
+            return;
+        };
+        let name = palette.current_name().map(str::to_owned);
+        self.palette = None;
+        self.pending_command = name;
+    }
+
+    /// Move the palette's highlight by `delta` rows.
+    pub(crate) fn palette_move(&mut self, delta: i64) {
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        for _ in 0..delta.unsigned_abs() {
+            if delta > 0 {
+                palette.move_down();
+            } else {
+                palette.move_up();
             }
-            // Tab autocompletes the query to the top match.
-            KeyCode::Tab => {
-                if let Some(top) = palette.top_name() {
-                    palette.query = top.to_string();
-                    palette.refilter();
-                }
-            }
-            KeyCode::Backspace => {
-                palette.query.pop();
-                palette.refilter();
-            }
-            KeyCode::Down => palette.move_down(),
-            KeyCode::Up => palette.move_up(),
-            KeyCode::Char('n') if ctrl => palette.move_down(),
-            KeyCode::Char('p') if ctrl => palette.move_up(),
-            KeyCode::Char(c) if !ctrl => {
-                palette.query.push(c);
-                palette.refilter();
-            }
-            _ => {}
         }
-        None
+    }
+
+    /// Autocomplete the palette query to its top match.
+    pub(crate) fn palette_complete(&mut self) {
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        if let Some(top) = palette.top_name() {
+            palette.query = top.to_string();
+            palette.refilter();
+        }
+    }
+
+    /// Drop the last character of the palette query and re-filter.
+    pub(crate) fn palette_backspace(&mut self) {
+        if let Some(palette) = self.palette.as_mut() {
+            palette.query.pop();
+            palette.refilter();
+        }
+    }
+
+    /// Append `text` to the palette query and re-filter. The fallback for a
+    /// printable key no binding claimed.
+    pub(crate) fn palette_type(&mut self, text: &str) {
+        if let Some(palette) = self.palette.as_mut() {
+            palette.query.push_str(text);
+            palette.refilter();
+        }
     }
 
     /// Pull the highlighted path into the file list (selecting it if already
@@ -2097,11 +2158,10 @@ impl App {
         (idx < p.filtered.len()).then_some(idx)
     }
 
-    /// Drive a composer save from a mouse click — synthesises the same `Ctrl-S`
-    /// path as the keyboard so empty-body handling and target routing match.
+    /// Drive a composer save from a mouse click — the same verb the keyboard's
+    /// save binding calls, so empty-body handling and target routing match.
     fn composer_save_via_click(&mut self) {
-        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let _ = self.handle_composer_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        self.save_composer();
     }
 
     /// Left-button drag: only meaningful in the diff body, where we promote a
@@ -2309,38 +2369,27 @@ impl App {
     /// what lets the layer-1 snapshot/behaviour tests drive the real keymap (now
     /// living in `core.luau`) rather than a hand-coded match. A fresh engine per
     /// call keeps each press independent and is cheap enough for these tests.
+    ///
+    /// The one thing it can't reproduce is a `mudpuppy.prompt` callback (see
+    /// below); everything else, overlays included, takes the same path as the
+    /// real event loop.
     pub(crate) fn handle_key(&mut self, ev: KeyEvent) -> bool {
-        // Mirror `run_loop`: the help overlay, composer, a pending
-        // delete-confirm, and the picker each capture keys before they reach
-        // Lua.
-        if self.handle_help_key(ev) {
-            return self.should_quit;
-        }
-        if self.composer.is_some() || self.pending_delete.is_some() {
-            let _ = self.handle_composer_key(ev) || self.handle_pending_delete_key(ev);
-            return self.should_quit;
-        }
-        // A modal prompt captures keys here too. The chosen option's callback
-        // lives in the engine that opened the prompt; this per-call throwaway
-        // engine can't run it, so layer-1 tests exercise prompt navigation/
-        // dismissal only — the callback path is covered by the lua engine tests.
-        if self.prompt.is_some() {
-            let _ = self.handle_prompt_key(ev);
-            return self.should_quit;
-        }
-        if self.handle_picker_key(ev) {
-            return self.should_quit;
-        }
         let engine = LuaEngine::new(None).expect("core.luau loads");
-        if self.palette.is_some() {
-            if let Some(name) = self.handle_palette_key(ev) {
-                engine.run_command(self, &name).expect("run_command");
-            }
-            return self.should_quit;
-        }
         self.notice = None;
         if let Some(chord) = KeyChord::from_event(&ev) {
-            engine.dispatch(self, chord).expect("dispatch");
+            if !engine.dispatch(self, chord).expect("dispatch") {
+                self.overlay_fallback_key(ev);
+            }
+            self.refresh_composer_view();
+            if let Some(name) = self.take_pending_command() {
+                engine.run_command(self, &name).expect("run_command");
+            }
+            // A prompt option's callback lives in the engine that *opened* the
+            // prompt; this per-call throwaway engine has none, so layer-1 tests
+            // cover prompt navigation and dismissal only (the callback path is
+            // covered by the lua engine tests). Drain the choice so it can't leak
+            // into the next press.
+            let _ = self.take_pending_prompt();
         }
         self.should_quit
     }

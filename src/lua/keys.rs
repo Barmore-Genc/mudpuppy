@@ -210,15 +210,39 @@ impl fmt::Display for KeyChord {
 }
 
 /// Which keymap is consulted for a key press. The active mode is derived from UI
-/// state ([`Help`](Mode::Help) when the overlay is open, else the focused pane);
-/// a miss in the active mode falls back to [`Global`](Mode::Global) — except in
-/// `Help`, which is exclusive (no fallback) so the overlay swallows other keys.
+/// state: whichever modal overlay is open, else the focused pane.
+///
+/// The two *pane* modes fall back to [`Global`](Mode::Global) on a miss. The
+/// overlay modes are exclusive — they never fall back to `Global`, so an overlay
+/// can't be quit or scrolled by a stray pane binding — except the two composer
+/// sub-modes, which fall back to [`Composer`](Mode::Composer) for the chords
+/// that mean the same thing in both.
+///
+/// A key that no binding in the active chain claims is handed back to the
+/// overlay's Rust fallback (typing into the picker query or the composer buffer,
+/// the composer's vim engine, cancelling a delete confirmation). That is why the
+/// overlay modes only need to bind the *commands*, not every printable key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
     Global,
     Tree,
     Diff,
     Help,
+    /// The fuzzy "add any file" picker overlay.
+    Picker,
+    /// The `:command` palette overlay.
+    Palette,
+    /// A modal question opened by `mudpuppy.prompt`.
+    Prompt,
+    /// The delete-confirmation armed by `mudpuppy.delete_comment()`.
+    DeleteConfirm,
+    /// Composer chords shared by both of its editing modes (save, cycle
+    /// severity/tag, insert a newline).
+    Composer,
+    /// The composer while typing.
+    ComposerInsert,
+    /// The composer's vim-like normal mode.
+    ComposerNormal,
 }
 
 impl Mode {
@@ -229,8 +253,39 @@ impl Mode {
             "tree" => Mode::Tree,
             "diff" => Mode::Diff,
             "help" => Mode::Help,
+            "picker" => Mode::Picker,
+            "palette" => Mode::Palette,
+            "prompt" => Mode::Prompt,
+            "delete-confirm" => Mode::DeleteConfirm,
+            "composer" => Mode::Composer,
+            "composer-insert" => Mode::ComposerInsert,
+            "composer-normal" => Mode::ComposerNormal,
             _ => return None,
         })
+    }
+
+    /// The modes a lookup walks, in order, when this one is active.
+    pub(crate) fn chain(self) -> &'static [Mode] {
+        match self {
+            Mode::Global => &[Mode::Global],
+            Mode::Tree => &[Mode::Tree, Mode::Global],
+            Mode::Diff => &[Mode::Diff, Mode::Global],
+            Mode::Help => &[Mode::Help],
+            Mode::Picker => &[Mode::Picker],
+            Mode::Palette => &[Mode::Palette],
+            Mode::Prompt => &[Mode::Prompt],
+            Mode::DeleteConfirm => &[Mode::DeleteConfirm],
+            Mode::Composer => &[Mode::Composer],
+            Mode::ComposerInsert => &[Mode::ComposerInsert, Mode::Composer],
+            Mode::ComposerNormal => &[Mode::ComposerNormal, Mode::Composer],
+        }
+    }
+
+    /// Whether a leading digit is an ambient count in this mode. Only the pane
+    /// modes take counts; in an overlay a digit is text to type or an option to
+    /// pick, so it must reach the binding (or the fallback) unchanged.
+    pub(crate) fn takes_count(self) -> bool {
+        matches!(self, Mode::Global | Mode::Tree | Mode::Diff)
     }
 }
 

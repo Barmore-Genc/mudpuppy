@@ -288,70 +288,32 @@ fn run_loop(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                         if is_ctrl_c(&key) {
                             return Ok(());
                         }
-                        // The composer and a pending delete-confirm capture keys
-                        // before Lua, the same precedence as the picker overlay
-                        // and the hardwired Ctrl-C above. A capture can still
-                        // create/remove annotations (composer save, delete), so
-                        // diff snapshots around it and fire the change events.
-                        // The help overlay captures keys before Lua so it can
-                        // be scrolled / dismissed without touching the keymap.
-                        // Same precedence as the composer and modal overlays.
-                        if app.handle_help_key(key) {
-                            continue;
-                        }
-                        if app.composer.is_some() || app.pending_delete.is_some() {
-                            let before = Snapshot::of(app);
-                            app.notice = None;
-                            let _ = app.handle_composer_key(key)
-                                || app.handle_pending_delete_key(key);
-                            let after = Snapshot::of(app);
-                            fire_changes(&engine, app, &before, &after)?;
-                            continue;
-                        }
-                        // A modal prompt (opened by `mudpuppy.prompt`) captures
-                        // keys ahead of the keymap, like the picker and palette.
-                        // Choosing an option runs its Lua callback through the
-                        // engine's scoped machinery, which can release the turn,
-                        // open another prompt, or quit — so snapshot around it.
-                        if app.prompt.is_some() {
-                            let before = Snapshot::of(app);
-                            app.notice = None;
-                            if let Some(index) = app.handle_prompt_key(key) {
-                                engine.run_prompt(app, index)?;
-                                if app.should_quit {
-                                    return Ok(());
-                                }
-                            }
-                            let after = Snapshot::of(app);
-                            fire_changes(&engine, app, &before, &after)?;
-                            continue;
-                        }
-                        if app.handle_picker_key(key) {
-                            continue;
-                        }
-                        // The command palette captures keys before the engine,
-                        // like the picker. Enter chooses a command, which runs
-                        // through the same scoped machinery as a key binding, so
-                        // diff snapshots around it and fire any change events.
-                        if app.palette.is_some() {
-                            let before = Snapshot::of(app);
-                            app.notice = None;
-                            if let Some(name) = app.handle_palette_key(key) {
-                                engine.run_command(app, &name)?;
-                                if app.should_quit {
-                                    return Ok(());
-                                }
-                            }
-                            let after = Snapshot::of(app);
-                            fire_changes(&engine, app, &before, &after)?;
-                            continue;
-                        }
+                        // Everything else — the modal overlays included — goes
+                        // through the keymap. `active_mode` picks the overlay's
+                        // mode while it is open, so every key an overlay responds
+                        // to is rebindable; a key no binding claims falls back to
+                        // the overlay's Rust handler (typing, the composer's vim
+                        // engine, cancelling a delete confirmation).
+                        //
+                        // A binding can create or remove annotations (composer
+                        // save, delete) and can stage a palette command or a
+                        // prompt choice, whose callbacks must run outside the
+                        // borrow the binding held — hence the drain below.
                         if let Some(chord) = KeyChord::from_event(&key) {
                             let before = Snapshot::of(app);
                             // Clear the prior transient hint on each fresh key so
                             // a "can't comment here" notice doesn't linger.
                             app.notice = None;
-                            engine.dispatch(app, chord)?;
+                            if !engine.dispatch(app, chord)? {
+                                app.overlay_fallback_key(key);
+                            }
+                            app.refresh_composer_view();
+                            if let Some(name) = app.take_pending_command() {
+                                engine.run_command(app, &name)?;
+                            }
+                            if let Some(index) = app.take_pending_prompt() {
+                                engine.run_prompt(app, index)?;
+                            }
                             if app.should_quit {
                                 return Ok(());
                             }
