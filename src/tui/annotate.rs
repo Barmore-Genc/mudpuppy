@@ -127,6 +127,26 @@ impl App {
             .map(|a| a.id.clone())
     }
 
+    /// Walk `id` up its `reply_to` chain to the comment the thread hangs off.
+    /// Replies are authored against the thread, not against each other, so the
+    /// reply verb always targets the top-level parent. Bounded by the annotation
+    /// count so a cyclic `reply_to` in a hand-edited store can't loop.
+    pub(crate) fn thread_root(&self, id: &str) -> String {
+        let mut current = id;
+        for _ in 0..self.annotations.len() {
+            let Some(parent) = self
+                .annotations
+                .iter()
+                .find(|a| a.id == current)
+                .and_then(|a| a.reply_to.as_deref())
+            else {
+                break;
+            };
+            current = parent;
+        }
+        current.to_string()
+    }
+
     /// Run `f` against the store under the lock, then reload in place. Surfaces a
     /// store-less view or any write error as a transient status-bar notice rather
     /// than failing — authoring must never crash the viewer.

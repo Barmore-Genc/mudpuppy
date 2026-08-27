@@ -10,17 +10,25 @@
 //! (scroll slicing, `follow_cursor`, the mouse `diff_row_at`) still holds, and
 //! `hunk_starts` is recomputed because the splice shifts row indices.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::diff::{DiffLine, LineKind};
 use crate::domain::{AnchorScope, Annotation, Side, Status};
 use crate::tui::app::{App, CommentLine, CommentMeta, Row};
 use crate::tui::composer::ComposerTarget;
 
-/// A parent annotation plus its (creation-ordered) replies — one inline thread.
+/// Cap on how far a reply is indented. Every reply renders whatever its depth;
+/// only the indent saturates here, so a long back-and-forth stays legible in a
+/// narrow diff pane (the body budget shrinks with every indent step) and a
+/// reader still sees that a comment answers the thread.
+const MAX_REPLY_INDENT: usize = 1;
+
+/// A parent annotation plus its whole reply subtree, each reply paired with the
+/// depth to indent it at. A reply at any depth belongs to the parent's thread,
+/// so a follow-up written against another reply is part of the conversation.
 struct Thread<'a> {
     parent: &'a Annotation,
-    replies: Vec<&'a Annotation>,
+    replies: Vec<(usize, &'a Annotation)>,
 }
 
 /// Where the open composer splices into the inline flow.
@@ -50,6 +58,7 @@ impl App {
         };
 
         let path = self.current().display_path().to_string();
+        let children = children_by_parent(&self.annotations);
         // Group line-scoped threads by their (side, line) anchor. Orphaned
         // anchors flipped to File scope are left out (they ride the file-level
         // header).
@@ -58,16 +67,10 @@ impl App {
             if a.file != path || a.scope != AnchorScope::Line || a.is_reply() {
                 continue;
             }
-            let mut replies: Vec<&Annotation> = self
-                .annotations
-                .iter()
-                .filter(|r| r.reply_to.as_deref() == Some(a.id.as_str()))
-                .collect();
-            replies.sort_by_key(|x| x.created_at);
-            threads
-                .entry((a.side, a.line))
-                .or_default()
-                .push(Thread { parent: a, replies });
+            threads.entry((a.side, a.line)).or_default().push(Thread {
+                parent: a,
+                replies: collect_replies(&children, a),
+            });
         }
         // Stable order among several parents on one line: by creation time.
         for v in threads.values_mut() {
@@ -124,6 +127,59 @@ impl App {
     }
 }
 
+/// Index every reply under the id it answers, each list in creation order, so a
+/// thread can be walked without rescanning the annotation list per comment.
+fn children_by_parent(annotations: &[Annotation]) -> HashMap<&str, Vec<&Annotation>> {
+    let mut children: HashMap<&str, Vec<&Annotation>> = HashMap::new();
+    for a in annotations {
+        if let Some(parent) = a.reply_to.as_deref() {
+            children.entry(parent).or_default().push(a);
+        }
+    }
+    for kids in children.values_mut() {
+        kids.sort_by_key(|a| a.created_at);
+    }
+    children
+}
+
+/// The reply subtree under `parent` in conversation order (depth-first, each
+/// level oldest first), paired with the depth to indent each reply at.
+///
+/// Walked iteratively over an explicit stack and gated on a visited set, so a
+/// store with a `reply_to` cycle (hand-edited, or a comment pointing at itself)
+/// renders each comment once instead of looping or overflowing the stack.
+fn collect_replies<'a>(
+    children: &HashMap<&str, Vec<&'a Annotation>>,
+    parent: &'a Annotation,
+) -> Vec<(usize, &'a Annotation)> {
+    let mut seen: HashSet<&str> = HashSet::from([parent.id.as_str()]);
+    let mut out: Vec<(usize, &Annotation)> = Vec::new();
+    let mut stack: Vec<(usize, &Annotation)> = Vec::new();
+    push_children(&mut stack, children, parent, 1);
+    while let Some((depth, a)) = stack.pop() {
+        if !seen.insert(a.id.as_str()) {
+            continue;
+        }
+        out.push((depth.min(MAX_REPLY_INDENT), a));
+        push_children(&mut stack, children, a, depth + 1);
+    }
+    out
+}
+
+/// Push `parent`'s direct replies onto the depth-first stack, reversed so the
+/// oldest is popped first.
+fn push_children<'a>(
+    stack: &mut Vec<(usize, &'a Annotation)>,
+    children: &HashMap<&str, Vec<&'a Annotation>>,
+    parent: &'a Annotation,
+    depth: usize,
+) {
+    let Some(kids) = children.get(parent.id.as_str()) else {
+        return;
+    };
+    stack.extend(kids.iter().rev().map(|kid| (depth, *kid)));
+}
+
 /// The `(side, line)` a diff line anchors a comment to: additions/context on the
 /// new (Right) side, deletions on the old (Left) side. `None` for a line present
 /// on neither side number.
@@ -164,11 +220,11 @@ fn emit_thread(
     } else {
         emit_comment(rows, thread.parent, 0, inner_width);
     }
-    for reply in &thread.replies {
+    for (depth, reply) in &thread.replies {
         if edit_id == Some(reply.id.as_str()) {
             rows.push(Row::Composer { rows: reserved });
         } else {
-            emit_comment(rows, reply, 1, inner_width);
+            emit_comment(rows, reply, *depth, inner_width);
         }
     }
     // A reply-target composer sits after the thread's last comment.

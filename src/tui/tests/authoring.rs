@@ -704,6 +704,42 @@ fn the_reply_box_appears_below_the_thread() {
     );
 }
 
+#[test]
+fn replying_to_a_reply_threads_under_the_shared_parent() {
+    let mut parent = note(
+        "agent001",
+        Author::Agent,
+        "src/alpha.rs",
+        Side::Right,
+        1,
+        Severity::Warning,
+    );
+    parent.body = "PARENT".to_string();
+    let mut existing = note(
+        "agent002",
+        Author::Agent,
+        "src/alpha.rs",
+        Side::Right,
+        1,
+        Severity::Warning,
+    );
+    existing.reply_to = Some("agent001".to_string());
+    let (mut a, _dir) = stored_app_with(vec![parent, existing]);
+
+    // Double-clicking the reply row (the mouse path) opens a reply composer; it
+    // must thread under the top-level comment, not nest under the reply.
+    a.reply_or_edit("agent002".to_string());
+    type_body(&mut a, "ANSWER");
+    a.handle_key(ctrl('s'));
+
+    let written = a
+        .annotations
+        .iter()
+        .find(|x| x.body == "ANSWER")
+        .expect("the reply was written");
+    assert_eq!(written.reply_to.as_deref(), Some("agent001"));
+}
+
 /// The reserved-row span of the (single) open composer placeholder, if any.
 fn composer_box_span(a: &App) -> Option<(usize, usize)> {
     a.view.rows.iter().enumerate().find_map(|(i, r)| match r {
