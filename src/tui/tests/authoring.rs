@@ -704,6 +704,107 @@ fn the_reply_box_appears_below_the_thread() {
     );
 }
 
+/// An agent note on new-side line 1 with the user's reply threaded under it,
+/// both sharing the parent's anchor (as the store always does).
+fn agent_note_with_user_reply() -> Vec<Annotation> {
+    let mut parent = note(
+        "agent001",
+        Author::Agent,
+        "src/alpha.rs",
+        Side::Right,
+        1,
+        Severity::Warning,
+    );
+    parent.body = "AGENT SAID SOMETHING".to_string();
+    let mut reply = note(
+        "user0002",
+        Author::User,
+        "src/alpha.rs",
+        Side::Right,
+        1,
+        Severity::Info,
+    );
+    reply.reply_to = Some("agent001".to_string());
+    reply.body = "I REPLIED".to_string();
+    vec![parent, reply]
+}
+
+/// Put the cursor on the (first) inline comment row belonging to `id`.
+fn cursor_to_comment_row(a: &mut App, id: &str) {
+    let idx = a
+        .view
+        .rows
+        .iter()
+        .position(|r| matches!(r, Row::Comment(c) if c.id == id))
+        .expect("the comment has an inline row");
+    a.set_cursor(idx as i64);
+}
+
+#[test]
+fn the_cursor_comment_row_is_what_delete_targets() {
+    let (mut a, _dir) = stored_app_with(agent_note_with_user_reply());
+    cursor_to_comment_row(&mut a, "user0002");
+    leader(&mut a, "cd");
+    assert_eq!(
+        a.pending_delete.as_deref(),
+        Some("user0002"),
+        "the reply under the cursor is the target, not its parent"
+    );
+    a.handle_key(key(KeyCode::Char('y')));
+    let ids: Vec<&str> = a.annotations.iter().map(|x| x.id.as_str()).collect();
+    assert_eq!(ids, vec!["agent001"], "only the reply was deleted");
+}
+
+#[test]
+fn deleting_from_the_parent_row_still_refuses_the_agents_comment() {
+    let (mut a, _dir) = stored_app_with(agent_note_with_user_reply());
+    cursor_to_comment_row(&mut a, "agent001");
+    leader(&mut a, "cd");
+    assert_eq!(a.pending_delete.as_deref(), Some("agent001"));
+    a.handle_key(key(KeyCode::Char('y')));
+    assert_eq!(a.annotations.len(), 2, "the guard refused the delete");
+    assert!(a.notice.is_some(), "a hint explains why");
+}
+
+#[test]
+fn editing_from_a_reply_row_opens_that_reply() {
+    let (mut a, _dir) = stored_app_with(agent_note_with_user_reply());
+    cursor_to_comment_row(&mut a, "user0002");
+    leader(&mut a, "ce");
+    let composer = a.composer.as_ref().expect("the reply is the user's own");
+    assert_eq!(composer.body(), "I REPLIED");
+}
+
+#[test]
+fn cycling_status_from_a_reply_row_updates_that_reply() {
+    let (mut a, _dir) = stored_app_with(agent_note_with_user_reply());
+    cursor_to_comment_row(&mut a, "user0002");
+    leader(&mut a, "cs");
+    let status_of = |a: &App, id: &str| a.annotations.iter().find(|x| x.id == id).unwrap().status;
+    assert_eq!(status_of(&a, "user0002"), Status::Resolved);
+    assert_eq!(
+        status_of(&a, "agent001"),
+        Status::Open,
+        "the parent is untouched"
+    );
+}
+
+#[test]
+fn replying_from_a_reply_row_still_threads_under_the_parent() {
+    let (mut a, _dir) = stored_app_with(agent_note_with_user_reply());
+    cursor_to_comment_row(&mut a, "user0002");
+    leader(&mut a, "cr");
+    type_body(&mut a, "ANSWER");
+    a.handle_key(ctrl('s'));
+
+    let written = a
+        .annotations
+        .iter()
+        .find(|x| x.body == "ANSWER")
+        .expect("the reply was written");
+    assert_eq!(written.reply_to.as_deref(), Some("agent001"));
+}
+
 #[test]
 fn replying_to_a_reply_threads_under_the_shared_parent() {
     let mut parent = note(
