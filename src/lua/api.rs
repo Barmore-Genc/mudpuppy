@@ -658,6 +658,219 @@ pub fn install_scoped<'scope>(
         })?,
     )?;
 
+    // --- overlay verbs ------------------------------------------------------
+    //
+    // One per command the modal overlays respond to, so `core.luau` can express
+    // their keymaps (the `help`, `picker`, `palette`, `prompt`, `delete-confirm`
+    // and `composer*` modes) instead of Rust hard-coding the keys. Every one is a
+    // no-op when its overlay isn't open, so a stray binding can't misfire.
+
+    table.set(
+        "help_scroll",
+        scope.create_function(move |_, delta: i64| {
+            cell.borrow_mut().scroll_help(delta as isize);
+            Ok(())
+        })?,
+    )?;
+    // Absolute, clamped; a negative `n` means the bottom.
+    table.set(
+        "help_set_scroll",
+        scope.create_function(move |_, n: i64| {
+            cell.borrow_mut().set_help_scroll(n);
+            Ok(())
+        })?,
+    )?;
+
+    table.set(
+        "picker_move",
+        scope.create_function(move |_, delta: i64| {
+            cell.borrow_mut().picker_move(delta);
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "picker_confirm",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().confirm_picker();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "picker_close",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().close_picker();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "picker_backspace",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().picker_backspace();
+            Ok(())
+        })?,
+    )?;
+
+    table.set(
+        "palette_move",
+        scope.create_function(move |_, delta: i64| {
+            cell.borrow_mut().palette_move(delta);
+            Ok(())
+        })?,
+    )?;
+    // The chosen command is staged on `App` and run by the event loop once this
+    // binding returns — the engine is already borrowed for the duration.
+    table.set(
+        "palette_confirm",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().confirm_palette();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "palette_close",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().close_palette();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "palette_backspace",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().palette_backspace();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "palette_complete",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().palette_complete();
+            Ok(())
+        })?,
+    )?;
+
+    table.set(
+        "prompt_move",
+        scope.create_function(move |_, delta: i64| {
+            cell.borrow_mut().prompt_move(delta);
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "prompt_scroll",
+        scope.create_function(move |_, delta: i64| {
+            cell.borrow_mut().prompt_scroll(delta);
+            Ok(())
+        })?,
+    )?;
+    // Like `palette_confirm`, the option's callback runs after this binding
+    // returns. `prompt_choose` takes a 1-based option index.
+    table.set(
+        "prompt_confirm",
+        scope.create_function(move |_, ()| {
+            let mut app = cell.borrow_mut();
+            let selected = app.prompt_selected();
+            if let Some(i) = selected {
+                app.choose_prompt(i);
+            }
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "prompt_choose",
+        scope.create_function(move |_, index: i64| {
+            if index >= 1 {
+                cell.borrow_mut().choose_prompt(index as usize - 1);
+            }
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "prompt_close",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().close_prompt();
+            Ok(())
+        })?,
+    )?;
+
+    table.set(
+        "confirm_delete",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().confirm_pending_delete();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "cancel_delete",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().cancel_pending_delete();
+            Ok(())
+        })?,
+    )?;
+
+    table.set(
+        "composer_save",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().save_composer();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "composer_cancel",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().close_composer();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "composer_normal_mode",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().composer_leave_insert();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "composer_clear_pending",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().composer_clear_pending();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "composer_newline",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().composer_newline();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "composer_backspace",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().composer_backspace();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "composer_cycle_severity",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().composer_cycle_severity();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "composer_cycle_tag",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().composer_cycle_tag();
+            Ok(())
+        })?,
+    )?;
+    table.set(
+        "composer_redo",
+        scope.create_function(move |_, ()| {
+            cell.borrow_mut().composer_redo();
+            Ok(())
+        })?,
+    )?;
+
     // --- read-only views ----------------------------------------------------
 
     // `state()` returns a live proxy, not an eager snapshot: an empty table whose

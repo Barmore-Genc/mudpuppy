@@ -36,7 +36,7 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 
 - `main.rs`: binary entry point; parses the CLI and dispatches into the library.
 - `lib.rs`: crate root and module map.
-- `cli.rs`: the clap command tree and top-level dispatch (`run`); opens this process's role-split debug log (`init_debug_log`) when the config enabled it.
+- `cli.rs`: the clap command tree and top-level dispatch (`run`); the `config` subcommand (`where`/`default`/`reference`, with the "what you can configure" summary in its `--help`); opens this process's role-split debug log (`init_debug_log`) when the config enabled it.
 - `agent.rs`: the `mudpuppy agent` subcommands (add/comment/wait/reset…) over the store; commands resolve the review target from the session store (set by `reset`), so `reset --base REF`/`--pr REF` records what's under review (local base or a PR) and the rest follow it.
 - `install/`: `mudpuppy install claude` — writes the two Claude Code skills (PR review, implementation review) at a chosen scope (project/local/user).
 - `source.rs`: diff-source providers — `resolve_target` (local/base/PR) and `diff_for_target` (the diff for a resolved target, used by both the TUI and the agent); shells out to `git` (local) and `gh` (PR); emits privacy-safe base/merge-base/shallow diagnostics.
@@ -51,7 +51,7 @@ The rich interface can display uncommitted work, any diff, or Github pull reques
 - `picker.rs`: fuzzy-find file picker state + subsequence matcher for the "add any file" overlay.
 - `command.rs`: the `:command` palette state — fuzzy filtering over registered command names (reuses the picker's matcher).
 - `logging.rs`: file logging gated by `MUDPUPPY_LOG` (single file) or the `mudpuppy.debug_log` config toggle (boolean; binary opens a fixed role-split dir under the data dir); thread-local capture sink for tests; `log_debug!`/`info`/`warn`/`error` macros; `hash()` salted non-reversible labels (salt = store `log_seed`) so logs never record names/paths.
-- `lua/`: embedded Luau sandbox — the configurable keymap and event hooks. Bindings are keyed on key *sequences* (multi-key chords, a `<leader>`, and count prefixes), resolved by a sequence state machine. All default bindings live in `lua/core.luau`; the user config is `$MUDPUPPY_CONFIG`, else `$XDG_CONFIG_HOME`/`~/.config/mudpuppy/mudpuppy.luau` (`%APPDATA%` on Windows). Rust keeps only a hardwired Ctrl-C quit.
+- `lua/`: embedded Luau sandbox — the configurable keymap and event hooks. Bindings are keyed on key *sequences* (multi-key chords, a `<leader>`, and count prefixes), resolved by a sequence state machine. All default bindings live in `lua/core.luau` — including the modal overlays (help, picker, palette, prompt, delete-confirm, composer), each of which has its own keymap mode; the user config is `$MUDPUPPY_CONFIG`, else `$XDG_CONFIG_HOME`/`~/.config/mudpuppy/mudpuppy.luau` (`%APPDATA%` on Windows). Rust keeps only a hardwired Ctrl-C quit.
 - `domain/`: pure on-disk schema types (`Annotation`, `StateFile`, enums).
 
 `tests/` (end-to-end over the real compiled binary):

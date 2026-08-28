@@ -403,19 +403,19 @@ impl LuaEngine {
     ///
     /// A faulty binding (a Lua error) is surfaced in the status bar, never
     /// propagated — a broken key must not crash the viewer.
-    pub(crate) fn dispatch(&self, app: &mut App, chord: KeyChord) -> Result<()> {
+    pub(crate) fn dispatch(&self, app: &mut App, chord: KeyChord) -> Result<bool> {
         let mode = active_mode(app);
 
         // 1. Count prefix: only while no sequence is in flight. A leading `0`
         //    (no count yet) is a normal key, matching vim.
-        if app.pending_seq.is_empty() {
+        if app.pending_seq.is_empty() && mode.takes_count() {
             if let Some(d) = chord.count_digit() {
                 if d != 0 || app.pending_count.is_some() {
                     let cur = app.pending_count.unwrap_or(0);
                     // Cap so a long digit run can't overflow; far past any view.
                     let next = cur.saturating_mul(10).saturating_add(d).min(1_000_000);
                     app.pending_count = Some(next);
-                    return Ok(());
+                    return Ok(true);
                 }
             }
         }
@@ -423,11 +423,11 @@ impl LuaEngine {
         // 2. Extend the pending sequence and resolve it.
         app.pending_seq.push(chord);
         match self.resolve(mode, &app.pending_seq) {
-            Resolution::Prefix => Ok(()), // wait for the next key
+            Resolution::Prefix => Ok(true), // wait for the next key
             Resolution::Miss => {
                 app.pending_seq.clear();
                 app.pending_count = None;
-                Ok(())
+                Ok(false)
             }
             Resolution::Exact(callback) => {
                 app.pending_seq.clear();
@@ -436,23 +436,19 @@ impl LuaEngine {
                 if let Err(e) = result {
                     self.set_status(format!("key error: {e}"));
                 }
-                Ok(())
+                Ok(true)
             }
         }
     }
 
-    /// Resolve a pending sequence against `mode` (then `Global`, except in
-    /// `Help`). A longer binding sharing this prefix always wins over an exact
+    /// Resolve a pending sequence against `mode`'s lookup chain (see
+    /// [`Mode::chain`]). A longer binding sharing this prefix always wins over an exact
     /// match here — the prefix-wait rule — so a binding may not be both a prefix
     /// of another and a usable terminal (documented as the one keymap-authoring
     /// constraint; the default keymap obeys it).
     fn resolve(&self, mode: Mode, seq: &[KeyChord]) -> Resolution {
         let bindings = self.bindings.borrow();
-        let modes: &[Mode] = if mode == Mode::Help {
-            &[Mode::Help]
-        } else {
-            &[mode, Mode::Global][..]
-        };
+        let modes = mode.chain();
 
         if bindings
             .keys()
@@ -658,16 +654,31 @@ enum Resolution {
     Miss,
 }
 
-/// The active keymap mode: `Help` while the overlay is open, otherwise the
-/// focused pane.
-fn active_mode(app: &App) -> Mode {
+/// The active keymap mode: whichever modal overlay is open (in the same
+/// precedence `run_loop` used to apply when these overlays captured keys in
+/// Rust), otherwise the focused pane.
+pub(crate) fn active_mode(app: &App) -> Mode {
     if app.show_help {
-        Mode::Help
-    } else {
-        match app.focus {
-            Focus::Tree => Mode::Tree,
-            Focus::Diff => Mode::Diff,
-        }
+        return Mode::Help;
+    }
+    if let Some(mode) = app.composer_mode() {
+        return mode;
+    }
+    if app.pending_delete.is_some() {
+        return Mode::DeleteConfirm;
+    }
+    if app.prompt.is_some() {
+        return Mode::Prompt;
+    }
+    if app.picker.is_some() {
+        return Mode::Picker;
+    }
+    if app.palette.is_some() {
+        return Mode::Palette;
+    }
+    match app.focus {
+        Focus::Tree => Mode::Tree,
+        Focus::Diff => Mode::Diff,
     }
 }
 
@@ -716,9 +727,16 @@ pub fn config_path() -> Option<PathBuf> {
     None
 }
 
-/// The full configuration & scripting reference printed by `mudpuppy help
-/// config`. Built at runtime so it can name the config path that *this* machine
-/// would actually use.
+/// The built-in default config, printed by `mudpuppy config default`. This is
+/// the same source the engine loads first, so what it prints is exactly what is
+/// in effect before a user config is applied.
+pub fn default_config() -> Cow<'static, str> {
+    core_source()
+}
+
+/// The full configuration & scripting reference printed by `mudpuppy config
+/// reference`. Built at runtime so it can name the config path that *this*
+/// machine would actually use.
 pub fn config_help() -> String {
     let current = match config_path() {
         Some(p) => format!(
@@ -749,6 +767,10 @@ mudpuppy looks for your config at, in order:
   1. $MUDPUPPY_CONFIG                       (an explicit file path)
   2. $XDG_CONFIG_HOME/mudpuppy/mudpuppy.luau
   3. ~/.config/mudpuppy/mudpuppy.luau        (%APPDATA%\mudpuppy\mudpuppy.luau on Windows)
+
+`mudpuppy config where` prints the path this machine resolves to, and
+`mudpuppy config default` prints the built-in config below — a working starting
+point you can redirect into that path and edit.
 
 "#;
 
@@ -816,6 +838,36 @@ Actions (call these from inside a binding or hook):
   mudpuppy.reset_annotations()   delete every annotation (clean-slate reset)
   mudpuppy.prompt(msg, options[, details])  open a modal question (see Prompts)
 
+Overlay actions (each a no-op unless its overlay is open — these are what the
+overlay modes above are built from):
+  mudpuppy.help_scroll(delta)       scroll the help overlay by delta lines
+  mudpuppy.help_set_scroll(n)       scroll to absolute line n; n < 0 = the bottom
+  mudpuppy.picker_move(delta)       move the picker highlight
+  mudpuppy.picker_confirm()         add the highlighted file and close
+  mudpuppy.picker_backspace()       delete the last character of the query
+  mudpuppy.picker_close()
+  mudpuppy.palette_move(delta)      move the palette highlight
+  mudpuppy.palette_confirm()        run the highlighted command and close
+  mudpuppy.palette_complete()       autocomplete the query to the top match
+  mudpuppy.palette_backspace()
+  mudpuppy.palette_close()
+  mudpuppy.prompt_move(delta)       move the highlighted option
+  mudpuppy.prompt_scroll(delta)     scroll the details body (if there is one)
+  mudpuppy.prompt_confirm()         run the highlighted option's callback
+  mudpuppy.prompt_choose(i)         run option i's callback directly (1-based)
+  mudpuppy.prompt_close()           dismiss without running anything
+  mudpuppy.confirm_delete()         go through with the armed delete
+  mudpuppy.cancel_delete()          disarm it
+  mudpuppy.composer_save()          save the comment and close (default Ctrl-S)
+  mudpuppy.composer_cancel()        discard it and close
+  mudpuppy.composer_cycle_severity()  info → suggestion → warning → blocker
+  mudpuppy.composer_cycle_tag()     none → question → concern → direction
+  mudpuppy.composer_newline()       insert a line break at the cursor
+  mudpuppy.composer_backspace()
+  mudpuppy.composer_normal_mode()   leave insert mode
+  mudpuppy.composer_clear_pending() abandon an in-flight vim command
+  mudpuppy.composer_redo()
+
 The count-aware verbs multiply/repeat by the pending count (see Counts below);
 the absolute verbs (select_file, set_scroll, set_cursor, cursor_to_*) ignore it.
 
@@ -823,7 +875,16 @@ Readers (return tables describing the current state):
   mudpuppy.state()        { focus, selected, scroll, h_scroll, cursor, count, show_help,
                             sidebar, selection = { lo, hi } | nil,
                             turn = { owner, seq, agent_waiting, approved },
-                            viewport = { height, total, top } }
+                            viewport = { height, total, top },
+                            help = { scroll, height, max_scroll } | nil,
+                            composer = { mode, pending } | nil,
+                            prompt = { selected, options, has_details } | nil }
+
+The `help`/`composer`/`prompt` sub-tables are nil unless that overlay is open, so
+a binding in an overlay mode can branch on what it is looking at. `composer.mode`
+is "insert" or "normal", and `composer.pending` is true while a multi-key vim
+command is mid-flight (which is how the default `composer-normal` Enter/Esc
+bindings know to leave those keys to that command instead of saving/cancelling).
   mudpuppy.files()        array of { path, status, additions, deletions, binary }
   mudpuppy.current_file() the open file, plus { hunks = { { ..., lines } } }
   mudpuppy.annotations()  array of { id, author, file, line, end_line, side,
@@ -840,15 +901,33 @@ pending count and `= nil` clears it; assigning any other field is an error.
 
 Modes
 -----
+Pane modes — the fallback chain ends in `global`:
   global   active in every pane, and the fallback when the focused pane has no
            binding for the key
   tree     the file tree (left pane)
   diff     the diff view (center pane)
-  help     the help overlay; exclusive — it does NOT fall back to global, so the
-           overlay swallows keys it doesn't bind
 
-A key is looked up in the active mode first, then in `global` (except in `help`).
-So a mode-specific binding wins over a global one.
+Overlay modes — active while that overlay is open. They are *exclusive*: they do
+NOT fall back to `global`, so an overlay can't be quit or scrolled by a stray
+pane binding.
+  help             the help overlay
+  picker           the fuzzy "add any file" picker
+  palette          the `:command` palette
+  prompt           a modal question opened by mudpuppy.prompt
+  delete-confirm   the y/n guard on deleting your own annotation
+  composer         the comment composer, in *either* editing mode
+  composer-insert  the composer while typing        (falls back to `composer`)
+  composer-normal  the composer's vim normal mode   (falls back to `composer`)
+
+A key is looked up in the active mode first, then along that mode's fallback
+chain, so a mode-specific binding wins over a global one.
+
+A key that no binding in the chain claims is handed to the overlay itself. That
+is why the overlay modes only bind *commands*: a printable key types into the
+picker/palette query or the composer buffer, other keys drive the composer's vim
+engine, and in `delete-confirm` anything unbound cancels. It also means a digit
+is never an ambient count inside an overlay (see Counts) — it is text, or the
+option it selects.
 
 Key names & sequences
 ---------------------
@@ -874,7 +953,8 @@ Counts
 ------
 A number typed before a motion is an ambient count, applied in one shot by the
 count-aware verbs: "5j" moves five rows, "100G" jumps to row 100. A leading "0"
-(with no count yet) is a normal key, matching vim. The count is readable and
+(with no count yet) is a normal key, matching vim. Counts apply in the pane modes
+only — inside an overlay a digit is an ordinary key. The count is readable and
 writable as `mudpuppy.state().count`, so a custom binding can act on it.
 
 The :command palette
@@ -882,7 +962,8 @@ The :command palette
 Press ":" to open a fuzzy command palette over every name registered with
 `mudpuppy.command(name, fn)`. Type to filter, Tab to autocomplete to the top
 match, Enter to run, Esc to cancel. The built-in `check-updates` command checks
-GitHub for a newer release on demand.
+GitHub for a newer release on demand. Those keys are the `palette` mode's default
+bindings, so they are rebindable like any other.
 
 Prompts
 -------
@@ -891,8 +972,9 @@ is an ordered array; each option is either a `{ "Label", function() ... end }`
 pair or a `{ label = "Label", action = function() ... end }` table. The labels
 render as numbered chips; ←/→ (or h/l) move the highlight, 1-9 pick directly,
 Enter confirms the highlighted option and runs its function, Esc dismisses
-without running anything. The optional `details` string renders as a scrollable
-body between the question and the chips (↑/↓, j/k, or PageUp/PageDown scroll it);
+without running anything — all of that is the `prompt` mode's default keymap, so
+it is rebindable. The optional `details` string renders as a scrollable body
+between the question and the chips (↑/↓, j/k, or PageUp/PageDown scroll it);
 the auto-update flow passes the release changelog here. It is a general
 primitive — the auto-update flow is one user.
 
@@ -1046,7 +1128,8 @@ mod tests {
     use crate::diff::parse_diff;
     use crate::domain::{AnchorScope, Annotation, Author, Severity, Side, Status, Target};
     use crate::tui::App;
-    use keys::KeyChord;
+    use keys::{Key, KeyChord};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     /// A tiny two-file diff so file-selection (and thus `file_open`) has somewhere
     /// to move and `current_file` has hunks to expose.
@@ -1242,6 +1325,124 @@ index 333..444 100644
             "Space a opened the annotations tab"
         );
         assert!(a.pending_seq.is_empty());
+    }
+
+    #[test]
+    fn overlay_modes_are_active_while_their_overlay_is_open() {
+        let mut a = app();
+        assert_eq!(active_mode(&a), Mode::Tree);
+        a.set_focus("diff");
+        assert_eq!(active_mode(&a), Mode::Diff);
+
+        a.open_palette(vec!["quit".to_string()]);
+        assert_eq!(active_mode(&a), Mode::Palette);
+        a.close_palette();
+
+        a.set_repo_root(std::path::PathBuf::from("/nonexistent"));
+        a.open_picker();
+        assert_eq!(active_mode(&a), Mode::Picker);
+        a.close_picker();
+
+        a.open_prompt("q?".to_string(), vec!["yes".to_string()], None);
+        assert_eq!(active_mode(&a), Mode::Prompt);
+        a.close_prompt();
+
+        a.set_cursor(1);
+        a.add_comment();
+        assert_eq!(active_mode(&a), Mode::ComposerInsert);
+        a.composer_leave_insert();
+        assert_eq!(active_mode(&a), Mode::ComposerNormal);
+        a.close_composer();
+
+        // Help wins over everything else, as it did when it captured keys in Rust.
+        a.toggle_help();
+        a.open_picker();
+        assert_eq!(active_mode(&a), Mode::Help);
+    }
+
+    #[test]
+    fn overlay_modes_do_not_fall_back_to_global() {
+        // `q` quits from a pane via the global fallback, but an overlay mode is
+        // exclusive, so the same key must not reach it.
+        let engine = LuaEngine::new(None).unwrap();
+        let mut a = app();
+        a.open_palette(vec!["quit".to_string()]);
+        engine
+            .dispatch(&mut a, KeyChord::parse("q").unwrap())
+            .unwrap();
+        assert!(!a.should_quit, "the palette swallows the global quit key");
+    }
+
+    #[test]
+    fn digits_are_not_counts_inside_an_overlay() {
+        // In a pane a digit builds an ambient count. In an overlay it must reach
+        // the binding (a prompt option) or the fallback (typed into a query).
+        let engine = LuaEngine::new(None).unwrap();
+        let mut a = app();
+        a.open_prompt(
+            "q?".to_string(),
+            vec!["one".to_string(), "two".to_string()],
+            None,
+        );
+        engine
+            .dispatch(&mut a, KeyChord::parse("2").unwrap())
+            .unwrap();
+        assert_eq!(a.pending_count, None, "no count is built in an overlay");
+        assert!(a.prompt.is_none(), "the digit chose an option");
+        assert_eq!(a.take_pending_prompt(), Some(1));
+    }
+
+    #[test]
+    fn the_composer_save_key_is_rebindable() {
+        // The whole point of the composer modes: Ctrl-S is a default, not a law.
+        let (_dir, path) = config(
+            r#"mudpuppy.unmap("composer", "ctrl-s")
+               mudpuppy.map("composer", "ctrl-w", function() mudpuppy.composer_save() end)"#,
+        );
+        let engine = LuaEngine::new(Some(path)).unwrap();
+        let mut a = app();
+        // Saving writes through the store, so the composer needs one attached.
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("annotations.json");
+        a.attach_store(store_path, None);
+        a.set_focus("diff");
+        a.set_cursor(1);
+        a.add_comment();
+        assert!(
+            a.composer.is_some(),
+            "the composer opened on the cursor line"
+        );
+        for c in "hi".chars() {
+            let chord = KeyChord::plain(Key::Char(c));
+            assert!(!engine.dispatch(&mut a, chord).unwrap());
+            a.overlay_fallback_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        // The unmapped default no longer saves.
+        engine
+            .dispatch(&mut a, KeyChord::parse("ctrl-s").unwrap())
+            .unwrap();
+        assert!(a.composer.is_some(), "ctrl-s was unmapped");
+        // The replacement does.
+        engine
+            .dispatch(&mut a, KeyChord::parse("ctrl-w").unwrap())
+            .unwrap();
+        assert!(a.composer.is_none(), "ctrl-w saved and closed the composer");
+        assert_eq!(a.annotations.len(), 1);
+        assert_eq!(a.annotations[0].body, "hi");
+    }
+
+    #[test]
+    fn unbound_overlay_keys_fall_through_to_the_overlay() {
+        // A key no binding claims is the overlay's own: typed into the picker
+        // query, and (for the delete confirmation) a cancel.
+        let engine = LuaEngine::new(None).unwrap();
+        let mut a = app();
+        a.set_repo_root(std::path::PathBuf::from("/nonexistent"));
+        a.open_picker();
+        let chord = KeyChord::plain(Key::Char('z'));
+        assert!(!engine.dispatch(&mut a, chord).unwrap(), "'z' is unbound");
+        a.overlay_fallback_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+        assert_eq!(a.picker.as_ref().unwrap().query, "z");
     }
 
     #[test]

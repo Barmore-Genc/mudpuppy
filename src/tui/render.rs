@@ -1044,12 +1044,18 @@ fn render_help(frame: &mut Frame, area: Rect, app: &mut App) -> Rect {
         Line::raw("  drag (diff)   enter visual mode and select lines"),
         Line::raw("  dbl-click     open file (tree) · comment line (diff)"),
         Line::raw(""),
+        section("Comment composer"),
+        Line::raw("  Ctrl-s        save · Esc  normal mode (then Enter saves)"),
+        Line::raw("  Ctrl-e/t/j    severity · tag · newline"),
+        Line::raw(""),
         section("Help overlay"),
         Line::raw("  j / k         scroll down / up one line"),
         Line::raw("  PgDn / PgUp   page down / up"),
         Line::raw("  ctrl-d / u    half-page down / up"),
         Line::raw("  g / G         jump to top / bottom"),
         Line::raw("  ? / q / Esc   close"),
+        Line::raw(""),
+        Line::raw("  Every key above is rebindable: mudpuppy config --help"),
     ];
 
     // Match the picker's vertical sizing so the overlay family feels uniform

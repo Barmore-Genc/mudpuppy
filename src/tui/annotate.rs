@@ -9,7 +9,6 @@
 
 use anyhow::{bail, Context, Result};
 use jiff::Timestamp;
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 use super::app::{App, Row};
 use crate::diff::LineKind;
@@ -381,18 +380,10 @@ impl App {
         }
     }
 
-    /// While a delete is armed, capture the confirm keys before Lua sees them
-    /// (same precedence as the picker and composer): `y` deletes, anything else
-    /// cancels. Returns `true` if a confirmation was pending.
-    pub(crate) fn handle_pending_delete_key(&mut self, ev: KeyEvent) -> bool {
-        if self.pending_delete.is_none() {
-            return false;
-        }
-        match ev.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_pending_delete(),
-            _ => self.pending_delete = None,
-        }
-        true
+    /// Disarm an armed delete without deleting. Also the `delete-confirm` mode's
+    /// fallback, so any key that isn't bound to confirm cancels (as it always has).
+    pub(crate) fn cancel_pending_delete(&mut self) {
+        self.pending_delete = None;
     }
 
     /// Cycle the status of the annotation on the cursor line: open → resolved →

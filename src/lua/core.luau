@@ -21,6 +21,10 @@
 
 local m = mudpuppy
 
+-- Lines the prompt's details body scrolls by on PageUp/PageDown. Coarse; the
+-- renderer clamps to the real content height, so over-scrolling is harmless.
+local PROMPT_PAGE = 10
+
 -- Space is the leader; set it before the `<leader>` maps below expand it.
 m.leader("space")
 
@@ -183,11 +187,117 @@ m.map("diff", "<leader> c e", function() m.edit_comment() end)
 m.map("diff", "<leader> c d", function() m.delete_comment() end)
 m.map("diff", "<leader> c s", function() m.cycle_status() end)
 
--- ---- Help: the overlay is exclusive; only its own dismissal keys are bound --
+-- ---- Help: the overlay is exclusive; it does not fall back to global ---------
+
+local function help_page()
+  return m.state().help.height
+end
 
 m.map("help", "?", function() m.toggle_help() end)
 m.map("help", "esc", function() m.toggle_help() end)
 m.map("help", "q", function() m.toggle_help() end)
+m.map("help", "j", function() m.help_scroll(1) end)
+m.map("help", "down", function() m.help_scroll(1) end)
+m.map("help", "k", function() m.help_scroll(-1) end)
+m.map("help", "up", function() m.help_scroll(-1) end)
+m.map("help", "space", function() m.help_scroll(help_page()) end)
+m.map("help", "pagedown", function() m.help_scroll(help_page()) end)
+m.map("help", "pageup", function() m.help_scroll(-help_page()) end)
+m.map("help", "ctrl-d", function() m.help_scroll(math.floor(help_page() / 2)) end)
+m.map("help", "ctrl-u", function() m.help_scroll(-math.floor(help_page() / 2)) end)
+m.map("help", "g", function() m.help_set_scroll(0) end)
+m.map("help", "G", function() m.help_set_scroll(-1) end)
+
+-- ---- Picker: the fuzzy "add any file" overlay -------------------------------
+--
+-- Only the commands are bound; any other printable key types into the query.
+-- Ctrl-p moves the selection up here — it *opens* the picker only while closed.
+
+m.map("picker", "esc", function() m.picker_close() end)
+m.map("picker", "enter", function() m.picker_confirm() end)
+m.map("picker", "backspace", function() m.picker_backspace() end)
+m.map("picker", "down", function() m.picker_move(1) end)
+m.map("picker", "up", function() m.picker_move(-1) end)
+m.map("picker", "ctrl-n", function() m.picker_move(1) end)
+m.map("picker", "ctrl-p", function() m.picker_move(-1) end)
+
+-- ---- Palette: the `:command` overlay ----------------------------------------
+--
+-- Same shape as the picker, plus Tab to autocomplete to the top match.
+
+m.map("palette", "esc", function() m.palette_close() end)
+m.map("palette", "enter", function() m.palette_confirm() end)
+m.map("palette", "tab", function() m.palette_complete() end)
+m.map("palette", "backspace", function() m.palette_backspace() end)
+m.map("palette", "down", function() m.palette_move(1) end)
+m.map("palette", "up", function() m.palette_move(-1) end)
+m.map("palette", "ctrl-n", function() m.palette_move(1) end)
+m.map("palette", "ctrl-p", function() m.palette_move(-1) end)
+
+-- ---- Prompt: a modal question opened by `m.prompt` ---------------------------
+--
+-- ←/→ (and h/l, Tab) always move the highlight. ↑/↓ (and j/k) scroll the details
+-- body when the prompt has one, and otherwise move the highlight, so a plain
+-- yes/no prompt still answers to the arrow keys.
+
+local function prompt_vertical(delta)
+  if m.state().prompt.has_details then m.prompt_scroll(delta) else m.prompt_move(delta) end
+end
+
+m.map("prompt", "esc", function() m.prompt_close() end)
+m.map("prompt", "enter", function() m.prompt_confirm() end)
+m.map("prompt", "left", function() m.prompt_move(-1) end)
+m.map("prompt", "h", function() m.prompt_move(-1) end)
+m.map("prompt", "right", function() m.prompt_move(1) end)
+m.map("prompt", "l", function() m.prompt_move(1) end)
+m.map("prompt", "tab", function() m.prompt_move(1) end)
+m.map("prompt", "down", function() prompt_vertical(1) end)
+m.map("prompt", "j", function() prompt_vertical(1) end)
+m.map("prompt", "up", function() prompt_vertical(-1) end)
+m.map("prompt", "k", function() prompt_vertical(-1) end)
+m.map("prompt", "pagedown", function() m.prompt_scroll(PROMPT_PAGE) end)
+m.map("prompt", "pageup", function() m.prompt_scroll(-PROMPT_PAGE) end)
+
+-- A digit picks that option outright. `0` is left alone (there is no zeroth).
+for i = 1, 9 do
+  m.map("prompt", tostring(i), function() m.prompt_choose(i) end)
+end
+
+-- ---- Delete confirmation ----------------------------------------------------
+--
+-- Exclusive, and *anything* unbound cancels — so binding only the confirm keys
+-- keeps the "y or it didn't happen" guarantee.
+
+m.map("delete-confirm", "y", function() m.confirm_delete() end)
+m.map("delete-confirm", "Y", function() m.confirm_delete() end)
+
+-- ---- Composer: the comment authoring overlay --------------------------------
+--
+-- `composer` holds the chords that mean the same thing while typing and in normal
+-- mode; the two sub-modes fall back to it. Keys left unbound go to the buffer:
+-- printable characters type in insert mode, and everything else drives the
+-- vim engine in normal mode (motions, operators, counts), so this file binds the
+-- commands only.
+
+m.map("composer", "ctrl-s", function() m.composer_save() end)
+m.map("composer", "ctrl-e", function() m.composer_cycle_severity() end)
+m.map("composer", "ctrl-t", function() m.composer_cycle_tag() end)
+m.map("composer", "ctrl-j", function() m.composer_newline() end)
+
+m.map("composer-insert", "esc", function() m.composer_normal_mode() end)
+m.map("composer-insert", "enter", function() m.composer_newline() end)
+m.map("composer-insert", "backspace", function() m.composer_backspace() end)
+
+-- While a multi-key vim command is mid-flight (an operator, an `f`/`r`/`g`
+-- awaiting its argument, a count), Enter and Esc belong to that command — Esc
+-- abandons it and Enter is a no-op — not to save and cancel.
+m.map("composer-normal", "enter", function()
+  if not m.state().composer.pending then m.composer_save() end
+end)
+m.map("composer-normal", "esc", function()
+  if m.state().composer.pending then m.composer_clear_pending() else m.composer_cancel() end
+end)
+m.map("composer-normal", "ctrl-r", function() m.composer_redo() end)
 
 -- ---- Self-update: offer to install a newer release -------------------------
 --

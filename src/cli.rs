@@ -17,8 +17,9 @@ use clap::{Args, Parser, Subcommand};
 /// reference (`owner/repo#123` or a full URL) to review a pull request instead
 /// of local changes. Agent-driven commands live under `mudpuppy agent`.
 ///
-/// Run `mudpuppy help config` for the configuration & scripting (Luau) reference
-/// — how to rebind keys and hook events in `~/.config/mudpuppy/mudpuppy.luau`.
+/// Run `mudpuppy config --help` for what you can configure, `mudpuppy config
+/// where` for your config path, and `mudpuppy config reference` for the full
+/// configuration & scripting (Luau) reference.
 #[derive(Debug, Parser)]
 #[command(name = "mudpuppy", version, about, long_about = None)]
 pub struct Cli {
@@ -56,12 +57,75 @@ pub enum Command {
         command: InstallCommand,
     },
 
+    /// Find, read, and understand your config file.
+    ///
+    /// mudpuppy is configured with a Luau script: a sandboxed dialect of Lua 5.1
+    /// with no filesystem, network, process, or environment access. On startup it
+    /// loads its built-in keymap, then yours on top, so your file only expresses
+    /// the changes you want. Edits apply live — save the file and the keymap
+    /// reloads without a restart. A broken config is non-fatal (the error shows
+    /// in the status bar and the last good keymap stays in effect), and Ctrl-C
+    /// always quits regardless.
+    ///
+    /// WHERE IT LIVES, in order:
+    ///   1. $MUDPUPPY_CONFIG                          (an explicit file path)
+    ///   2. $XDG_CONFIG_HOME/mudpuppy/mudpuppy.luau
+    ///   3. ~/.config/mudpuppy/mudpuppy.luau          (%APPDATA%\mudpuppy\ on Windows)
+    ///
+    /// `mudpuppy config where` prints the one this machine would use.
+    ///
+    /// WHAT YOU CAN CONFIGURE:
+    ///   Keys       Every binding is Lua, including the ones inside the modal
+    ///              overlays. `mudpuppy.map(mode, keys, fn)` binds a key
+    ///              *sequence* (`"g g"`, `"<leader> t r"`); `mudpuppy.unmap` removes
+    ///              one. Modes: global, tree, diff, help, picker, palette,
+    ///              prompt, delete-confirm, composer, composer-insert,
+    ///              composer-normal. The pane modes fall back to global; the
+    ///              overlay modes are exclusive.
+    ///   Leader     `mudpuppy.leader(key)` — Space by default.
+    ///   Commands   `mudpuppy.command(name, fn)` adds a verb to the `:` palette.
+    ///   Events     `mudpuppy.on(event, fn)` hooks startup, file_open, reload,
+    ///              annotation_added, turn_change, update_check, and
+    ///              skill_update_check.
+    ///   Files      `mudpuppy.filter_files(fn)` hides files from the tree.
+    ///   Updates    `mudpuppy.updates.*` controls the release check;
+    ///              `mudpuppy.skills.*` the installed Claude Code skills.
+    ///   Anchors    `mudpuppy.anchor.*` sets how far annotations are re-located
+    ///              when the code under them moves.
+    ///   Logging    `mudpuppy.debug_log = true` turns on a debug log.
+    ///
+    /// Run `mudpuppy config reference` for the full reference: every action verb,
+    /// every reader, key-name spellings, counts, and worked examples.
+    #[command(verbatim_doc_comment)]
+    Config {
+        #[command(subcommand)]
+        command: Option<ConfigCommand>,
+    },
+
     /// Developer diagnostics for inspecting the viewer's rendering.
     #[command(hide = true)]
     Debug {
         #[command(subcommand)]
         command: DebugCommand,
     },
+}
+
+/// Config inspection under `mudpuppy config`.
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    /// Print the config file path this machine would load, and whether it exists.
+    Where,
+
+    /// Print mudpuppy's built-in default config — the keymap and hooks that ship
+    /// with the binary, loaded before yours.
+    ///
+    /// It is valid Luau and a working starting point: redirect it to your config
+    /// path and edit, or copy the lines you want to change. Your config is loaded
+    /// *after* this one, so you only need the differences.
+    Default,
+
+    /// Print the full configuration & scripting reference.
+    Reference,
 }
 
 /// Visual diagnostics under `mudpuppy debug`.
@@ -266,10 +330,10 @@ pub struct ContextArgs {
 /// Parse the process arguments and dispatch.
 pub fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    // `mudpuppy help config` is our own documentation topic, not a clap
-    // subcommand — intercept it before clap, which would reject `config` as an
-    // unknown command. Everything else (including clap's own `help` and
-    // `help agent`) falls through to the normal command tree.
+    // `mudpuppy help config` predates the `config` subcommand and is still what
+    // the older skills tell an agent to run, so keep it as an alias for
+    // `mudpuppy config reference`. Clap would otherwise read it as a request for
+    // help *about* `config`, which is the summary, not the full reference.
     if wants_config_help(&args) {
         print!("{}", crate::lua::config_help());
         return Ok(());
@@ -318,6 +382,30 @@ fn init_debug_log(role: &str) {
     let _ = crate::logging::init_file(&path);
 }
 
+/// Run a `mudpuppy config` subcommand. A bare `mudpuppy config` prints the
+/// reference, so the command is useful without knowing its subcommands.
+fn config_dispatch(command: Option<ConfigCommand>) -> Result<()> {
+    match command.unwrap_or(ConfigCommand::Reference) {
+        ConfigCommand::Where => {
+            let path = crate::lua::config_path()
+                .context("resolving the config path (no home directory found)")?;
+            println!("{}", path.display());
+            if !path.exists() {
+                eprintln!("(no file there yet — create it to start configuring)");
+            }
+            Ok(())
+        }
+        ConfigCommand::Default => {
+            print!("{}", crate::lua::default_config());
+            Ok(())
+        }
+        ConfigCommand::Reference => {
+            print!("{}", crate::lua::config_help());
+            Ok(())
+        }
+    }
+}
+
 fn dispatch(cli: Cli) -> Result<()> {
     // `-C <DIR>`: change the working directory up front so every downstream
     // `git`/`gh` invocation (and store-path resolution) runs against that repo.
@@ -336,6 +424,7 @@ fn dispatch(cli: Cli) -> Result<()> {
     match cli.command {
         Some(Command::Agent { command }) => crate::agent::dispatch(command),
         Some(Command::Install { command }) => crate::install::dispatch(command),
+        Some(Command::Config { command }) => config_dispatch(command),
         Some(Command::Debug { command }) => match command {
             DebugCommand::Colors => crate::tui::debug::run(),
         },
@@ -493,6 +582,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_config_subcommands() {
+        for (args, want) in [
+            (
+                vec!["mudpuppy", "config", "where"],
+                Some(ConfigCommand::Where),
+            ),
+            (
+                vec!["mudpuppy", "config", "default"],
+                Some(ConfigCommand::Default),
+            ),
+            (
+                vec!["mudpuppy", "config", "reference"],
+                Some(ConfigCommand::Reference),
+            ),
+            // Bare `mudpuppy config` is allowed; it falls back to the reference.
+            (vec!["mudpuppy", "config"], None),
+        ] {
+            let cli = Cli::try_parse_from(&args).unwrap();
+            let Some(Command::Config { command }) = cli.command else {
+                panic!("expected config, got {args:?}");
+            };
+            assert_eq!(
+                std::mem::discriminant(&command),
+                std::mem::discriminant(&want),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
     fn config_help_documents_the_api() {
         let help = crate::lua::config_help();
         // It names the language, the registration verbs, and a worked example.
@@ -500,5 +619,31 @@ mod tests {
         assert!(help.contains("mudpuppy.map"));
         assert!(help.contains("mudpuppy.unmap"));
         assert!(help.contains("mudpuppy.on"));
+        // Every keymap mode is nameable in `map`, so every one must be listed.
+        for mode in [
+            "global",
+            "tree",
+            "diff",
+            "help",
+            "picker",
+            "palette",
+            "prompt",
+            "delete-confirm",
+            "composer",
+            "composer-insert",
+            "composer-normal",
+        ] {
+            assert!(help.contains(mode), "the reference must document `{mode}`");
+        }
+    }
+
+    #[test]
+    fn default_config_is_the_source_the_engine_loads() {
+        // `config default` must print something a user can paste back, so it has
+        // to be the real default keymap, not a paraphrase of it.
+        let src = crate::lua::default_config();
+        assert!(src.contains("mudpuppy.leader") || src.contains("m.leader"));
+        assert!(crate::lua::LuaEngine::new(None).is_ok(), "it must parse");
+        assert!(src.contains("composer"), "it covers the overlay modes");
     }
 }

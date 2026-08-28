@@ -8,12 +8,11 @@
 //! auto-update flow in `core.luau` is the first caller, but the overlay is a
 //! general-purpose primitive scripts can reuse.
 //!
-//! Like the composer, picker, and `:command` palette, the prompt captures key
-//! input ahead of the Lua keymap while it is open; [`App::handle_prompt_key`]
-//! returns the chosen option index (which the event loop hands back to the engine)
-//! or `None` while it stays open or is dismissed.
-
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+//! Like the composer, picker, and `:command` palette, the prompt has its own
+//! keymap mode (`prompt`), so every key it responds to is rebindable from Lua.
+//! Choosing an option stages the index on `App` (see `App::choose_prompt`) for
+//! the event loop to hand back to the engine, since the engine is already
+//! borrowed while the binding that chose runs.
 
 use super::app::App;
 
@@ -29,14 +28,14 @@ pub(crate) struct Prompt {
     /// clamps the effective offset to the real content height each frame.
     pub(crate) scroll: u16,
     pub(crate) options: Vec<String>,
-    /// Highlighted option index, moved with the left/right (and Tab / h-l) keys.
+    /// Highlighted option index, moved by the `prompt` mode's bindings.
     pub(crate) selected: usize,
 }
 
 impl Prompt {
     /// Whether this prompt has a details body (which makes up/down scroll it
     /// instead of moving the option selection).
-    fn has_details(&self) -> bool {
+    pub(super) fn has_details(&self) -> bool {
         self.details.is_some()
     }
 }
@@ -63,69 +62,46 @@ impl App {
         });
     }
 
-    /// Feed one key event to the open prompt. Returns `Some(index)` when the user
-    /// commits to an option (Enter on the highlighted one, or a `1`–`9` digit
-    /// selecting directly) — the caller runs that option's callback through the
-    /// engine. Returns `None` while the prompt stays open, when it is dismissed
-    /// with Esc (no callback runs), or when no prompt is open.
-    ///
-    /// When the prompt has a details body, up/down (and `j`/`k`, PageUp/PageDown)
-    /// scroll it; left/right (and Tab, `h`/`l`) always move the option selection.
-    /// Without a body, up/down move the selection too, preserving the plain
-    /// yes/no prompt's behavior.
-    pub(crate) fn handle_prompt_key(&mut self, ev: KeyEvent) -> Option<usize> {
-        let prompt = self.prompt.as_mut()?;
-        let n = prompt.options.len();
-        let has_details = prompt.has_details();
-        match ev.code {
-            // Dismiss without choosing — the script's "do nothing" path.
-            KeyCode::Esc => self.prompt = None,
-            KeyCode::Enter => {
-                let chosen = prompt.selected;
-                self.prompt = None;
-                return Some(chosen);
-            }
-            KeyCode::Left | KeyCode::Char('h') => {
-                prompt.selected = prompt.selected.saturating_sub(1);
-            }
-            KeyCode::Right | KeyCode::Tab | KeyCode::Char('l') => {
-                if prompt.selected + 1 < n {
-                    prompt.selected += 1;
-                }
-            }
-            // Up/down (and j/k) scroll the body when there is one; otherwise they
-            // fall back to moving the option selection.
-            KeyCode::Up | KeyCode::Char('k') => {
-                if has_details {
-                    prompt.scroll = prompt.scroll.saturating_sub(1);
-                } else {
-                    prompt.selected = prompt.selected.saturating_sub(1);
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if has_details {
-                    prompt.scroll = prompt.scroll.saturating_add(1);
-                } else if prompt.selected + 1 < n {
-                    prompt.selected += 1;
-                }
-            }
-            KeyCode::PageUp => prompt.scroll = prompt.scroll.saturating_sub(PROMPT_PAGE),
-            KeyCode::PageDown => prompt.scroll = prompt.scroll.saturating_add(PROMPT_PAGE),
-            // A digit picks (and commits to) that option directly: `1` is the
-            // first option. `0` is left alone (there is no zeroth option).
-            KeyCode::Char(c @ '1'..='9') => {
-                let idx = c as usize - '1' as usize;
-                if idx < n {
-                    self.prompt = None;
-                    return Some(idx);
-                }
-            }
-            _ => {}
+    /// Close the prompt without choosing — the script's "do nothing" path.
+    pub(crate) fn close_prompt(&mut self) {
+        self.prompt = None;
+    }
+
+    /// Move the highlighted option by `delta`, clamped to the option list.
+    pub(crate) fn prompt_move(&mut self, delta: i64) {
+        let Some(prompt) = self.prompt.as_mut() else {
+            return;
+        };
+        let last = prompt.options.len().saturating_sub(1) as i64;
+        let next = (prompt.selected as i64 + delta).clamp(0, last);
+        prompt.selected = next as usize;
+    }
+
+    /// Scroll the prompt's details body by `delta` lines. A no-op when the prompt
+    /// has no body; the renderer clamps the offset to the real content height.
+    pub(crate) fn prompt_scroll(&mut self, delta: i64) {
+        let Some(prompt) = self.prompt.as_mut() else {
+            return;
+        };
+        if !prompt.has_details() {
+            return;
         }
-        None
+        let next = (prompt.scroll as i64 + delta).max(0);
+        prompt.scroll = next.min(u16::MAX as i64) as u16;
+    }
+
+    /// The highlighted option's index, or `None` when no prompt is open.
+    pub(crate) fn prompt_selected(&self) -> Option<usize> {
+        self.prompt.as_ref().map(|p| p.selected)
+    }
+
+    /// How many options the open prompt offers (`0` when none is open).
+    pub(crate) fn prompt_len(&self) -> usize {
+        self.prompt.as_ref().map_or(0, |p| p.options.len())
+    }
+
+    /// Whether the open prompt has a scrollable details body.
+    pub(crate) fn prompt_has_details(&self) -> bool {
+        self.prompt.as_ref().is_some_and(Prompt::has_details)
     }
 }
-
-/// Lines the body scrolls by on PageUp/PageDown. A coarse step; the renderer
-/// clamps the result to the real content height so over-scrolling is harmless.
-const PROMPT_PAGE: u16 = 10;
