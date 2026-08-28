@@ -342,7 +342,10 @@ impl App {
     }
 
     /// Open a reply composer under annotation `parent` and scroll it into view.
+    /// A reply to a reply threads under their shared parent, so the composer
+    /// lands at the end of the thread and the conversation stays one level deep.
     pub(crate) fn open_reply(&mut self, parent: String) {
+        let parent = self.thread_root(&parent);
         let file = self.current().display_path().to_string();
         self.composer = Some(Composer::new(ComposerTarget::Reply { parent }, file));
         self.rebuild_view();

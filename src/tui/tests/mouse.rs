@@ -166,6 +166,58 @@ fn clicking_save_in_the_composer_submits_the_annotation() {
 }
 
 #[test]
+fn double_clicking_a_reply_row_targets_that_reply() {
+    // The mouse resolves a comment row the same way the keyboard does: the row
+    // under the pointer, not the first annotation on that line (which, since a
+    // reply shares its parent's anchor, would always be the parent).
+    let mut parent = note(
+        "agent001",
+        Author::Agent,
+        "src/alpha.rs",
+        Side::Right,
+        2,
+        Severity::Warning,
+    );
+    parent.body = "AGENT SAID SOMETHING".to_string();
+    let mut reply = note(
+        "user0002",
+        Author::User,
+        "src/alpha.rs",
+        Side::Right,
+        2,
+        Severity::Info,
+    );
+    reply.reply_to = Some("agent001".to_string());
+    reply.body = "I REPLIED".to_string();
+
+    let mut a = annotated_app(vec![parent, reply]);
+    a.set_focus("diff");
+    a.rebuild_view();
+    let _term = render_once(&mut a, 100, 24);
+    let inner = a.hits.diff_inner.expect("diff rendered");
+    let row = a
+        .view
+        .rows
+        .iter()
+        .position(|r| matches!(r, Row::Comment(c) if c.id == "user0002"))
+        .expect("the reply has an inline row");
+    let y = inner.y + a.hits.diff_header_rows + (row - a.scroll) as u16;
+
+    // Two clicks in a row on that comment: the second is the double click.
+    assert!(click(&mut a, inner.x + 10, y));
+    assert!(click(&mut a, inner.x + 10, y));
+    let composer = a
+        .composer
+        .as_ref()
+        .expect("a double click on the user's own comment opens the editor");
+    assert_eq!(
+        composer.body(),
+        "I REPLIED",
+        "the editor opened on the reply under the pointer"
+    );
+}
+
+#[test]
 fn clicking_a_picker_row_opens_that_file() {
     let mut a = app();
     // Open the picker with a small canned universe so the rows are

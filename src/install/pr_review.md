@@ -65,8 +65,9 @@ below. Read it first, and trust it over this file if anything here has drifted.
    `annotated code:` excerpt of the surrounding source, so you can locate the
    exact lines a comment points at without re-reading the file; widen it with
    `-A`/`-B`/`--context N` or turn it off with `--context 0` (same flags on
-   `comment list`). Read that, respond (`comment add --reply-to <id>`, `comment
-   resolve --id <id>`, …), and `wait` again. Loop until the review is finished.
+   `comment list`). Read that, respond (`comment add --reply-to <id>`, which
+   needs no `--file`/`--line` because a reply sits in its parent's thread, or
+   `comment resolve --id <id>`, …), and `wait` again. Loop until the review is finished.
 
 ## Surfacing mudpuppy
 

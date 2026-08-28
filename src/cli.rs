@@ -203,12 +203,14 @@ pub enum CommentCommand {
 /// readable.
 #[derive(Debug, Args)]
 pub struct AddArgs {
-    /// File the line belongs to.
-    #[arg(long, value_name = "FILE")]
-    pub file: String,
+    /// File the line belongs to. Not needed with `--reply-to`: a reply takes its
+    /// parent's anchor.
+    #[arg(long, value_name = "FILE", required_unless_present = "reply_to")]
+    pub file: Option<String>,
     /// Line number to anchor to (the region start when `--end-line` is given).
-    #[arg(long, value_name = "N")]
-    pub line: u32,
+    /// Not needed with `--reply-to`: a reply takes its parent's anchor.
+    #[arg(long, value_name = "N", required_unless_present = "reply_to")]
+    pub line: Option<u32>,
     /// Inclusive end line for a whole-line region; omit for a single line.
     #[arg(long, value_name = "N")]
     pub end_line: Option<u32>,
@@ -378,13 +380,45 @@ mod tests {
         else {
             panic!("expected agent comment add");
         };
-        assert_eq!(args.file, "src/lib.rs");
-        assert_eq!(args.line, 10);
+        assert_eq!(args.file.as_deref(), Some("src/lib.rs"));
+        assert_eq!(args.line, Some(10));
         assert_eq!(args.side, "right"); // default
         assert_eq!(args.body.as_deref(), Some("hello"));
         assert_eq!(args.body_file, None);
         assert_eq!(args.end_line, None);
         assert!(!args.whole_file);
+    }
+
+    #[test]
+    fn a_reply_needs_no_file_or_line() {
+        let cli = Cli::try_parse_from([
+            "mudpuppy",
+            "agent",
+            "comment",
+            "add",
+            "--reply-to",
+            "abcd1234",
+            "--body",
+            "on it",
+        ])
+        .unwrap();
+        let Some(Command::Agent {
+            command:
+                AgentCommand::Comment {
+                    command: CommentCommand::Add(args),
+                },
+        }) = cli.command
+        else {
+            panic!("expected agent comment add");
+        };
+        assert_eq!(args.file, None);
+        assert_eq!(args.line, None);
+        assert_eq!(args.reply_to.as_deref(), Some("abcd1234"));
+
+        // Without a reply target they are still required.
+        assert!(
+            Cli::try_parse_from(["mudpuppy", "agent", "comment", "add", "--body", "hi"]).is_err()
+        );
     }
 
     #[test]
