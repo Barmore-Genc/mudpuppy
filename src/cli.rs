@@ -77,7 +77,7 @@ pub enum Command {
     /// WHAT YOU CAN CONFIGURE:
     ///   Keys       Every binding is Lua, including the ones inside the modal
     ///              overlays. `mudpuppy.map(mode, keys, fn)` binds a key
-    ///              *sequence* ("g g", "<leader> t r"); `mudpuppy.unmap` removes
+    ///              *sequence* (`"g g"`, `"<leader> t r"`); `mudpuppy.unmap` removes
     ///              one. Modes: global, tree, diff, help, picker, palette,
     ///              prompt, delete-confirm, composer, composer-insert,
     ///              composer-normal. The pane modes fall back to global; the
