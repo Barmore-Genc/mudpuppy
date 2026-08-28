@@ -253,6 +253,146 @@ fn long_comment_body_wraps_without_clipping_at_the_pane_edge() {
     );
 }
 
+/// A comment threaded under `parent`, created `minute` minutes after noon so
+/// the thread has a deterministic order.
+fn reply(id: &str, parent: &str, minute: u32, author: Author) -> Annotation {
+    let mut a = note(id, author, "src/alpha.rs", Side::Right, 2, Severity::Info);
+    a.reply_to = Some(parent.to_string());
+    a.created_at = format!("2026-05-28T12:{minute:02}:00Z").parse().unwrap();
+    a.updated_at = a.created_at;
+    a
+}
+
+/// The `(id, depth)` of every inline comment header row, in render order.
+fn thread_rows(a: &App) -> Vec<(String, usize)> {
+    a.view
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            Row::Comment(c) if c.header => Some((c.id.clone(), c.depth)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_reply_to_a_reply_renders_in_the_thread() {
+    // An agent following up in an ongoing thread replies to the latest comment,
+    // which is usually itself a reply. The whole subtree is one conversation, so
+    // every comment renders however deep it threads, and the indent saturates
+    // instead of marching across the pane.
+    let mut notes = vec![note(
+        "top00001",
+        Author::User,
+        "src/alpha.rs",
+        Side::Right,
+        2,
+        Severity::Info,
+    )];
+    let mut parent = "top00001".to_string();
+    for depth in 1..=6u32 {
+        let id = format!("rep0000{depth}");
+        let author = if depth % 2 == 0 {
+            Author::User
+        } else {
+            Author::Agent
+        };
+        notes.push(reply(&id, &parent, depth, author));
+        parent = id;
+    }
+    let mut a = annotated_app(notes);
+    a.rebuild_view();
+
+    let rows = thread_rows(&a);
+    let ids: Vec<&str> = rows.iter().map(|(id, _)| id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec!["top00001", "rep00001", "rep00002", "rep00003", "rep00004", "rep00005", "rep00006",],
+        "every comment in the chain renders, six levels deep"
+    );
+    let depths: Vec<usize> = rows.iter().map(|(_, depth)| *depth).collect();
+    assert_eq!(
+        depths,
+        vec![0, 1, 1, 1, 1, 1, 1],
+        "the indent stops at the cap"
+    );
+
+    // The wrap budget is computed from the same clamped depth, so a deep reply
+    // wraps exactly like a first-level one instead of spilling past the edge.
+    let width_at = |id: &str| {
+        a.view
+            .rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Comment(c) if c.id == id => Some(c.text.chars().count()),
+                _ => None,
+            })
+            .max()
+    };
+    assert_eq!(width_at("rep00001"), width_at("rep00006"));
+}
+
+#[test]
+fn sibling_replies_keep_their_sub_conversations_together() {
+    // Two replies to the parent, one of them answered: the answer follows the
+    // comment it answers rather than being sorted in by wall-clock time.
+    let mut a = annotated_app(vec![
+        note(
+            "top00001",
+            Author::User,
+            "src/alpha.rs",
+            Side::Right,
+            2,
+            Severity::Info,
+        ),
+        reply("rep00002", "top00001", 1, Author::Agent),
+        reply("rep00003", "top00001", 4, Author::Agent),
+        reply("rep00004", "rep00002", 5, Author::User),
+    ]);
+    a.rebuild_view();
+
+    let ids: Vec<String> = thread_rows(&a).into_iter().map(|(id, _)| id).collect();
+    assert_eq!(ids, vec!["top00001", "rep00002", "rep00004", "rep00003"]);
+}
+
+#[test]
+fn a_reply_cycle_renders_without_looping() {
+    // A hand-edited store can point a comment at itself, or two comments at each
+    // other. The walk must terminate and emit each comment at most once.
+    let mut self_ref = reply("rep00003", "rep00003", 2, Author::User);
+    self_ref.reply_to = Some("rep00003".to_string());
+    let mut loop_a = reply("rep00004", "rep00005", 3, Author::Agent);
+    let mut loop_b = reply("rep00005", "rep00004", 4, Author::User);
+    loop_a.reply_to = Some("rep00005".to_string());
+    loop_b.reply_to = Some("rep00004".to_string());
+
+    let mut a = annotated_app(vec![
+        note(
+            "top00001",
+            Author::User,
+            "src/alpha.rs",
+            Side::Right,
+            2,
+            Severity::Info,
+        ),
+        reply("rep00002", "top00001", 1, Author::Agent),
+        self_ref,
+        loop_a,
+        loop_b,
+    ]);
+    a.rebuild_view();
+
+    // Comments in a cycle hang off no real thread, so they render nowhere
+    // inline (the annotations tab still lists them); the sound thread is intact.
+    let ids: Vec<String> = thread_rows(&a).into_iter().map(|(id, _)| id).collect();
+    assert_eq!(ids, vec!["top00001", "rep00002"]);
+
+    // Walking up from inside a cycle terminates too (the reply verb does this).
+    assert_eq!(a.thread_root("rep00004").len(), 8);
+    assert_eq!(a.thread_root("rep00003"), "rep00003");
+    assert_eq!(a.thread_root("rep00002"), "top00001");
+}
+
 #[test]
 fn line_marks_keep_the_most_severe_per_line() {
     // A warning and a blocker collide on the same (side, line): blocker wins.

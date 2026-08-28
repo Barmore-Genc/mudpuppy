@@ -100,6 +100,74 @@ fn signatureless_annotation_keeps_its_bare_line() {
 }
 
 #[test]
+fn a_reply_adopts_its_parents_anchor() {
+    // The agent's replies carry an anchor of their own (the CLI has to be given
+    // one), which can point somewhere else entirely — here at a line that is
+    // gone. The reply must still land where its parent landed.
+    let path = "src/alpha.rs";
+    let original = "fn x() {\n    let target = compute();\n    done();\n}";
+    let parent_sig = AnchorSig::capture(original, 2, &Params::default()).unwrap();
+    let stale_sig = AnchorSig::capture("gone();\nvanished();\n", 1, &Params::default()).unwrap();
+
+    let mut a = app();
+    // Two lines inserted above the parent's anchor; the reply's own anchor is
+    // nowhere in the file.
+    set_head_blob(
+        &mut a,
+        path,
+        "// new\n// lines\nfn x() {\n    let target = compute();\n    done();\n}",
+    );
+    let mut reply = signed_note("r1", path, 99, stale_sig);
+    reply.author = Author::Agent;
+    reply.reply_to = Some("a1".to_string());
+    a.annotations = vec![signed_note("a1", path, 2, parent_sig), reply];
+    a.relocate_annotations();
+
+    assert_eq!(a.annotations[1].line, a.annotations[0].line);
+    assert_eq!(a.annotations[1].scope, AnchorScope::Line);
+    assert!(
+        !a.orphaned_anchors.contains("r1"),
+        "a reply is never orphaned on its own"
+    );
+
+    // ...and so it renders inline, right under the comment it answers.
+    a.rebuild_view();
+    let thread: Vec<&str> = a
+        .view
+        .rows
+        .iter()
+        .filter_map(|r| match r {
+            Row::Comment(c) if c.header => Some(c.id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(thread, vec!["a1", "r1"]);
+}
+
+#[test]
+fn a_reply_follows_its_parent_to_the_file_level() {
+    // The agent rewrote the line the user commented on, then replied. The
+    // parent's anchor is gone, so the whole thread — reply included — moves to
+    // the file level instead of the reply drifting off on its own anchor.
+    let path = "src/alpha.rs";
+    let original = "fn x() {\n    let target = compute();\n    done();\n}";
+    let parent_sig = AnchorSig::capture(original, 2, &Params::default()).unwrap();
+    let replacement = "fn x() {\n    let fixed = recompute();\n    done();\n}";
+    let reply_sig = AnchorSig::capture(replacement, 2, &Params::default()).unwrap();
+
+    let mut a = app();
+    set_head_blob(&mut a, path, "wholly\nunrelated\nreplacement\ntext");
+    let mut reply = signed_note("r1", path, 2, reply_sig);
+    reply.author = Author::Agent;
+    reply.reply_to = Some("a1".to_string());
+    a.annotations = vec![signed_note("a1", path, 2, parent_sig), reply];
+    a.relocate_annotations();
+
+    assert_eq!(a.annotations[1].scope, AnchorScope::File);
+    assert!(a.orphaned_anchors.contains("r1"));
+}
+
+#[test]
 fn capture_signature_round_trips_through_relocation() {
     let path = "src/alpha.rs";
     let content = "fn x() {\n    let value = lookup(key);\n    return value;\n}";

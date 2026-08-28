@@ -114,16 +114,44 @@ impl App {
         }
     }
 
-    /// The id of the first annotation (store order) anchored to the cursor line —
-    /// the target of reply/edit/delete/status. Multiple-per-line cycling is
-    /// future polish.
+    /// The annotation a cursor-targeted verb (edit/delete/status/reply) acts on.
+    ///
+    /// On an inline comment row that is the comment the row belongs to, so each
+    /// comment in a thread is reachable — every reply shares its parent's anchor,
+    /// so a line scan would always hand back the top-level parent. On a code row
+    /// it is the first annotation (store order) anchored to that line; multiple
+    /// threads per line still cycle no further than the first. `None` on a hunk
+    /// header, expander, or notice.
     pub(crate) fn annotation_id_at_cursor(&self) -> Option<String> {
+        if let Some(a) = self.row_comment_annotation(self.cursor) {
+            return Some(a.id.clone());
+        }
         let path = self.current().display_path().to_string();
         let (old, new) = self.cursor_line_numbers()?;
         self.annotations
             .iter()
             .find(|a| a.file == path && a.scope == AnchorScope::Line && anchor_covers(a, old, new))
             .map(|a| a.id.clone())
+    }
+
+    /// Walk `id` up its `reply_to` chain to the comment the thread hangs off.
+    /// Replies are authored against the thread, not against each other, so the
+    /// reply verb always targets the top-level parent. Bounded by the annotation
+    /// count so a cyclic `reply_to` in a hand-edited store can't loop.
+    pub(crate) fn thread_root(&self, id: &str) -> String {
+        let mut current = id;
+        for _ in 0..self.annotations.len() {
+            let Some(parent) = self
+                .annotations
+                .iter()
+                .find(|a| a.id == current)
+                .and_then(|a| a.reply_to.as_deref())
+            else {
+                break;
+            };
+            current = parent;
+        }
+        current.to_string()
     }
 
     /// Run `f` against the store under the lock, then reload in place. Surfaces a

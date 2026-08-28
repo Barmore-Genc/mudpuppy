@@ -347,6 +347,59 @@ fn replies_thread_and_cancel_hard_deletes() {
 }
 
 #[test]
+fn a_reply_inherits_its_parents_anchor() {
+    let repo = repo_with_changes();
+    let data = tempfile::tempdir().unwrap();
+    let (repo, data) = (repo.path(), data.path());
+
+    let (parent, _, ok) = run(
+        repo,
+        data,
+        &[
+            "agent",
+            "comment",
+            "add",
+            "--file",
+            "a_app.rs",
+            "--line",
+            "7",
+            "--body",
+            "parent body",
+        ],
+    );
+    assert!(ok);
+    let parent = parent.trim().to_string();
+
+    // No `--file`/`--line`: the reply takes the parent's anchor, so it stays in
+    // the thread even after the agent rewrites the code around it.
+    let (_, stderr, ok) = run(
+        repo,
+        data,
+        &[
+            "agent",
+            "comment",
+            "add",
+            "--reply-to",
+            &parent,
+            "--body",
+            "reply body",
+        ],
+    );
+    assert!(ok, "reply without an anchor failed: {stderr}");
+
+    let store = find_store(data).expect("store file written");
+    let v = read_store(&store).unwrap();
+    let reply = &v["annotations"][1];
+    assert_eq!(reply["reply_to"], serde_json::json!(parent));
+    let parent_note = &v["annotations"][0];
+    assert_eq!(reply["file"], parent_note["file"]);
+    assert_eq!(reply["line"], parent_note["line"]);
+    assert_eq!(reply["side"], parent_note["side"]);
+    assert_eq!(reply["scope"], parent_note["scope"]);
+    assert_eq!(reply["signature"], parent_note["signature"]);
+}
+
+#[test]
 fn agent_cannot_cancel_the_users_annotation() {
     let repo = repo_with_changes();
     let data = tempfile::tempdir().unwrap();

@@ -60,7 +60,8 @@ below. Read it first, and trust it over this file if anything here has drifted.
    locate the exact lines a comment points at without re-reading the file; widen
    it with `-A`/`-B`/`--context N` or turn it off with `--context 0` (same flags
    on `comment list`). Read them, adjust your code, reply or resolve (`comment
-   add --reply-to <id>`, `comment resolve --id <id>`), and `wait` again. Loop
+   add --reply-to <id>`, which needs no `--file`/`--line` because a reply sits
+   in its parent's thread, or `comment resolve --id <id>`), and `wait` again. Loop
    until they're satisfied.
 
 ## Surfacing mudpuppy

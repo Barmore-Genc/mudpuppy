@@ -211,6 +211,16 @@ struct BuildKey {
     plan: ViewPlan,
 }
 
+/// A thread parent's post-relocation anchor, copied onto its replies.
+struct ParentAnchor {
+    file: String,
+    line: u32,
+    end_line: Option<u32>,
+    side: Side,
+    scope: AnchorScope,
+    orphaned: bool,
+}
+
 /// The rows for one opened file, plus the row indices where hunks begin (for
 /// `}`/`{` hunk navigation). Built lazily and cached per selected file.
 pub(crate) struct FileView {
@@ -791,11 +801,16 @@ impl App {
     /// original capture, so this recomputes from scratch on every reload. An
     /// annotation whose anchor can't be placed is re-pinned to the whole file
     /// ([`AnchorScope::File`]) rather than left on a stale or wrong line.
+    ///
+    /// Replies are not relocated on their own: a reply belongs to its parent's
+    /// thread, so it adopts wherever the parent landed. A reply written with an
+    /// anchor of its own (the agent CLI has to pass one) would otherwise drift
+    /// away from its thread and render nowhere.
     pub(crate) fn relocate_annotations(&mut self) {
         self.orphaned_anchors.clear();
         let mut anns = std::mem::take(&mut self.annotations);
         for a in &mut anns {
-            if a.scope != AnchorScope::Line {
+            if a.scope != AnchorScope::Line || a.is_reply() {
                 continue;
             }
             let Some(sig) = a.signature.clone() else {
@@ -827,7 +842,49 @@ impl App {
                 }
             }
         }
+        self.adopt_parent_anchors(&mut anns);
         self.annotations = anns;
+    }
+
+    /// Point every reply at its thread parent's (already relocated) anchor, so a
+    /// reply always sits under the comment it answers — whichever process wrote
+    /// it and whatever anchor that process recorded.
+    fn adopt_parent_anchors(&mut self, anns: &mut [Annotation]) {
+        let anchors: HashMap<String, ParentAnchor> = anns
+            .iter()
+            .filter(|a| !a.is_reply())
+            .map(|a| {
+                (
+                    a.id.clone(),
+                    ParentAnchor {
+                        file: a.file.clone(),
+                        line: a.line,
+                        end_line: a.end_line,
+                        side: a.side,
+                        scope: a.scope,
+                        orphaned: self.orphaned_anchors.contains(&a.id),
+                    },
+                )
+            })
+            .collect();
+        for a in anns.iter_mut() {
+            let Some(parent) = a.reply_to.as_deref() else {
+                continue;
+            };
+            // A reply whose parent is missing (or is itself a reply, which the
+            // authoring paths never produce) keeps what it was written with.
+            let Some(anchor) = anchors.get(parent) else {
+                continue;
+            };
+            a.file = anchor.file.clone();
+            a.line = anchor.line;
+            a.end_line = anchor.end_line;
+            a.side = anchor.side;
+            a.scope = anchor.scope;
+            if anchor.orphaned {
+                self.orphaned_anchors.insert(a.id.clone());
+            }
+        }
     }
 
     /// Reconcile synthetic entries with the loaded annotations so files outside

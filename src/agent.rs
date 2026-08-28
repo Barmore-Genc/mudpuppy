@@ -163,6 +163,16 @@ fn trim_trailing_newline(mut s: String) -> String {
     s
 }
 
+/// Where an annotation attaches — the fields a reply inherits from its parent.
+struct Anchor {
+    file: String,
+    line: u32,
+    end_line: Option<u32>,
+    side: Side,
+    scope: AnchorScope,
+    signature: Option<crate::anchor::AnchorSig>,
+}
+
 /// `agent comment add` — create an annotation authored by the agent.
 fn add(args: AddArgs) -> Result<()> {
     // Parse the enum-valued flags up front so a typo fails before we touch disk.
@@ -178,47 +188,83 @@ fn add(args: AddArgs) -> Result<()> {
     } else {
         AnchorScope::Line
     };
-    // Capture a relocation signature for line-scoped notes so the viewer can
-    // follow the line if the file is edited before review. File-scoped notes
-    // have no line to anchor.
-    let signature = (scope == AnchorScope::Line)
-        .then(|| {
-            crate::blob::capture_signature(
-                &session.target,
-                &session.repo_root,
-                &args.file,
-                args.line,
+    // A reply takes its anchor from the parent inside the store lock, so nothing
+    // to capture up front for one.
+    let anchor = match args.reply_to {
+        Some(_) => None,
+        None => {
+            let file = args
+                .file
+                .clone()
+                .context("--file is required (unless --reply-to is given)")?;
+            let line = args
+                .line
+                .context("--line is required (unless --reply-to is given)")?;
+            // Capture a relocation signature for line-scoped notes so the viewer
+            // can follow the line if the file is edited before review.
+            // File-scoped notes have no line to anchor.
+            let signature = (scope == AnchorScope::Line)
+                .then(|| {
+                    crate::blob::capture_signature(
+                        &session.target,
+                        &session.repo_root,
+                        &file,
+                        line,
+                        side,
+                    )
+                })
+                .flatten();
+            Some(Anchor {
+                file,
+                line,
+                end_line: args.end_line,
                 side,
-            )
-        })
-        .flatten();
-    let annotation = Annotation {
-        id: Annotation::new_id(),
-        author: Author::Agent,
-        file: args.file,
-        line: args.line,
-        end_line: args.end_line,
-        side,
-        scope,
-        signature,
-        severity,
-        tag,
-        status: Status::Open,
-        body,
-        reply_to: args.reply_to,
-        created_at: now,
-        updated_at: now,
+                scope,
+                signature,
+            })
+        }
     };
 
     let id = store::update(
         &session.store_path,
         &session.target,
         |s| -> Result<String> {
-            if let Some(parent) = &annotation.reply_to {
-                if s.get(parent).is_none() {
-                    bail!("reply target `{parent}` not found in the store");
+            // A reply is part of its parent's thread, so it inherits the parent's
+            // anchor wholesale rather than carrying one of its own, the same rule
+            // the viewer applies when the user replies.
+            let anchor = match &args.reply_to {
+                Some(parent) => {
+                    let p = s.get(parent).with_context(|| {
+                        format!("reply target `{parent}` not found in the store")
+                    })?;
+                    Anchor {
+                        file: p.file.clone(),
+                        line: p.line,
+                        end_line: p.end_line,
+                        side: p.side,
+                        scope: p.scope,
+                        signature: p.signature.clone(),
+                    }
                 }
-            }
+                None => anchor.expect("a non-reply captured its anchor above"),
+            };
+            let annotation = Annotation {
+                id: Annotation::new_id(),
+                author: Author::Agent,
+                file: anchor.file,
+                line: anchor.line,
+                end_line: anchor.end_line,
+                side: anchor.side,
+                scope: anchor.scope,
+                signature: anchor.signature,
+                severity,
+                tag,
+                status: Status::Open,
+                body,
+                reply_to: args.reply_to,
+                created_at: now,
+                updated_at: now,
+            };
             let id = annotation.id.clone();
             s.upsert(annotation);
             Ok(id)
