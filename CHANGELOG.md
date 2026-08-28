@@ -8,6 +8,35 @@ The release pipeline (cargo-dist) extracts the section matching the tagged
 version and uses it as the GitHub Release notes, so every release needs a
 matching heading here.
 
+## 0.6.0 - 2026-08-28
+
+### Added
+
+- Every modal overlay's keys can now be rebound from your config. The composer,
+  file picker, command palette, prompts, the delete confirmation, and the help
+  overlay each get their own keymap mode (`composer`, `picker`, `palette`,
+  `prompt`, `delete-confirm`, `help`), alongside the existing `tree`, `diff`,
+  and `global` modes. Overlay modes are exclusive, so a stray pane binding can't
+  quit or scroll an overlay, and any key no binding claims still types into the
+  query or composer buffer as before (#76).
+- `mudpuppy config` gathers the configuration docs behind one command:
+  `config where` prints the config path this machine resolves to and whether a
+  file exists there, `config default` prints the built-in keymap verbatim as a
+  starting point to redirect into that path, `config reference` prints the full
+  scripting reference (`help config` still works as an alias), and
+  `config --help` summarizes what can be configured (#76).
+
+### Fixed
+
+- Replies no longer disappear from inline threads in the diff pane. A reply
+  written under another reply now renders in its thread, and a reply added by
+  the agent stays anchored to the comment it answers even after the code around
+  it is edited (#77).
+- `mudpuppy agent comment add --reply-to <id>` no longer requires `--file` and
+  `--line`; a reply takes the anchor of the comment it replies to (#77).
+- With the cursor on a reply, delete, edit, and status-cycle act on that reply
+  instead of the top-level comment of the thread (#77).
+
 ## 0.5.1 - 2026-07-20
 
 ### Fixed
